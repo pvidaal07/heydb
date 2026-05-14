@@ -81,8 +81,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	}
 
 	// Connect to live DB and compute the current hash.
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=10s&readTimeout=30s&writeTimeout=30s",
-		conn.Username, conn.Password, conn.Host, conn.Port, conn.Database)
+	dsn := conn.DSN()
 
 	introspector := mysqlAdapter.New(dsn)
 	if err := introspector.Connect(ctx); err != nil {
