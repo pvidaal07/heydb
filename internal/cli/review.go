@@ -110,7 +110,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	}
 
 	// Drift detected — print to stdout and exit 1.
-	fmt.Fprintln(os.Stderr, "Schema has changed — run `heydb sync` to update heydb.md and heydb.sqlite")
+	fmt.Println("Schema has changed — run `heydb sync` to update heydb.md and heydb.sqlite")
 	os.Exit(1)
 	return nil // unreachable but satisfies the compiler
 }
