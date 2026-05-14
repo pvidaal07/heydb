@@ -1,0 +1,60 @@
+version: 2
+
+project_name: heydb
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: heydb
+    main: ./cmd/heydb
+    binary: heydb
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Exclude windows/arm64 — not commonly needed for CLI tools
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: heydb
+    name_template: "heydb_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "heydb_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: pvidaal07
+    name: heydb
+  draft: false
+  prerelease: auto
+  name_template: "heydb {{ .Version }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
