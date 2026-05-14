@@ -172,6 +172,14 @@ func (s *Server) handleGetTable(ctx context.Context, req mcpgo.CallToolRequest) 
 	return jsonResult(tableToDetail(t))
 }
 
+// searchResultEntry is the response shape for heydb_search, including matched columns.
+type searchResultEntry struct {
+	Name           string   `json:"name"`
+	ColumnCount    int      `json:"column_count"`
+	Comment        string   `json:"comment,omitempty"`
+	MatchedColumns []string `json:"matched_columns,omitempty"`
+}
+
 func (s *Server) handleSearch(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	query, _ := req.GetArguments()["query"].(string)
 	if query == "" {
@@ -183,12 +191,21 @@ func (s *Server) handleSearch(ctx context.Context, req mcpgo.CallToolRequest) (*
 		return mcpgo.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
-	entries := make([]tableListEntry, 0, len(tables))
+	lowerQuery := strings.ToLower(query)
+	entries := make([]searchResultEntry, 0, len(tables))
 	for _, t := range tables {
-		entries = append(entries, tableListEntry{
-			Name:        t.Name,
-			ColumnCount: len(t.Columns),
-			Comment:     t.Comment,
+		var matched []string
+		for _, c := range t.Columns {
+			if strings.Contains(strings.ToLower(c.Name), lowerQuery) ||
+				strings.Contains(strings.ToLower(c.Comment), lowerQuery) {
+				matched = append(matched, c.Name)
+			}
+		}
+		entries = append(entries, searchResultEntry{
+			Name:           t.Name,
+			ColumnCount:    len(t.Columns),
+			Comment:        t.Comment,
+			MatchedColumns: matched,
 		})
 	}
 
