@@ -59,9 +59,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 			conn.Host, conn.Port, conn.Database)
 	}
 
-	// Build DSN.
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=10s&readTimeout=30s&writeTimeout=30s",
-		conn.Username, conn.Password, conn.Host, conn.Port, conn.Database)
+	// Build DSN from connection config (respects per-connection timeout).
+	dsn := conn.DSN()
 
 	// Extract annotations from an existing heydb.md (if any) to preserve them.
 	var annotations map[string]string
