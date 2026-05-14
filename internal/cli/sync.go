@@ -13,6 +13,7 @@ import (
 	mysqlAdapter "github.com/pvidaal07/heydb/internal/adapters/mysql"
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 	"github.com/pvidaal07/heydb/internal/config"
+	"github.com/pvidaal07/heydb/internal/domain/schema"
 	"github.com/pvidaal07/heydb/internal/introspection"
 )
 
@@ -101,8 +102,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer mdFile.Close()
 
+	// Build markdown writer (satisfies introspection.SchemaWriter).
+	var mdOpts *markdown.WriteOptions
+	if len(annotations) > 0 {
+		mdOpts = &markdown.WriteOptions{Annotations: annotations}
+	}
+	mdWriter := &markdownSchemaWriter{w: mdFile, opts: mdOpts}
+
 	// Run sync use-case.
-	syncer := introspection.NewSyncer(introspector, store, mdFile, annotations, Verbose)
+	syncer := introspection.NewSyncer(introspector, store, mdWriter, Verbose)
 	result, err := syncer.Run(ctx, conn.Database)
 	if err != nil {
 		return handleIntrospectionError(err)
@@ -114,6 +122,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  schema_hash:  %s\n", result.Hash[:12]+"...")
 
 	return nil
+}
+
+// markdownSchemaWriter adapts markdown.Write to the introspection.SchemaWriter interface.
+type markdownSchemaWriter struct {
+	w    *os.File
+	opts *markdown.WriteOptions
+}
+
+func (m *markdownSchemaWriter) WriteSchema(s schema.Schema) error {
+	return markdown.Write(m.w, s, m.opts)
 }
 
 // handleIntrospectionError inspects errors from MySQL and returns actionable messages.

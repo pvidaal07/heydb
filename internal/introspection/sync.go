@@ -5,11 +5,9 @@ package introspection
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
-	"github.com/pvidaal07/heydb/internal/adapters/markdown"
 	"github.com/pvidaal07/heydb/internal/domain/ports"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
@@ -24,13 +22,16 @@ type SyncResult struct {
 	Database string
 }
 
-// Syncer runs the sync pipeline: MySQL → domain objects → Markdown + SQLite.
+// SchemaWriter writes a schema to an output (e.g. Markdown file).
+type SchemaWriter interface {
+	WriteSchema(s schema.Schema) error
+}
+
+// Syncer runs the sync pipeline: MySQL → domain objects → SchemaWriter + SQLite.
 type Syncer struct {
 	introspector ports.DBIntrospector
 	store        schemaStoreWriter
-	mdWriter     io.Writer
-	// annotations preserved from a previous heydb.md parse (may be nil)
-	annotations map[string]string
+	writer       SchemaWriter
 	// verbose enables progress messages to stderr
 	verbose bool
 }
@@ -41,20 +42,17 @@ type schemaStoreWriter interface {
 }
 
 // NewSyncer constructs a Syncer.
-// mdWriter is where heydb.md content is written.
-// annotations may be nil (first sync) or populated from parsing an existing heydb.md.
+// writer receives the schema after introspection (e.g. a Markdown writer).
 func NewSyncer(
 	introspector ports.DBIntrospector,
 	store schemaStoreWriter,
-	mdWriter io.Writer,
-	annotations map[string]string,
+	writer SchemaWriter,
 	verbose bool,
 ) *Syncer {
 	return &Syncer{
 		introspector: introspector,
 		store:        store,
-		mdWriter:     mdWriter,
-		annotations:  annotations,
+		writer:       writer,
 		verbose:      verbose,
 	}
 }
@@ -101,13 +99,9 @@ func (s *Syncer) Run(ctx context.Context, databaseName string) (SyncResult, erro
 		return SyncResult{}, fmt.Errorf("sync: save schema to sqlite: %w", err)
 	}
 
-	// 6. Write heydb.md (re-injecting preserved annotation blocks).
-	var opts *markdown.WriteOptions
-	if len(s.annotations) > 0 {
-		opts = &markdown.WriteOptions{Annotations: s.annotations}
-	}
-	if err := markdown.Write(s.mdWriter, sc, opts); err != nil {
-		return SyncResult{}, fmt.Errorf("sync: write markdown: %w", err)
+	// 6. Write schema to output (e.g. heydb.md).
+	if err := s.writer.WriteSchema(sc); err != nil {
+		return SyncResult{}, fmt.Errorf("sync: write schema: %w", err)
 	}
 
 	return SyncResult{
