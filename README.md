@@ -8,36 +8,19 @@ heydb generates a human-readable `heydb.md` and a queryable `heydb.sqlite` from 
 
 ## Install
 
-### Homebrew (macOS / Linux)
-
-```sh
-brew install pvidaal07/tap/heydb
-```
-
-### Pre-built binaries
-
-Download the latest release for your platform from [GitHub Releases](https://github.com/pvidaal07/heydb/releases):
-
-| Platform | Archive |
-|----------|---------|
-| macOS (Apple Silicon) | `heydb_<version>_darwin_arm64.tar.gz` |
-| macOS (Intel) | `heydb_<version>_darwin_amd64.tar.gz` |
-| Linux (x86-64) | `heydb_<version>_linux_amd64.tar.gz` |
-| Linux (ARM64) | `heydb_<version>_linux_arm64.tar.gz` |
-| Windows (x86-64) | `heydb_<version>_windows_amd64.zip` |
-
-Extract and move the binary to a directory in your `$PATH`:
-
-```sh
-tar -xzf heydb_<version>_darwin_arm64.tar.gz
-mv heydb /usr/local/bin/
-```
-
-### Build from source
+Requires [Go 1.21+](https://go.dev/dl/):
 
 ```sh
 go install github.com/pvidaal07/heydb/cmd/heydb@latest
 ```
+
+Make sure `$HOME/go/bin` is in your `$PATH`:
+
+```sh
+export PATH="$PATH:$HOME/go/bin"
+```
+
+To update, run the same `go install` command again.
 
 ---
 
