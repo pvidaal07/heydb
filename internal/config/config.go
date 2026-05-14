@@ -113,6 +113,24 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// DSN returns a go-sql-driver/mysql compatible DSN string for the connection.
+// Timeouts default to 10s connect and 30s read/write if Timeout is 0.
+func (c Connection) DSN() string {
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = 30
+	}
+	connectTimeout := 10
+	if timeout < connectTimeout {
+		connectTimeout = timeout
+	}
+	return fmt.Sprintf(
+		"%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=%ds&readTimeout=%ds&writeTimeout=%ds",
+		c.Username, c.Password, c.Host, c.Port, c.Database,
+		connectTimeout, timeout, timeout,
+	)
+}
+
 // Active returns the active Connection and its name, or an error if none is set
 // or the name does not exist in Connections.
 func (c *Config) Active() (string, Connection, error) {
