@@ -50,14 +50,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[debug] opening heydb.sqlite: %s\n", sqlitePath)
 	}
 
-	// Open the SQLite store in read-only mode.
-	store, err := sqlite.OpenReadOnly(sqlitePath)
+	// Open the SQLite store in read-write mode (annotations need write access).
+	store, err := sqlite.Open(sqlitePath)
 	if err != nil {
 		return fmt.Errorf("serve: open sqlite store: %w", err)
 	}
 	defer store.Close()
 
 	// Start the MCP server (blocking — returns when stdin is closed).
-	mcpSrv := heydbmcp.New(store)
+	mcpSrv := heydbmcp.New(store, store)
 	return mcpSrv.Serve()
 }

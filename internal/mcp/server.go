@@ -23,16 +23,25 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
+// AnnotationStore is the optional interface for reading/writing annotations.
+// When provided, the server exposes the heydb_annotate tool.
+type AnnotationStore interface {
+	SaveAnnotation(ctx context.Context, tableName, content string) error
+	GetAnnotation(ctx context.Context, tableName string) (string, error)
+}
+
 // Server wraps an MCPServer and a SchemaStore.
 type Server struct {
-	store ports.SchemaStore
-	srv   *mcpserver.MCPServer
+	store       ports.SchemaStore
+	annotations AnnotationStore
+	srv         *mcpserver.MCPServer
 }
 
 // New creates a new Server backed by the provided SchemaStore.
 // Call Serve() to start listening on stdio.
-func New(store ports.SchemaStore) *Server {
-	s := &Server{store: store}
+// If annotations is non-nil, the heydb_annotate tool is registered.
+func New(store ports.SchemaStore, annotations AnnotationStore) *Server {
+	s := &Server{store: store, annotations: annotations}
 	s.srv = mcpserver.NewMCPServer("heydb", "0.1.0")
 	s.registerTools()
 	return s
@@ -81,6 +90,25 @@ func (s *Server) registerTools() {
 		),
 		s.handleSearch,
 	)
+
+	// ── heydb_annotate ───────────────────────────────────────────────────────
+	if s.annotations != nil {
+		s.srv.AddTool(
+			mcpgo.NewTool(
+				"heydb_annotate",
+				mcpgo.WithDescription("Add or update a human/AI annotation for a table. Annotations are preserved across heydb sync runs. Use this to document business context, mark tables as legacy, note implicit relationships, or add any context that helps understand the schema."),
+				mcpgo.WithString("table_name",
+					mcpgo.Description("Name of the table to annotate."),
+					mcpgo.Required(),
+				),
+				mcpgo.WithString("annotation",
+					mcpgo.Description("Free-form annotation text. Replaces any existing annotation for this table."),
+					mcpgo.Required(),
+				),
+			),
+			s.handleAnnotate,
+		)
+	}
 }
 
 // ── tool handlers ─────────────────────────────────────────────────────────────
@@ -139,10 +167,11 @@ type fkDetail struct {
 
 // tableDetail is the full response shape for heydb_get_table.
 type tableDetail struct {
-	Name        string        `json:"name"`
-	Engine      string        `json:"engine,omitempty"`
-	Comment     string        `json:"comment,omitempty"`
-	PrimaryKey  []string      `json:"primary_key,omitempty"`
+	Name        string         `json:"name"`
+	Engine      string         `json:"engine,omitempty"`
+	Comment     string         `json:"comment,omitempty"`
+	Annotation  string         `json:"annotation,omitempty"`
+	PrimaryKey  []string       `json:"primary_key,omitempty"`
 	Columns     []columnDetail `json:"columns"`
 	Indexes     []indexDetail  `json:"indexes,omitempty"`
 	ForeignKeys []fkDetail     `json:"foreign_keys,omitempty"`
@@ -169,7 +198,16 @@ func (s *Server) handleGetTable(ctx context.Context, req mcpgo.CallToolRequest) 
 		), nil
 	}
 
-	return jsonResult(tableToDetail(t))
+	detail := tableToDetail(t)
+
+	// Attach annotation if available.
+	if s.annotations != nil {
+		if ann, err := s.annotations.GetAnnotation(ctx, tableName); err == nil && ann != "" {
+			detail.Annotation = ann
+		}
+	}
+
+	return jsonResult(detail)
 }
 
 // searchResultEntry is the response shape for heydb_search, including matched columns.
@@ -210,6 +248,35 @@ func (s *Server) handleSearch(ctx context.Context, req mcpgo.CallToolRequest) (*
 	}
 
 	return jsonResult(entries)
+}
+
+func (s *Server) handleAnnotate(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	tableName, _ := req.GetArguments()["table_name"].(string)
+	annotation, _ := req.GetArguments()["annotation"].(string)
+	if tableName == "" {
+		return mcpgo.NewToolResultError("table_name argument is required"), nil
+	}
+	if annotation == "" {
+		return mcpgo.NewToolResultError("annotation argument is required"), nil
+	}
+
+	// Verify the table exists.
+	if _, err := s.store.GetTable(ctx, tableName); err != nil {
+		names, listErr := s.allTableNames(ctx)
+		if listErr != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("table %q not found", tableName)), nil
+		}
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("table %q not found. Available tables: %s",
+				tableName, strings.Join(names, ", ")),
+		), nil
+	}
+
+	if err := s.annotations.SaveAnnotation(ctx, tableName, annotation); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to save annotation: %v", err)), nil
+	}
+
+	return mcpgo.NewToolResultText(fmt.Sprintf("Annotation saved for table %q", tableName)), nil
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
