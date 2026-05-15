@@ -17,16 +17,17 @@ import (
 type SchemaTab struct {
 	store ports.SchemaStore
 
-	// tables holds the loaded schema tables.
 	tables []schema.Table
 	loaded bool
 
 	// List state.
 	cursor int
 
-	// inDetail is true when showing the detail view for selectedTable.
+	// Detail view state.
 	inDetail      bool
 	selectedTable *schema.Table
+	detailScroll  int // scroll offset within the detail view
+	detailLines   int // total rendered lines in detail
 
 	width, height int
 }
@@ -52,7 +53,6 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case tui.StoreOpenedMsg:
-		// Receive a new store (or nil to clear).
 		if s.store != nil {
 			_ = s.store.Close()
 		}
@@ -61,6 +61,7 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.tables = nil
 		s.inDetail = false
 		s.selectedTable = nil
+		s.detailScroll = 0
 		s.cursor = 0
 		if s.store != nil {
 			s = s.loadSchema()
@@ -68,8 +69,6 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case tui.ConfigReloadedMsg:
-		// Connection changed — clear the store and schema data. The root model
-		// will send a StoreOpenedMsg with the new store.
 		if s.store != nil {
 			_ = s.store.Close()
 		}
@@ -78,6 +77,7 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.tables = nil
 		s.inDetail = false
 		s.selectedTable = nil
+		s.detailScroll = 0
 		s.cursor = 0
 		return s, nil
 
@@ -106,17 +106,42 @@ func (s SchemaTab) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			t := s.tables[s.cursor]
 			s.selectedTable = &t
 			s.inDetail = true
+			s.detailScroll = 0
 		}
 	}
 	return s, nil
 }
 
 func (s SchemaTab) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyEsc {
+	switch {
+	case msg.Type == tea.KeyEsc:
 		s.inDetail = false
 		s.selectedTable = nil
+		s.detailScroll = 0
+	case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
+		if s.detailScroll > 0 {
+			s.detailScroll--
+		}
+	case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
+		maxScroll := s.detailLines - s.viewportHeight()
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if s.detailScroll < maxScroll {
+			s.detailScroll++
+		}
 	}
 	return s, nil
+}
+
+// viewportHeight returns available lines for the detail content.
+func (s SchemaTab) viewportHeight() int {
+	// Reserve space for header area in the root model (logo, tabs, status, help).
+	h := s.height - 2
+	if h < 5 {
+		h = 5
+	}
+	return h
 }
 
 func (s SchemaTab) View() string {
@@ -146,7 +171,26 @@ func (s *SchemaTab) renderList() string {
 	b.WriteString(tui.HeadingStyle.Render("Tables"))
 	b.WriteString("\n\n")
 
-	for i, t := range s.tables {
+	// Viewport scroll for table list.
+	visible := s.viewportHeight() - 3 // heading + blank + help
+	if visible < 1 {
+		visible = len(s.tables)
+	}
+
+	start := 0
+	if s.cursor >= start+visible {
+		start = s.cursor - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + visible
+	if end > len(s.tables) {
+		end = len(s.tables)
+	}
+
+	for i := start; i < end; i++ {
+		t := s.tables[i]
 		colCount := len(t.Columns)
 		desc := fmt.Sprintf("%d column", colCount)
 		if colCount != 1 {
@@ -165,29 +209,32 @@ func (s *SchemaTab) renderList() string {
 		b.WriteString("\n")
 	}
 
+	if len(s.tables) > visible {
+		b.WriteString("\n")
+		b.WriteString(tui.SubtextStyle.Render(fmt.Sprintf("  showing %d–%d of %d tables", start+1, end, len(s.tables))))
+	}
+
 	return b.String()
 }
 
 func (s *SchemaTab) renderDetail() string {
 	t := s.selectedTable
-	var b strings.Builder
 
-	b.WriteString(tui.TitleStyle.Render(t.Name))
-	b.WriteString("\n\n")
+	// Build full content first, then apply scroll viewport.
+	var lines []string
 
-	// Columns section.
-	b.WriteString(tui.HeadingStyle.Render("Columns"))
-	b.WriteString("\n")
+	lines = append(lines, tui.TitleStyle.Render(t.Name))
+	lines = append(lines, "")
+
+	// Columns.
+	lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Columns (%d)", len(t.Columns))))
 	if len(t.Columns) == 0 {
-		b.WriteString(tui.SubtextStyle.Render("  (none)"))
-		b.WriteString("\n")
+		lines = append(lines, tui.SubtextStyle.Render("  (none)"))
 	} else {
 		for _, c := range t.Columns {
-			nullable := ""
+			nullable := " NOT NULL"
 			if c.Nullable {
 				nullable = " NULL"
-			} else {
-				nullable = " NOT NULL"
 			}
 			extra := ""
 			if c.Extra != "" {
@@ -198,51 +245,73 @@ func (s *SchemaTab) renderDetail() string {
 				comment = " — " + c.Comment
 			}
 			line := fmt.Sprintf("  %-20s %s%s%s%s", c.Name, c.Type, nullable, extra, comment)
-			b.WriteString(tui.UnselectedStyle.Render(line))
-			b.WriteString("\n")
+			lines = append(lines, tui.UnselectedStyle.Render(line))
 		}
 	}
 
-	// Indexes section.
+	// Indexes.
 	if len(t.Indexes) > 0 {
-		b.WriteString("\n")
-		b.WriteString(tui.HeadingStyle.Render("Indexes"))
-		b.WriteString("\n")
+		lines = append(lines, "")
+		lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Indexes (%d)", len(t.Indexes))))
 		for _, idx := range t.Indexes {
 			unique := ""
 			if idx.Unique {
 				unique = " UNIQUE"
 			}
 			line := fmt.Sprintf("  %-20s %s%s (%s)", idx.Name, idx.Type, unique, strings.Join(idx.Columns, ", "))
-			b.WriteString(tui.SubtextStyle.Render(line))
-			b.WriteString("\n")
+			lines = append(lines, tui.SubtextStyle.Render(line))
 		}
 	}
 
-	// Foreign keys section.
+	// Foreign keys.
 	if len(t.ForeignKeys) > 0 {
-		b.WriteString("\n")
-		b.WriteString(tui.HeadingStyle.Render("Foreign Keys"))
-		b.WriteString("\n")
+		lines = append(lines, "")
+		lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Foreign Keys (%d)", len(t.ForeignKeys))))
 		for _, fk := range t.ForeignKeys {
 			line := fmt.Sprintf("  %-20s %s → %s(%s)", fk.Name, fk.Column, fk.ReferencedTable, fk.ReferencedColumn)
-			b.WriteString(tui.SubtextStyle.Render(line))
-			b.WriteString("\n")
+			lines = append(lines, tui.SubtextStyle.Render(line))
 		}
 	}
 
-	// Help hint.
-	b.WriteString("\n")
-	b.WriteString(tui.HelpStyle.Render("Esc: back to list"))
+	lines = append(lines, "")
+	lines = append(lines, tui.HelpStyle.Render("j/k: scroll  Esc: back to list"))
+
+	// Store total lines for scroll bounds.
+	s.detailLines = len(lines)
+
+	// Apply scroll viewport.
+	vpHeight := s.viewportHeight()
+	start := s.detailScroll
+	if start >= len(lines) {
+		start = max(0, len(lines)-1)
+	}
+	end := start + vpHeight
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	visible := lines[start:end]
+
+	// Scroll indicator.
+	if s.detailLines > vpHeight {
+		scrollPct := 0
+		maxScroll := s.detailLines - vpHeight
+		if maxScroll > 0 {
+			scrollPct = (s.detailScroll * 100) / maxScroll
+		}
+		indicator := tui.SubtextStyle.Render(fmt.Sprintf("  [scroll %d%%]", scrollPct))
+		visible = append(visible, indicator)
+	}
+
+	content := strings.Join(visible, "\n")
 
 	detailW := s.width - 4
 	if detailW < 20 {
 		detailW = 60
 	}
-	return lipgloss.NewStyle().Width(detailW).Render(b.String())
+	return lipgloss.NewStyle().Width(detailW).Render(content)
 }
 
-// loadSchema calls store.LoadSchema and populates s.tables. Returns updated s.
 func (s SchemaTab) loadSchema() SchemaTab {
 	sc, err := s.store.LoadSchema(context.Background())
 	if err == nil {

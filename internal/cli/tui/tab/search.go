@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/pvidaal07/heydb/internal/cli/tui"
 	"github.com/pvidaal07/heydb/internal/domain/ports"
@@ -14,15 +14,21 @@ import (
 )
 
 // SearchTab provides keyword search across table and column names.
+// It has two modes:
+//   - input mode: textinput is focused, typing works, Enter executes search
+//   - results mode: textinput is blurred, j/k navigates results, Enter goes to
+//     schema tab, Esc returns to input mode for a new search
 type SearchTab struct {
 	store   ports.SchemaStore
 	input   textinput.Model
 	results []schema.Table
 	cursor  int
 
-	// hasSearched is true when the user has pressed Enter at least once.
 	hasSearched bool
 	lastQuery   string
+
+	// browsing is true when viewing results (input blurred).
+	browsing bool
 
 	width, height int
 }
@@ -36,7 +42,7 @@ func NewSearchTab() SearchTab {
 }
 
 func (s SearchTab) Title() string     { return "Search" }
-func (s SearchTab) ShortHelp() string { return "enter: search / select  j/k: navigate" }
+func (s SearchTab) ShortHelp() string { return "enter: search / select  esc: new search" }
 
 func (s SearchTab) Init() tea.Cmd {
 	return textinput.Blink
@@ -51,53 +57,88 @@ func (s SearchTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tui.StoreOpenedMsg:
 		s.store = msg.Store
-		// Reset search state when connection changes.
 		s.results = nil
 		s.hasSearched = false
 		s.lastQuery = ""
 		s.cursor = 0
+		s.browsing = false
 		s.input.SetValue("")
+		s.input.Focus()
 		return s, nil
 
 	case tui.ConfigReloadedMsg:
-		// Connection changed — clear store; root model will send StoreOpenedMsg.
 		s.store = nil
 		s.results = nil
 		s.hasSearched = false
 		s.lastQuery = ""
 		s.cursor = 0
+		s.browsing = false
 		s.input.SetValue("")
+		s.input.Focus()
 		return s, nil
 
 	case tea.KeyMsg:
-		switch {
-		case msg.Type == tea.KeyEnter:
-			// If we have search results showing, Enter on a result navigates to Schema tab.
-			if s.hasSearched && len(s.results) > 0 {
-				// Navigate to Schema tab (index 1).
-				return s, func() tea.Msg { return tui.SwitchTabMsg{Index: 1} }
-			}
-			// Otherwise execute the search.
-			return s.executeSearch()
-
-		case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
-			if s.cursor > 0 {
-				s.cursor--
-			}
-			return s, nil
-
-		case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
-			if s.cursor < len(s.results)-1 {
-				s.cursor++
-			}
-			return s, nil
+		if s.browsing {
+			return s.updateBrowsing(msg)
 		}
+		return s.updateInput(msg)
 	}
 
-	// Delegate remaining keys to the text input.
+	// Delegate remaining messages to the text input.
 	var cmd tea.Cmd
 	s.input, cmd = s.input.Update(msg)
 	return s, cmd
+}
+
+// updateInput handles keys when the text input is focused.
+func (s SearchTab) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEnter {
+		return s.executeSearch()
+	}
+
+	// Let textinput handle everything else (typing, backspace, etc.).
+	var cmd tea.Cmd
+	s.input, cmd = s.input.Update(msg)
+	return s, cmd
+}
+
+// updateBrowsing handles keys when navigating search results.
+func (s SearchTab) updateBrowsing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc:
+		// Back to input mode for a new search.
+		s.browsing = false
+		s.input.Focus()
+		return s, nil
+
+	case msg.Type == tea.KeyEnter:
+		if len(s.results) > 0 {
+			return s, func() tea.Msg { return tui.SwitchTabMsg{Index: 1} }
+		}
+		return s, nil
+
+	case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
+		if s.cursor > 0 {
+			s.cursor--
+		}
+		return s, nil
+
+	case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
+		if s.cursor < len(s.results)-1 {
+			s.cursor++
+		}
+		return s, nil
+
+	case msg.Type == tea.KeyRunes:
+		// Any other typing — switch back to input mode and forward the key.
+		s.browsing = false
+		s.input.Focus()
+		var cmd tea.Cmd
+		s.input, cmd = s.input.Update(msg)
+		return s, cmd
+	}
+
+	return s, nil
 }
 
 func (s SearchTab) View() string {
@@ -130,7 +171,6 @@ func (s SearchTab) View() string {
 	b.WriteString("\n\n")
 
 	for i, t := range s.results {
-		// Collect matching column names for display.
 		var matchingCols []string
 		for _, c := range t.Columns {
 			if strings.Contains(strings.ToLower(c.Name), strings.ToLower(s.lastQuery)) {
@@ -140,10 +180,10 @@ func (s SearchTab) View() string {
 
 		colHint := ""
 		if len(matchingCols) > 0 {
-			colHint = " — cols: " + strings.Join(matchingCols, ", ")
+			colHint = "cols: " + strings.Join(matchingCols, ", ")
 		}
 
-		if i == s.cursor {
+		if i == s.cursor && s.browsing {
 			b.WriteString(tui.SelectedStyle.Render(tui.Cursor + t.Name))
 			b.WriteString("\n")
 			if colHint != "" {
@@ -161,7 +201,11 @@ func (s SearchTab) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(tui.HelpStyle.Render("Enter: go to Schema tab"))
+	if s.browsing {
+		b.WriteString(tui.HelpStyle.Render("Enter: go to Schema tab  Esc: new search  j/k: navigate"))
+	} else {
+		b.WriteString(tui.HelpStyle.Render("j/k: browse results  Enter: search again  Esc: clear"))
+	}
 
 	return b.String()
 }
@@ -187,5 +231,12 @@ func (s SearchTab) executeSearch() (tea.Model, tea.Cmd) {
 		return s, nil
 	}
 	s.results = results
+
+	// If we got results, switch to browsing mode.
+	if len(results) > 0 {
+		s.browsing = true
+		s.input.Blur()
+	}
+
 	return s, nil
 }
