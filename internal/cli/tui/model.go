@@ -25,10 +25,6 @@ type Model struct {
 }
 
 // New creates a root Model with all three tabs initialized.
-// Tabs are created in import order: Connections (0), Schema (1), Search (2).
-// The actual tab constructors are injected after the tab sub-package is ready;
-// this constructor is called from tui_cmd.go via a factory function registered
-// by each tab package's init().
 func New(cfg *config.Config, cfgPath, version string) Model {
 	return Model{
 		cfg:     cfg,
@@ -37,8 +33,7 @@ func New(cfg *config.Config, cfgPath, version string) Model {
 	}
 }
 
-// WithTabs sets the tabs slice on the model. Called by the factory registered
-// in tui_cmd.go so that the tab sub-package can be imported without a cycle.
+// WithTabs sets the tabs slice on the model.
 func (m Model) WithTabs(tabs []Tab) Model {
 	m.tabs = tabs
 	return m
@@ -67,7 +62,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m.fanOut(msg)
+		// Adjust inner dimensions for frame padding and border.
+		innerW := msg.Width - 6 // 2 border + 2*2 padding
+		innerH := msg.Height - 4
+		if innerW < 0 {
+			innerW = 0
+		}
+		if innerH < 0 {
+			innerH = 0
+		}
+		innerMsg := tea.WindowSizeMsg{Width: innerW, Height: innerH}
+		return m.fanOut(innerMsg)
 
 	case tea.KeyMsg:
 		switch {
@@ -78,7 +83,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.tabs) == 0 {
 				return m, tea.Quit
 			}
-			// Let the active tab decide first; if no overlay is active, quit.
 			updated, cmd := m.tabs[m.activeTab].Update(msg)
 			m.tabs[m.activeTab] = updated.(Tab)
 			if cmd != nil {
@@ -131,7 +135,7 @@ func (m Model) fanOut(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// View renders the full TUI: tab bar, active tab content, and status bar.
+// View renders the full TUI: logo, tab bar, active tab content, and status bar.
 func (m Model) View() string {
 	if m.width < minWidth {
 		return NarrowWarningStyle.Render(
@@ -140,17 +144,37 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(m.renderTabBar())
-	b.WriteString("\n")
 
+	// Logo + tagline.
+	b.WriteString(RenderLogo())
+	b.WriteString("\n")
+	b.WriteString(SubtextStyle.Render(fmt.Sprintf("Database schema navigator — v%s", m.version)))
+	b.WriteString("\n\n")
+
+	// Tab bar.
+	b.WriteString(m.renderTabBar())
+	b.WriteString("\n\n")
+
+	// Active tab content.
 	if len(m.tabs) > 0 {
 		b.WriteString(m.tabs[m.activeTab].View())
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.renderStatusBar())
+	b.WriteString("\n\n")
 
-	return b.String()
+	// Status bar.
+	b.WriteString(m.renderStatusBar())
+	b.WriteString("\n")
+
+	// Help line.
+	b.WriteString(HelpStyle.Render("Tab/Shift+Tab: switch tabs • j/k: navigate • enter: select • q: quit"))
+
+	// Wrap everything in the frame.
+	innerWidth := m.width - 6
+	if innerWidth < 0 {
+		innerWidth = 0
+	}
+	return FrameStyle.Width(m.width - 2).Render(b.String())
 }
 
 func (m Model) renderTabBar() string {
@@ -166,22 +190,10 @@ func (m Model) renderTabBar() string {
 }
 
 func (m Model) renderStatusBar() string {
-	activeConn := "no active connection"
+	activeConn := SubtextStyle.Render("no active connection")
 	if m.cfg != nil && m.cfg.ActiveConnection != "" {
-		activeConn = m.cfg.ActiveConnection
+		activeConn = StatusBarHighlight.Render(m.cfg.ActiveConnection)
 	}
 
-	left := StatusBarHighlight.Render(activeConn)
-	right := StatusBarStyle.Render(fmt.Sprintf("heydb %s", m.version))
-
-	if m.width > 0 {
-		gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-		if gap > 0 {
-			left = StatusBarStyle.Render(activeConn)
-			bar := left + strings.Repeat(" ", gap) + right
-			return StatusBarStyle.Width(m.width).Render(bar)
-		}
-	}
-
-	return StatusBarStyle.Render(fmt.Sprintf("%s  %s", activeConn, m.version))
+	return StatusBarStyle.Render(fmt.Sprintf("connection: %s", activeConn))
 }

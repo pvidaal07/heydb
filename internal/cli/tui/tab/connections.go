@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -15,50 +14,34 @@ import (
 	"github.com/pvidaal07/heydb/internal/config"
 )
 
-// connItem is a list.Item representing one connection.
-type connItem struct {
-	name   string
-	conn   config.Connection
-	active bool
-}
-
-func (c connItem) FilterValue() string { return c.name }
-func (c connItem) Title() string {
-	if c.active {
-		return "* " + c.name
-	}
-	return "  " + c.name
-}
-func (c connItem) Description() string {
-	return fmt.Sprintf("%s:%d / %s", c.conn.Host, c.conn.Port, c.conn.Database)
-}
-
-// confirmOverlay tracks the delete-confirmation state.
-type confirmOverlay struct {
-	targetName string
-	confirmed  bool
-	form       *huh.Form
-}
-
 // ConnectionsTab shows the list of configured connections, a detail panel for
 // the selected one, and inline huh forms for add/edit/delete.
 type ConnectionsTab struct {
 	cfg     *config.Config
 	cfgPath string
-	list    list.Model
+
+	// Custom list state (no bubbles/list — simpler, matches gentle-ai style).
+	names    []string
+	cursor   int
+	scrollOff int
 
 	// formOverlay is non-nil when add or edit form is open.
 	formOverlay *huh.Form
-	editingName string // empty = adding; non-empty = editing this connection name
+	editingName string
 
 	// deleteOverlay is non-nil when showing delete confirmation.
 	deleteOverlay *confirmOverlay
 
-	// form field bindings (reused across add/edit).
+	// form field bindings.
 	fname, fhost, fport, fdatabase, fusername, fpassword string
 	ftimeout                                              string
 
 	width, height int
+}
+
+type confirmOverlay struct {
+	targetName string
+	form       *huh.Form
 }
 
 // NewConnectionsTab creates a ConnectionsTab populated from cfg.
@@ -67,17 +50,16 @@ func NewConnectionsTab(cfg *config.Config, cfgPath string) ConnectionsTab {
 		cfg:     cfg,
 		cfgPath: cfgPath,
 	}
-	ct.list = ct.buildList(80, 20)
+	ct.refreshNames()
 	return ct
 }
 
 func (c ConnectionsTab) Title() string     { return "Connections" }
-func (c ConnectionsTab) ShortHelp() string { return "a=add  e=edit  d=delete  Enter=switch" }
+func (c ConnectionsTab) ShortHelp() string { return "a: add  e: edit  d: delete  enter: switch" }
 
 func (c ConnectionsTab) Init() tea.Cmd { return nil }
 
 func (c ConnectionsTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// If a form overlay is open, route all input there first.
 	if c.formOverlay != nil {
 		return c.updateForm(msg)
 	}
@@ -89,15 +71,22 @@ func (c ConnectionsTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		c.width = msg.Width
 		c.height = msg.Height
-		listW := c.listWidth()
-		c.list.SetWidth(listW)
-		c.list.SetHeight(c.height - 4)
 		return c, nil
 
 	case tea.KeyMsg:
 		switch {
 		case msg.Type == tea.KeyEnter:
 			return c.handleEnter()
+		case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
+			if c.cursor > 0 {
+				c.cursor--
+			}
+			return c, nil
+		case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
+			if c.cursor < len(c.names)-1 {
+				c.cursor++
+			}
+			return c, nil
 		case msg.Type == tea.KeyRunes:
 			switch string(msg.Runes) {
 			case "a":
@@ -107,21 +96,18 @@ func (c ConnectionsTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "d":
 				return c.openDeleteOverlay()
 			}
-		case msg.Type == tea.KeyEsc:
-			// Nothing to dismiss at top level.
-			return c, nil
 		}
 
 	case tui.ConfigReloadedMsg:
 		c.cfg = msg.Cfg
-		c.list = c.buildList(c.width, c.height-4)
+		c.refreshNames()
+		if c.cursor >= len(c.names) {
+			c.cursor = max(0, len(c.names)-1)
+		}
 		return c, nil
 	}
 
-	// Delegate to list.
-	var cmd tea.Cmd
-	c.list, cmd = c.list.Update(msg)
-	return c, cmd
+	return c, nil
 }
 
 func (c ConnectionsTab) View() string {
@@ -132,31 +118,92 @@ func (c ConnectionsTab) View() string {
 		return c.deleteOverlay.form.View()
 	}
 
-	if len(c.cfg.Connections) == 0 {
-		return "No connections configured. Press a to add one.\n"
+	if len(c.names) == 0 {
+		return tui.EmptyStateStyle.Render("No connections configured. Press a to add one.")
 	}
 
-	left := c.list.View()
-
-	// Detail panel for the selected item.
-	selected := c.list.SelectedItem()
-	if selected == nil {
-		return left
-	}
-	item, ok := selected.(connItem)
-	if !ok {
-		return left
-	}
-
-	detail := c.renderDetail(item)
+	left := c.renderList()
+	detail := c.renderDetail()
 
 	listW := c.listWidth()
-	detailW := c.width - listW - 2
-	if detailW < 10 {
+	detailW := c.width - listW - 4
+	if detailW < 20 {
 		return left
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", lipgloss.NewStyle().Width(detailW).Render(detail))
+	leftStyled := lipgloss.NewStyle().Width(listW).Render(left)
+	detailStyled := tui.DetailPanelStyle.Width(detailW).Render(detail)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftStyled, "  ", detailStyled)
+}
+
+// ── rendering ────────────────────────────────────────────────────────────────
+
+func (c *ConnectionsTab) renderList() string {
+	var b strings.Builder
+	b.WriteString(tui.HeadingStyle.Render("Connections"))
+	b.WriteString("\n\n")
+
+	for i, name := range c.names {
+		isActive := name == c.cfg.ActiveConnection
+		conn := c.cfg.Connections[name]
+		desc := fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
+
+		if i == c.cursor {
+			label := name
+			if isActive {
+				label = name + " " + tui.SuccessStyle.Render("(active)")
+			}
+			b.WriteString(tui.SelectedStyle.Render(tui.Cursor + label))
+			b.WriteString("\n")
+			b.WriteString(tui.SubtextStyle.Render("    " + desc))
+		} else {
+			label := name
+			if isActive {
+				label = name + " " + tui.SuccessStyle.Render("(active)")
+			}
+			b.WriteString(tui.UnselectedStyle.Render("  " + label))
+			b.WriteString("\n")
+			b.WriteString(tui.SubtextStyle.Render("    " + desc))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (c *ConnectionsTab) renderDetail() string {
+	if c.cursor >= len(c.names) {
+		return ""
+	}
+
+	name := c.names[c.cursor]
+	conn := c.cfg.Connections[name]
+	timeout := conn.Timeout
+	if timeout == 0 {
+		timeout = 30
+	}
+
+	var b strings.Builder
+	b.WriteString(tui.TitleStyle.Render(name))
+	b.WriteString("\n\n")
+	b.WriteString(c.detailRow("Host", fmt.Sprintf("%s:%d", conn.Host, conn.Port)))
+	b.WriteString(c.detailRow("Database", conn.Database))
+	b.WriteString(c.detailRow("Username", conn.Username))
+	b.WriteString(c.detailRow("Password", "****"))
+	b.WriteString(c.detailRow("Timeout", fmt.Sprintf("%ds", timeout)))
+
+	if name == c.cfg.ActiveConnection {
+		b.WriteString("\n")
+		b.WriteString(tui.SuccessStyle.Render("Active connection"))
+	}
+
+	return b.String()
+}
+
+func (c *ConnectionsTab) detailRow(label, value string) string {
+	return tui.DetailLabelStyle.Render(fmt.Sprintf("%-10s", label)) + " " +
+		tui.DetailValueStyle.Render(value) + "\n"
 }
 
 // ── internal helpers ─────────────────────────────────────────────────────────
@@ -168,78 +215,31 @@ func (c *ConnectionsTab) listWidth() int {
 	return c.width / 2
 }
 
-func (c *ConnectionsTab) buildList(width, height int) list.Model {
-	items := c.toListItems()
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
-	l := list.New(items, delegate, width/2, height)
-	l.Title = "Connections"
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
-	l.SetShowHelp(false)
-	l.DisableQuitKeybindings()
-	return l
-}
-
-func (c *ConnectionsTab) toListItems() []list.Item {
-	names := make([]string, 0, len(c.cfg.Connections))
+func (c *ConnectionsTab) refreshNames() {
+	c.names = make([]string, 0, len(c.cfg.Connections))
 	for n := range c.cfg.Connections {
-		names = append(names, n)
+		c.names = append(c.names, n)
 	}
-	sort.Strings(names)
-
-	items := make([]list.Item, len(names))
-	for i, n := range names {
-		items[i] = connItem{
-			name:   n,
-			conn:   c.cfg.Connections[n],
-			active: n == c.cfg.ActiveConnection,
-		}
-	}
-	return items
+	sort.Strings(c.names)
 }
 
-func (c *ConnectionsTab) renderDetail(item connItem) string {
-	conn := item.conn
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Name:     %s\n", item.name))
-	b.WriteString(fmt.Sprintf("Host:     %s:%d\n", conn.Host, conn.Port))
-	b.WriteString(fmt.Sprintf("Database: %s\n", conn.Database))
-	b.WriteString(fmt.Sprintf("Username: %s\n", conn.Username))
-	b.WriteString("Password: ****\n")
-	timeout := conn.Timeout
-	if timeout == 0 {
-		timeout = 30
-	}
-	b.WriteString(fmt.Sprintf("Timeout:  %ds\n", timeout))
-	return b.String()
-}
-
-// handleEnter switches the active connection to the selected item.
 func (c ConnectionsTab) handleEnter() (tea.Model, tea.Cmd) {
-	selected := c.list.SelectedItem()
-	if selected == nil {
+	if c.cursor >= len(c.names) {
 		return c, nil
 	}
-	item, ok := selected.(connItem)
-	if !ok {
-		return c, nil
-	}
-	if item.name == c.cfg.ActiveConnection {
+	name := c.names[c.cursor]
+	if name == c.cfg.ActiveConnection {
 		return c, nil
 	}
 
-	c.cfg.ActiveConnection = item.name
+	c.cfg.ActiveConnection = name
 	_ = config.Save(c.cfgPath, c.cfg)
-
-	// Rebuild list with updated active marker.
-	c.list = c.buildList(c.width, c.height-4)
+	c.refreshNames()
 
 	newCfg := c.cfg
 	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
 }
 
-// openAddForm opens a blank huh form to add a new connection.
 func (c ConnectionsTab) openAddForm() (tea.Model, tea.Cmd) {
 	c.editingName = ""
 	c.fname = ""
@@ -254,25 +254,21 @@ func (c ConnectionsTab) openAddForm() (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// openEditForm opens a huh form pre-filled with the selected connection.
 func (c ConnectionsTab) openEditForm() (tea.Model, tea.Cmd) {
-	selected := c.list.SelectedItem()
-	if selected == nil {
+	if c.cursor >= len(c.names) {
 		return c, nil
 	}
-	item, ok := selected.(connItem)
-	if !ok {
-		return c, nil
-	}
+	name := c.names[c.cursor]
+	conn := c.cfg.Connections[name]
 
-	c.editingName = item.name
-	c.fname = item.name
-	c.fhost = item.conn.Host
-	c.fport = strconv.Itoa(item.conn.Port)
-	c.fdatabase = item.conn.Database
-	c.fusername = item.conn.Username
+	c.editingName = name
+	c.fname = name
+	c.fhost = conn.Host
+	c.fport = strconv.Itoa(conn.Port)
+	c.fdatabase = conn.Database
+	c.fusername = conn.Username
 	c.fpassword = "****"
-	timeout := item.conn.Timeout
+	timeout := conn.Timeout
 	if timeout == 0 {
 		timeout = 30
 	}
@@ -282,37 +278,30 @@ func (c ConnectionsTab) openEditForm() (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// openDeleteOverlay shows the delete confirmation form.
 func (c ConnectionsTab) openDeleteOverlay() (tea.Model, tea.Cmd) {
-	selected := c.list.SelectedItem()
-	if selected == nil {
+	if c.cursor >= len(c.names) {
 		return c, nil
 	}
-	item, ok := selected.(connItem)
-	if !ok {
-		return c, nil
-	}
+	name := c.names[c.cursor]
 
 	confirmed := false
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Delete connection %q?", item.name)).
+				Title(fmt.Sprintf("Delete connection %q?", name)).
 				Description("This cannot be undone.").
 				Value(&confirmed),
 		),
 	)
 
 	c.deleteOverlay = &confirmOverlay{
-		targetName: item.name,
-		confirmed:  confirmed,
+		targetName: name,
 		form:       form,
 	}
 	cmd := form.Init()
 	return c, cmd
 }
 
-// buildForm creates the huh form for add or edit.
 func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 	nameField := huh.NewInput().
 		Title("Connection name").
@@ -344,7 +333,7 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 				Validate(func(s string) error {
 					p, err := strconv.Atoi(strings.TrimSpace(s))
 					if err != nil || p < 1 || p > 65535 {
-						return fmt.Errorf("port must be 1–65535")
+						return fmt.Errorf("port must be 1-65535")
 					}
 					return nil
 				}).
@@ -388,7 +377,6 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 	)
 }
 
-// updateForm routes messages to the active huh form overlay.
 func (c ConnectionsTab) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.KeyMsg); ok && msg.Type == tea.KeyEsc {
 		c.formOverlay = nil
@@ -413,7 +401,6 @@ func (c ConnectionsTab) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// commitForm persists the form data and broadcasts ConfigReloadedMsg.
 func (c ConnectionsTab) commitForm() (tea.Model, tea.Cmd) {
 	port, _ := strconv.Atoi(strings.TrimSpace(c.fport))
 	timeout, _ := strconv.Atoi(strings.TrimSpace(c.ftimeout))
@@ -426,7 +413,6 @@ func (c ConnectionsTab) commitForm() (tea.Model, tea.Cmd) {
 
 	password := c.fpassword
 	if c.editingName != "" && password == "****" {
-		// User did not change the password; keep the existing one.
 		if existing, ok := c.cfg.Connections[c.editingName]; ok {
 			password = existing.Password
 		}
@@ -444,7 +430,6 @@ func (c ConnectionsTab) commitForm() (tea.Model, tea.Cmd) {
 
 	name := strings.TrimSpace(c.fname)
 	if c.editingName != "" && c.editingName != name {
-		// Renamed — remove old key.
 		delete(c.cfg.Connections, c.editingName)
 		if c.cfg.ActiveConnection == c.editingName {
 			c.cfg.ActiveConnection = name
@@ -459,13 +444,12 @@ func (c ConnectionsTab) commitForm() (tea.Model, tea.Cmd) {
 
 	c.formOverlay = nil
 	c.editingName = ""
-	c.list = c.buildList(c.width, c.height-4)
+	c.refreshNames()
 
 	newCfg := c.cfg
 	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
 }
 
-// updateDelete routes messages to the delete-confirmation form.
 func (c ConnectionsTab) updateDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.KeyMsg); ok && msg.Type == tea.KeyEsc {
 		c.deleteOverlay = nil
@@ -488,7 +472,6 @@ func (c ConnectionsTab) updateDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
-// commitDelete removes the connection if the user confirmed.
 func (c ConnectionsTab) commitDelete() (tea.Model, tea.Cmd) {
 	targetName := c.deleteOverlay.targetName
 	c.deleteOverlay = nil
@@ -499,7 +482,10 @@ func (c ConnectionsTab) commitDelete() (tea.Model, tea.Cmd) {
 	}
 
 	_ = config.Save(c.cfgPath, c.cfg)
-	c.list = c.buildList(c.width, c.height-4)
+	c.refreshNames()
+	if c.cursor >= len(c.names) {
+		c.cursor = max(0, len(c.names)-1)
+	}
 
 	newCfg := c.cfg
 	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
