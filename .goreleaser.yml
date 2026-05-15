@@ -57,6 +57,12 @@ homebrew_casks:
     homepage: "https://github.com/pvidaal07/heydb"
     description: "Introspect MySQL schemas and serve them to AI agents via MCP"
     license: "MIT"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/heydb"]
+          end
 
 changelog:
   sort: asc
