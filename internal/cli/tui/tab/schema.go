@@ -107,6 +107,7 @@ func (s SchemaTab) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.selectedTable = &t
 			s.inDetail = true
 			s.detailScroll = 0
+			s.detailLines = s.countDetailLines()
 		}
 	}
 	return s, nil
@@ -134,14 +135,35 @@ func (s SchemaTab) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return s, nil
 }
 
-// viewportHeight returns available lines for the detail content.
+// viewportHeight returns available lines for content.
 func (s SchemaTab) viewportHeight() int {
-	// Reserve space for header area in the root model (logo, tabs, status, help).
-	h := s.height - 2
-	if h < 5 {
-		h = 5
+	if s.height < 5 {
+		return 5
 	}
-	return h
+	return s.height
+}
+
+// countDetailLines calculates how many lines the detail view will render.
+func (s SchemaTab) countDetailLines() int {
+	if s.selectedTable == nil {
+		return 0
+	}
+	t := s.selectedTable
+	n := 2 // title + blank
+	n += 1 // columns heading
+	if len(t.Columns) == 0 {
+		n++
+	} else {
+		n += len(t.Columns)
+	}
+	if len(t.Indexes) > 0 {
+		n += 1 + 1 + len(t.Indexes) // blank + heading + items
+	}
+	if len(t.ForeignKeys) > 0 {
+		n += 1 + 1 + len(t.ForeignKeys) // blank + heading + items
+	}
+	n += 2 // blank + help line
+	return n
 }
 
 func (s SchemaTab) View() string {
@@ -166,7 +188,7 @@ func (s SchemaTab) View() string {
 
 // ── rendering ─────────────────────────────────────────────────────────────────
 
-func (s *SchemaTab) renderList() string {
+func (s SchemaTab) renderList() string {
 	var b strings.Builder
 	b.WriteString(tui.HeadingStyle.Render("Tables"))
 	b.WriteString("\n\n")
@@ -217,7 +239,7 @@ func (s *SchemaTab) renderList() string {
 	return b.String()
 }
 
-func (s *SchemaTab) renderDetail() string {
+func (s SchemaTab) renderDetail() string {
 	t := s.selectedTable
 
 	// Build full content first, then apply scroll viewport.
@@ -275,9 +297,6 @@ func (s *SchemaTab) renderDetail() string {
 
 	lines = append(lines, "")
 	lines = append(lines, tui.HelpStyle.Render("j/k: scroll  Esc: back to list"))
-
-	// Store total lines for scroll bounds.
-	s.detailLines = len(lines)
 
 	// Apply scroll viewport.
 	vpHeight := s.viewportHeight()

@@ -75,14 +75,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Adjust inner dimensions for frame padding and border.
+		// Adjust inner dimensions for frame border + padding + root chrome.
+		// Chrome: frame border (2) + frame padding (2) + logo (3) + tagline (1)
+		//         + blanks (3) + tab bar (2) + status (1) + help (1) = 15
 		innerW := msg.Width - 6 // 2 border + 2*2 padding
-		innerH := msg.Height - 4
+		innerH := msg.Height - 15
 		if innerW < 0 {
 			innerW = 0
 		}
-		if innerH < 0 {
-			innerH = 0
+		if innerH < 5 {
+			innerH = 5
 		}
 		innerMsg := tea.WindowSizeMsg{Width: innerW, Height: innerH}
 		return m.fanOut(innerMsg)
