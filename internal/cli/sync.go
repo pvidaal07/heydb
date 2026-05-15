@@ -12,59 +12,58 @@ import (
 	"github.com/pvidaal07/heydb/internal/adapters/markdown"
 	mysqlAdapter "github.com/pvidaal07/heydb/internal/adapters/mysql"
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
-	"github.com/pvidaal07/heydb/internal/config"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 	"github.com/pvidaal07/heydb/internal/introspection"
 )
 
+var syncListFlag bool
+var syncDeleteFlag string
+
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Introspect the active connection and update heydb.md + heydb.sqlite",
+	Short: "Introspect the active connection and update schema files",
 	Long: `Connects to the active database, reads INFORMATION_SCHEMA, and writes:
-  .heydb/heydb.md      — human-readable schema documentation
-  .heydb/heydb.sqlite  — machine-queryable schema store for heydb serve
+  .heydb/{connection}.md      — human-readable schema documentation
+  .heydb/{connection}.sqlite  — machine-queryable schema store for heydb serve
 
-Any existing heydb:annotations blocks in heydb.md are preserved verbatim.`,
+Any existing heydb:annotations blocks are preserved verbatim.
+
+Flags:
+  --list       List all synced connections
+  --delete X   Delete schema files for connection X`,
 	RunE: runSync,
 }
 
 func init() {
+	syncCmd.Flags().BoolVar(&syncListFlag, "list", false, "list synced connections")
+	syncCmd.Flags().StringVar(&syncDeleteFlag, "delete", "", "delete schema files for a connection")
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
+	if syncListFlag {
+		return runSyncList()
+	}
+	if syncDeleteFlag != "" {
+		return runSyncDelete(syncDeleteFlag)
+	}
+
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	paths, _, conn, err := resolveActivePaths()
 	if err != nil {
-		return fmt.Errorf("sync: cannot determine working directory: %w", err)
-	}
-
-	dir := filepath.Join(cwd, heydbDir)
-	cfgPath := filepath.Join(dir, configFileName)
-
-	// Load config.
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return fmt.Errorf("sync: load config: %w", err)
-	}
-
-	_, conn, err := cfg.Active()
-	if err != nil {
-		return fmt.Errorf("sync: %w\n\nRun `heydb connect` to add a connection first.", err)
+		return fmt.Errorf("sync: %w", err)
 	}
 
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[debug] active connection: host=%s port=%d database=%s\n",
-			conn.Host, conn.Port, conn.Database)
+		fmt.Fprintf(os.Stderr, "[debug] connection %q: host=%s port=%d database=%s\n",
+			paths.ConnName, conn.Host, conn.Port, conn.Database)
 	}
 
-	// Build DSN from connection config (respects per-connection timeout).
 	dsn := conn.DSN()
 
 	// Open SQLite store.
-	sqlitePath := filepath.Join(dir, "heydb.sqlite")
-	store, err := sqlite.Open(sqlitePath)
+	store, err := sqlite.Open(paths.SQLite)
 	if err != nil {
 		return fmt.Errorf("sync: open sqlite store: %w", err)
 	}
@@ -74,9 +73,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// it's the canonical store written by MCP agents).
 	annotations := make(map[string]string)
 
-	// Source 1: existing heydb.md
-	mdPath := filepath.Join(dir, "heydb.md")
-	if existingContent, err := os.ReadFile(mdPath); err == nil {
+	// Source 1: existing markdown file.
+	if existingContent, err := os.ReadFile(paths.Markdown); err == nil {
 		if parsed, err := markdown.Parse(string(existingContent)); err == nil {
 			for k, v := range parsed.Annotations {
 				annotations[k] = v
@@ -92,7 +90,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if Verbose && len(annotations) > 0 {
-		fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation(s) from heydb.md + sqlite\n",
+		fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation(s) from markdown + sqlite\n",
 			len(annotations))
 	}
 
@@ -107,10 +105,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "[debug] connected to MySQL — starting introspection")
 	}
 
-	// Open heydb.md for writing.
-	mdFile, err := os.Create(mdPath)
+	// Open markdown file for writing.
+	mdFile, err := os.Create(paths.Markdown)
 	if err != nil {
-		return fmt.Errorf("sync: create heydb.md: %w", err)
+		return fmt.Errorf("sync: create %s: %w", paths.Markdown, err)
 	}
 	defer mdFile.Close()
 
@@ -138,11 +136,61 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Synced %d table(s) from %s\n", result.TablesCount, result.Database)
-	fmt.Printf("  heydb.md:     %s\n", mdPath)
-	fmt.Printf("  heydb.sqlite: %s\n", sqlitePath)
-	fmt.Printf("  schema_hash:  %s\n", result.Hash[:12]+"...")
+	fmt.Printf("Synced %d table(s) from %s (connection: %s)\n", result.TablesCount, result.Database, paths.ConnName)
+	fmt.Printf("  schema:      %s\n", paths.Markdown)
+	fmt.Printf("  store:       %s\n", paths.SQLite)
+	fmt.Printf("  schema_hash: %s\n", result.Hash[:12]+"...")
 
+	return nil
+}
+
+func runSyncList() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	dir := filepath.Join(cwd, heydbDir)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("sync: read .heydb/: %w", err)
+	}
+
+	found := false
+	for _, e := range entries {
+		name := e.Name()
+		if filepath.Ext(name) == ".sqlite" {
+			connName := strings.TrimSuffix(name, ".sqlite")
+			mdExists := "no"
+			if _, err := os.Stat(filepath.Join(dir, connName+".md")); err == nil {
+				mdExists = "yes"
+			}
+			fmt.Printf("  %-20s  sqlite: yes  md: %s\n", connName, mdExists)
+			found = true
+		}
+	}
+	if !found {
+		fmt.Println("No synced connections found. Run `heydb sync` to sync the active connection.")
+	}
+	return nil
+}
+
+func runSyncDelete(connName string) error {
+	paths, err := resolvePathsForDir(connName)
+	if err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+
+	removed := 0
+	for _, p := range []string{paths.SQLite, paths.Markdown} {
+		if err := os.Remove(p); err == nil {
+			fmt.Printf("  removed %s\n", p)
+			removed++
+		}
+	}
+	if removed == 0 {
+		return fmt.Errorf("sync: no schema files found for connection %q", connName)
+	}
 	return nil
 }
 

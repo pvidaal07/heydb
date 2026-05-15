@@ -17,14 +17,30 @@ var Verbose bool
 var rootCmd = &cobra.Command{
 	Use:   "heydb",
 	Short: "Introspect MySQL schemas and expose them via MCP",
-	Long: `heydb introspects MySQL databases, generates heydb.md and heydb.sqlite,
-and serves the schema to AI agents via the Model Context Protocol (MCP).
+	Long: `heydb introspects MySQL databases, generates schema documentation,
+and serves it to AI agents via the Model Context Protocol (MCP).
 
-Get started:
-  heydb init          Initialise .heydb/ in the current directory
-  heydb connect       Add a database connection
-  heydb sync          Introspect the active connection and update heydb.md
-  heydb serve         Start the MCP server (reads heydb.sqlite)`,
+Setup:
+  heydb init                    Create .heydb/ in the current directory
+  heydb connect                 Add a database connection (interactive)
+  heydb connect --list          List all configured connections
+  heydb connect --use <name>    Switch the active connection
+  heydb create-user             Generate SQL for a read-only MySQL user
+
+Schema:
+  heydb sync                    Introspect the active DB and write schema files
+  heydb sync --list             Show which connections have been synced
+  heydb sync --delete <name>    Remove schema files for a connection
+  heydb review                  Check if the live schema has drifted
+  heydb diff                    Show exactly what changed since last sync
+
+Query:
+  heydb tables                  List all tables with column counts
+  heydb describe <table>        Show columns, indexes, and foreign keys
+  heydb search <keyword>        Search tables and columns by name
+
+MCP:
+  heydb serve                   Start the MCP stdio server for AI agents`,
 
 	// Silence cobra's built-in error printing so we can format it ourselves.
 	SilenceErrors: true,
