@@ -168,7 +168,7 @@ func (m Model) fanOut(msg tea.Msg) (tea.Model, tea.Cmd) {
 // chromeLines is the number of lines consumed by the root model's chrome
 // (frame border, padding, logo, tagline, tab bar, status bar, help line,
 // and the blank lines between them). Tab content gets the remainder.
-const chromeLines = 16
+const chromeLines = 30
 
 // View renders the full TUI: logo, tab bar, active tab content, and status bar.
 func (m Model) View() string {

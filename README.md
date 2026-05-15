@@ -82,6 +82,32 @@ heydb serve
 
 ---
 
+## Interactive TUI
+
+Run `heydb` in an interactive terminal (no arguments) to launch the visual navigator:
+
+```sh
+heydb
+```
+
+Or explicitly:
+
+```sh
+heydb tui
+```
+
+Three tabs available:
+
+| Tab | What it does |
+|-----|-------------|
+| **Connections** | Browse, add, edit, delete, and switch database connections |
+| **Schema** | Browse tables with drill-down to columns, indexes, and foreign keys |
+| **Search** | Keyword search across table and column names with cross-tab navigation |
+
+> **Tab / Shift+Tab** to switch tabs · **j/k** to navigate · **Enter** to select · **q** to quit
+
+---
+
 ## Query the schema
 
 Query your schema directly from the terminal without the MCP server:
@@ -150,9 +176,9 @@ Add to `~/.config/opencode/opencode.json` or `opencode.json` in your project roo
 {
   "mcp": {
     "heydb": {
+      "enabled": true,
       "type": "local",
-      "command": "heydb",
-      "args": ["serve"]
+      "command": ["heydb", "serve"]
     }
   }
 }
