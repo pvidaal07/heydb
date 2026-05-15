@@ -3,8 +3,13 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+
+	"github.com/pvidaal07/heydb/internal/config"
 )
 
 // version is injected at build time via -ldflags "-X github.com/pvidaal07/heydb/internal/cli.version=v1.2.3".
@@ -61,12 +66,32 @@ func init() {
 	rootCmd.Flags().Bool("version", false, "print the heydb version and exit")
 
 	// Handle --version ourselves so we can format it cleanly.
+	// When running in an interactive TTY with no subcommand, launch the TUI.
 	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
 		showVersion, _ := cmd.Flags().GetBool("version")
 		if showVersion {
 			fmt.Printf("heydb %s\n", version)
 			return nil
 		}
+
+		if isatty.IsTerminal(os.Stdout.Fd()) {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("cannot determine working directory: %w", err)
+			}
+			cfgPath := filepath.Join(cwd, heydbDir, configFileName)
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			m := buildTUIModel(cfg, cfgPath)
+			p := tea.NewProgram(m, tea.WithAltScreen())
+			if _, err := p.Run(); err != nil {
+				return fmt.Errorf("tui: %w", err)
+			}
+			return nil
+		}
+
 		return cmd.Help()
 	}
 }
