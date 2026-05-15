@@ -8,20 +8,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/pvidaal07/heydb/internal/config"
+	"github.com/pvidaal07/heydb/internal/domain/ports"
 )
 
 const minWidth = 60
 
+// StoreOpener is a function that opens a SchemaStore for the given connection
+// name. It returns nil, nil when no store is available (e.g. no sync data yet).
+type StoreOpener func(connName string) (ports.SchemaStore, error)
+
 // Model is the root Bubbletea model. It owns tab routing, terminal dimensions,
 // and shared configuration state.
 type Model struct {
-	tabs      []Tab
-	activeTab int
-	width     int
-	height    int
-	cfg       *config.Config
-	cfgPath   string
-	version   string
+	tabs        []Tab
+	activeTab   int
+	width       int
+	height      int
+	cfg         *config.Config
+	cfgPath     string
+	version     string
+	storeOpener StoreOpener
 }
 
 // New creates a root Model with all three tabs initialized.
@@ -36,6 +42,13 @@ func New(cfg *config.Config, cfgPath, version string) Model {
 // WithTabs sets the tabs slice on the model.
 func (m Model) WithTabs(tabs []Tab) Model {
 	m.tabs = tabs
+	return m
+}
+
+// WithStoreOpener sets the function used to open a SchemaStore when the active
+// connection changes.
+func (m Model) WithStoreOpener(opener StoreOpener) Model {
+	m.storeOpener = opener
 	return m
 }
 
@@ -105,7 +118,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ConfigReloadedMsg:
 		m.cfg = msg.Cfg
-		return m.fanOut(msg)
+		// First fan-out the ConfigReloadedMsg so tabs clear their old state.
+		m2, batchCmd := m.fanOut(msg)
+		m = m2.(Model)
+		// Then open the new store (if any) and broadcast StoreOpenedMsg.
+		if m.storeOpener != nil && m.cfg != nil && m.cfg.ActiveConnection != "" {
+			store, _ := m.storeOpener(m.cfg.ActiveConnection)
+			m2, storeCmd := m.fanOut(StoreOpenedMsg{Store: store})
+			m = m2.(Model)
+			return m, tea.Batch(batchCmd, storeCmd)
+		}
+		// No active connection — broadcast nil store so tabs show empty state.
+		m2, storeCmd := m.fanOut(StoreOpenedMsg{Store: nil})
+		m = m2.(Model)
+		return m, tea.Batch(batchCmd, storeCmd)
 
 	case SwitchTabMsg:
 		if msg.Index >= 0 && msg.Index < len(m.tabs) {

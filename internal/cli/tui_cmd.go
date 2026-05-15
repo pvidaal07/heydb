@@ -8,9 +8,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 	"github.com/pvidaal07/heydb/internal/cli/tui"
 	"github.com/pvidaal07/heydb/internal/cli/tui/tab"
 	"github.com/pvidaal07/heydb/internal/config"
+	"github.com/pvidaal07/heydb/internal/domain/ports"
 )
 
 var tuiCmd = &cobra.Command{
@@ -36,7 +38,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("tui: load config: %w", err)
 	}
 
-	m := buildTUIModel(cfg, cfgPath)
+	m := buildTUIModel(cfg, cfgPath, cwd)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
@@ -45,11 +47,42 @@ func runTUI(_ *cobra.Command, _ []string) error {
 }
 
 // buildTUIModel assembles the root model with all tabs.
-func buildTUIModel(cfg *config.Config, cfgPath string) tui.Model {
+// cwd is used to resolve the .heydb/ store paths.
+func buildTUIModel(cfg *config.Config, cfgPath, cwd string) tui.Model {
+	heydbDirPath := filepath.Join(cwd, heydbDir)
+
+	// StoreOpener opens the SQLite schema store for the given connection name.
+	opener := func(connName string) (ports.SchemaStore, error) {
+		storePath := filepath.Join(heydbDirPath, connName+".sqlite")
+		store, err := sqlite.OpenReadOnly(storePath)
+		if err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+
+	// Try to open the store for the active connection at startup.
+	var initialStore ports.SchemaStore
+	if cfg.ActiveConnection != "" {
+		initialStore, _ = opener(cfg.ActiveConnection)
+	}
+
 	tabs := []tui.Tab{
 		tab.NewConnectionsTab(cfg, cfgPath),
-		tab.NewSchemaTab(nil),
+		tab.NewSchemaTab(initialStore),
 		tab.NewSearchTab(),
 	}
-	return tui.New(cfg, cfgPath, version).WithTabs(tabs)
+
+	// Send the initial store to SearchTab if available.
+	searchTab := tab.NewSearchTab()
+	if initialStore != nil {
+		updated, _ := searchTab.Update(tui.StoreOpenedMsg{Store: initialStore})
+		if st, ok := updated.(tab.SearchTab); ok {
+			tabs[2] = st
+		}
+	}
+
+	return tui.New(cfg, cfgPath, version).
+		WithTabs(tabs).
+		WithStoreOpener(opener)
 }

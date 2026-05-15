@@ -45,7 +45,10 @@ Query:
   heydb search <keyword>        Search tables and columns by name
 
 MCP:
-  heydb serve                   Start the MCP stdio server for AI agents`,
+  heydb serve                   Start the MCP stdio server for AI agents
+
+Interactive:
+  heydb tui                     Launch the interactive terminal UI (also auto-launched in TTY)`,
 
 	// Silence cobra's built-in error printing so we can format it ourselves.
 	SilenceErrors: true,
@@ -84,7 +87,7 @@ func init() {
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
-			m := buildTUIModel(cfg, cfgPath)
+			m := buildTUIModel(cfg, cfgPath, cwd)
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("tui: %w", err)
