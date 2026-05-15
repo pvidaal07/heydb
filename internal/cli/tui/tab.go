@@ -27,6 +27,8 @@ type StoreOpenedMsg struct {
 }
 
 // SwitchTabMsg instructs the root model to activate the tab at Index.
+// FocusTable optionally tells the target tab to open a specific table's detail.
 type SwitchTabMsg struct {
-	Index int
+	Index      int
+	FocusTable string
 }

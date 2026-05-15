@@ -116,8 +116,11 @@ func (s SearchTab) updateBrowsing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case msg.Type == tea.KeyEnter:
-		if len(s.results) > 0 {
-			return s, func() tea.Msg { return tui.SwitchTabMsg{Index: 1} }
+		if len(s.results) > 0 && s.cursor < len(s.results) {
+			tableName := s.results[s.cursor].Name
+			return s, func() tea.Msg {
+				return tui.SwitchTabMsg{Index: 1, FocusTable: tableName}
+			}
 		}
 		return s, nil
 

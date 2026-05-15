@@ -136,6 +136,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SwitchTabMsg:
 		if msg.Index >= 0 && msg.Index < len(m.tabs) {
 			m.activeTab = msg.Index
+			// Forward to the target tab so it can handle FocusTable, etc.
+			updated, cmd := m.tabs[m.activeTab].Update(msg)
+			m.tabs[m.activeTab] = updated.(Tab)
+			return m, cmd
 		}
 		return m, nil
 	}

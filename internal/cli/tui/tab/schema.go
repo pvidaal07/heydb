@@ -82,6 +82,21 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.scrollOff = 0
 		return s, nil
 
+	case tui.SwitchTabMsg:
+		if msg.FocusTable != "" {
+			for i, t := range s.tables {
+				if t.Name == msg.FocusTable {
+					s.cursor = i
+					s.selectedTable = &s.tables[i]
+					s.inDetail = true
+					s.detailScroll = 0
+					s.detailLines = s.countDetailLines()
+					break
+				}
+			}
+		}
+		return s, nil
+
 	case tea.KeyMsg:
 		if s.inDetail {
 			return s.updateDetail(msg)
