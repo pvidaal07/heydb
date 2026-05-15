@@ -49,6 +49,15 @@ release:
   prerelease: auto
   name_template: "heydb {{ .Version }}"
 
+homebrew_casks:
+  - repository:
+      owner: pvidaal07
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/pvidaal07/heydb"
+    description: "Introspect MySQL schemas and serve them to AI agents via MCP"
+    license: "MIT"
+
 changelog:
   sort: asc
   filters:
