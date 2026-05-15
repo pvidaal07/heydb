@@ -20,14 +20,13 @@ type SchemaTab struct {
 	tables []schema.Table
 	loaded bool
 
-	// List state.
-	cursor int
+	cursor    int
+	scrollOff int // first visible item index in list view
 
-	// Detail view state.
 	inDetail      bool
 	selectedTable *schema.Table
-	detailScroll  int // scroll offset within the detail view
-	detailLines   int // total rendered lines in detail
+	detailScroll  int
+	detailLines   int
 
 	width, height int
 }
@@ -63,6 +62,7 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.selectedTable = nil
 		s.detailScroll = 0
 		s.cursor = 0
+		s.scrollOff = 0
 		if s.store != nil {
 			s = s.loadSchema()
 		}
@@ -79,6 +79,7 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.selectedTable = nil
 		s.detailScroll = 0
 		s.cursor = 0
+		s.scrollOff = 0
 		return s, nil
 
 	case tea.KeyMsg:
@@ -91,15 +92,33 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return s, nil
 }
 
+// maxVisibleItems returns how many list items fit in the available height.
+// Each item takes 2 lines (name + description). We reserve 2 lines for
+// the heading and 1 for the scroll indicator.
+func (s SchemaTab) maxVisibleItems() int {
+	n := (s.height - 3) / 2 // 3 = heading(1) + blank(1) + indicator(1)
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func (s SchemaTab) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
 		if s.cursor > 0 {
 			s.cursor--
+			if s.cursor < s.scrollOff {
+				s.scrollOff = s.cursor
+			}
 		}
 	case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
 		if s.cursor < len(s.tables)-1 {
 			s.cursor++
+			vis := s.maxVisibleItems()
+			if s.cursor >= s.scrollOff+vis {
+				s.scrollOff = s.cursor - vis + 1
+			}
 		}
 	case msg.Type == tea.KeyEnter:
 		if len(s.tables) > 0 && s.cursor < len(s.tables) {
@@ -124,7 +143,7 @@ func (s SchemaTab) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.detailScroll--
 		}
 	case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
-		maxScroll := s.detailLines - s.viewportHeight()
+		maxScroll := s.detailLines - s.height
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
@@ -135,14 +154,6 @@ func (s SchemaTab) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return s, nil
 }
 
-// viewportHeight returns available lines for content.
-func (s SchemaTab) viewportHeight() int {
-	if s.height < 5 {
-		return 5
-	}
-	return s.height
-}
-
 // countDetailLines calculates how many lines the detail view will render.
 func (s SchemaTab) countDetailLines() int {
 	if s.selectedTable == nil {
@@ -150,7 +161,7 @@ func (s SchemaTab) countDetailLines() int {
 	}
 	t := s.selectedTable
 	n := 2 // title + blank
-	n += 1 // columns heading
+	n++    // columns heading
 	if len(t.Columns) == 0 {
 		n++
 	} else {
@@ -160,7 +171,7 @@ func (s SchemaTab) countDetailLines() int {
 		n += 1 + 1 + len(t.Indexes) // blank + heading + items
 	}
 	if len(t.ForeignKeys) > 0 {
-		n += 1 + 1 + len(t.ForeignKeys) // blank + heading + items
+		n += 1 + 1 + len(t.ForeignKeys)
 	}
 	n += 2 // blank + help line
 	return n
@@ -193,20 +204,9 @@ func (s SchemaTab) renderList() string {
 	b.WriteString(tui.HeadingStyle.Render("Tables"))
 	b.WriteString("\n\n")
 
-	// Viewport scroll for table list.
-	visible := s.viewportHeight() - 3 // heading + blank + help
-	if visible < 1 {
-		visible = len(s.tables)
-	}
-
-	start := 0
-	if s.cursor >= start+visible {
-		start = s.cursor - visible + 1
-	}
-	if start < 0 {
-		start = 0
-	}
-	end := start + visible
+	vis := s.maxVisibleItems()
+	start := s.scrollOff
+	end := start + vis
 	if end > len(s.tables) {
 		end = len(s.tables)
 	}
@@ -221,19 +221,16 @@ func (s SchemaTab) renderList() string {
 
 		if i == s.cursor {
 			b.WriteString(tui.SelectedStyle.Render(tui.Cursor + t.Name))
-			b.WriteString("\n")
-			b.WriteString(tui.SubtextStyle.Render("    " + desc))
 		} else {
 			b.WriteString(tui.UnselectedStyle.Render("  " + t.Name))
-			b.WriteString("\n")
-			b.WriteString(tui.SubtextStyle.Render("    " + desc))
 		}
+		b.WriteString("\n")
+		b.WriteString(tui.SubtextStyle.Render("    " + desc))
 		b.WriteString("\n")
 	}
 
-	if len(s.tables) > visible {
-		b.WriteString("\n")
-		b.WriteString(tui.SubtextStyle.Render(fmt.Sprintf("  showing %d–%d of %d tables", start+1, end, len(s.tables))))
+	if len(s.tables) > vis {
+		b.WriteString(tui.SubtextStyle.Render(fmt.Sprintf("  %d–%d of %d tables", start+1, end, len(s.tables))))
 	}
 
 	return b.String()
@@ -242,13 +239,11 @@ func (s SchemaTab) renderList() string {
 func (s SchemaTab) renderDetail() string {
 	t := s.selectedTable
 
-	// Build full content first, then apply scroll viewport.
+	// Build all content lines first.
 	var lines []string
-
 	lines = append(lines, tui.TitleStyle.Render(t.Name))
 	lines = append(lines, "")
 
-	// Columns.
 	lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Columns (%d)", len(t.Columns))))
 	if len(t.Columns) == 0 {
 		lines = append(lines, tui.SubtextStyle.Render("  (none)"))
@@ -271,7 +266,6 @@ func (s SchemaTab) renderDetail() string {
 		}
 	}
 
-	// Indexes.
 	if len(t.Indexes) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Indexes (%d)", len(t.Indexes))))
@@ -285,7 +279,6 @@ func (s SchemaTab) renderDetail() string {
 		}
 	}
 
-	// Foreign keys.
 	if len(t.ForeignKeys) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Foreign Keys (%d)", len(t.ForeignKeys))))
@@ -298,11 +291,14 @@ func (s SchemaTab) renderDetail() string {
 	lines = append(lines, "")
 	lines = append(lines, tui.HelpStyle.Render("j/k: scroll  Esc: back to list"))
 
-	// Apply scroll viewport.
-	vpHeight := s.viewportHeight()
+	// Viewport: slice the lines to fit s.height.
+	vpHeight := s.height
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
 	start := s.detailScroll
-	if start >= len(lines) {
-		start = max(0, len(lines)-1)
+	if start > len(lines)-vpHeight {
+		start = max(0, len(lines)-vpHeight)
 	}
 	end := start + vpHeight
 	if end > len(lines) {
@@ -311,19 +307,18 @@ func (s SchemaTab) renderDetail() string {
 
 	visible := lines[start:end]
 
-	// Scroll indicator.
-	if s.detailLines > vpHeight {
-		scrollPct := 0
-		maxScroll := s.detailLines - vpHeight
+	// Scroll indicator when content doesn't fit.
+	if len(lines) > vpHeight && vpHeight > 1 {
+		maxScroll := len(lines) - vpHeight
+		pct := 0
 		if maxScroll > 0 {
-			scrollPct = (s.detailScroll * 100) / maxScroll
+			pct = (s.detailScroll * 100) / maxScroll
 		}
-		indicator := tui.SubtextStyle.Render(fmt.Sprintf("  [scroll %d%%]", scrollPct))
-		visible = append(visible, indicator)
+		// Replace last visible line with the indicator.
+		visible[len(visible)-1] = tui.SubtextStyle.Render(fmt.Sprintf("  [scroll %d%%] j/k: scroll  Esc: back", pct))
 	}
 
 	content := strings.Join(visible, "\n")
-
 	detailW := s.width - 4
 	if detailW < 20 {
 		detailW = 60

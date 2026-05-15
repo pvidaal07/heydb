@@ -186,14 +186,9 @@ func (m Model) View() string {
 	b.WriteString(m.renderTabBar())
 	b.WriteString("\n\n")
 
-	// Active tab content — truncate to available height.
-	contentHeight := m.height - chromeLines
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
+	// Active tab content.
 	if len(m.tabs) > 0 {
-		content := m.tabs[m.activeTab].View()
-		b.WriteString(truncateLines(content, contentHeight))
+		b.WriteString(m.tabs[m.activeTab].View())
 	}
 
 	b.WriteString("\n\n")
@@ -208,14 +203,6 @@ func (m Model) View() string {
 	return FrameStyle.Width(m.width - 2).Render(b.String())
 }
 
-// truncateLines ensures s has at most maxLines lines.
-func truncateLines(s string, maxLines int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) <= maxLines {
-		return s
-	}
-	return strings.Join(lines[:maxLines], "\n")
-}
 
 func (m Model) renderTabBar() string {
 	var parts []string

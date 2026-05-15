@@ -20,9 +20,8 @@ type ConnectionsTab struct {
 	cfg     *config.Config
 	cfgPath string
 
-	// Custom list state (no bubbles/list — simpler, matches gentle-ai style).
-	names    []string
-	cursor   int
+	names     []string
+	cursor    int
 	scrollOff int
 
 	// formOverlay is non-nil when add or edit form is open.
@@ -80,11 +79,18 @@ func (c ConnectionsTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.Type == tea.KeyUp || (msg.Type == tea.KeyRunes && string(msg.Runes) == "k"):
 			if c.cursor > 0 {
 				c.cursor--
+				if c.cursor < c.scrollOff {
+					c.scrollOff = c.cursor
+				}
 			}
 			return c, nil
 		case msg.Type == tea.KeyDown || (msg.Type == tea.KeyRunes && string(msg.Runes) == "j"):
 			if c.cursor < len(c.names)-1 {
 				c.cursor++
+				vis := c.maxVisibleItems()
+				if c.cursor >= c.scrollOff+vis {
+					c.scrollOff = c.cursor - vis + 1
+				}
 			}
 			return c, nil
 		case msg.Type == tea.KeyRunes:
@@ -144,29 +150,36 @@ func (c *ConnectionsTab) renderList() string {
 	b.WriteString(tui.HeadingStyle.Render("Connections"))
 	b.WriteString("\n\n")
 
-	for i, name := range c.names {
+	vis := c.maxVisibleItems()
+	start := c.scrollOff
+	end := start + vis
+	if end > len(c.names) {
+		end = len(c.names)
+	}
+
+	for i := start; i < end; i++ {
+		name := c.names[i]
 		isActive := name == c.cfg.ActiveConnection
 		conn := c.cfg.Connections[name]
 		desc := fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
 
+		label := name
+		if isActive {
+			label = name + " " + tui.SuccessStyle.Render("(active)")
+		}
+
 		if i == c.cursor {
-			label := name
-			if isActive {
-				label = name + " " + tui.SuccessStyle.Render("(active)")
-			}
 			b.WriteString(tui.SelectedStyle.Render(tui.Cursor + label))
-			b.WriteString("\n")
-			b.WriteString(tui.SubtextStyle.Render("    " + desc))
 		} else {
-			label := name
-			if isActive {
-				label = name + " " + tui.SuccessStyle.Render("(active)")
-			}
 			b.WriteString(tui.UnselectedStyle.Render("  " + label))
-			b.WriteString("\n")
-			b.WriteString(tui.SubtextStyle.Render("    " + desc))
 		}
 		b.WriteString("\n")
+		b.WriteString(tui.SubtextStyle.Render("    " + desc))
+		b.WriteString("\n")
+	}
+
+	if len(c.names) > vis {
+		b.WriteString(tui.SubtextStyle.Render(fmt.Sprintf("  %d–%d of %d connections", start+1, end, len(c.names))))
 	}
 
 	return b.String()
@@ -207,6 +220,14 @@ func (c *ConnectionsTab) detailRow(label, value string) string {
 }
 
 // ── internal helpers ─────────────────────────────────────────────────────────
+
+func (c *ConnectionsTab) maxVisibleItems() int {
+	n := (c.height - 3) / 2 // heading(1) + blank(1) + indicator(1), each item = 2 lines
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
 
 func (c *ConnectionsTab) listWidth() int {
 	if c.width == 0 {

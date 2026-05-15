@@ -42,6 +42,10 @@ func TestConnectionsTab_ListPopulation(t *testing.T) {
 	cfg := twoConnConfig()
 	ct := tab.NewConnectionsTab(cfg, "/tmp/test.json")
 
+	// Send a window size so the viewport can fit both connections.
+	updated, _ := ct.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	ct = updated.(tab.ConnectionsTab)
+
 	view := ct.View()
 	if !strings.Contains(view, "local") {
 		t.Error("expected 'local' in view")
