@@ -2,11 +2,26 @@
 
 Introspect MySQL databases and expose the schema to AI agents via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io).
 
-heydb generates a human-readable `heydb.md` and a queryable `heydb.sqlite` from your live database, then serves them to tools like Claude Code and Cursor without granting direct database access.
+heydb generates human-readable schema docs and a queryable SQLite store from your live database, then serves them to tools like Claude Code and Cursor without granting direct database access.
 
 ---
 
 ## Install
+
+### Homebrew (macOS & Linux)
+
+```sh
+brew tap pvidaal07/tap
+brew install heydb
+```
+
+To update:
+
+```sh
+brew upgrade heydb
+```
+
+### Go
 
 Requires [Go 1.21+](https://go.dev/dl/):
 
@@ -14,13 +29,11 @@ Requires [Go 1.21+](https://go.dev/dl/):
 go install github.com/pvidaal07/heydb/cmd/heydb@latest
 ```
 
-Make sure `$HOME/go/bin` is in your `$PATH`:
+Make sure `$HOME/go/bin` is in your `$PATH`.
 
-```sh
-export PATH="$PATH:$HOME/go/bin"
-```
+### Download binary
 
-To update, run the same `go install` command again.
+Grab the latest release for your platform from [GitHub Releases](https://github.com/pvidaal07/heydb/releases/latest), extract it, and move the binary to a directory in your PATH.
 
 ---
 
@@ -47,14 +60,17 @@ heydb connect
 
 ### 3. Sync the schema
 
-Introspects the active MySQL connection and writes `.heydb/heydb.md` + `.heydb/heydb.sqlite`.
+Introspects the active connection and writes schema files per connection.
 
 ```sh
 heydb sync
 ```
 
-Commit `heydb.md` to your repository — it documents your schema in plain Markdown.
-The `.heydb/heydb.sqlite` file is in `.gitignore` by default (local cache only).
+Each connection gets its own files: `.heydb/{connection}.md` + `.heydb/{connection}.sqlite`.
+Commit the `.md` files to your repository — they document your schema in plain Markdown.
+
+> List synced connections: `heydb sync --list`
+> Delete schema files: `heydb sync --delete <name>`
 
 ### 4. Serve the MCP server
 
@@ -66,32 +82,53 @@ heydb serve
 
 ---
 
-## Check for schema drift
+## Query the schema
+
+Query your schema directly from the terminal without the MCP server:
 
 ```sh
-heydb review
+heydb tables                  # list all tables
+heydb describe <table>        # columns, indexes, foreign keys
+heydb search <keyword>        # search by name or comment
 ```
 
-Exits `0` if the live database matches the last sync, `1` if the schema has changed.
+---
+
+## Schema drift detection
+
+```sh
+heydb review        # exits 0 if up to date, 1 if drifted
+heydb diff          # shows exactly what changed
+```
+
 Useful in CI to detect unapplied migrations.
 
 ---
 
 ## MCP tools
 
-The MCP server exposes three tools:
+The MCP server exposes four tools:
 
 | Tool | Description |
 |------|-------------|
 | `heydb_list_tables` | List all tables with column count and comment |
-| `heydb_get_table` | Get full details for a specific table (columns, indexes, foreign keys) |
-| `heydb_search` | Full-text LIKE search across table names, column names, and comments |
+| `heydb_get_table` | Full details for a table (columns, indexes, FKs, annotations) |
+| `heydb_search` | Substring search across table names, column names, and comments |
+| `heydb_annotate` | Add or update annotations for a table (persisted across syncs) |
 
 ---
 
-## Configure in Claude Code
+## Configure MCP in your AI tool
 
-Add to `.claude/mcp.json` (or `~/.claude/mcp.json` for global config):
+### Claude Code
+
+Run this from your project directory:
+
+```sh
+claude mcp add heydb -- heydb serve
+```
+
+Or add manually to `.claude/mcp.json` (project) or `~/.claude/mcp.json` (global):
 
 ```json
 {
@@ -105,7 +142,23 @@ Add to `.claude/mcp.json` (or `~/.claude/mcp.json` for global config):
 }
 ```
 
-## Configure in Cursor
+### OpenCode
+
+Add to `~/.config/opencode/opencode.json` or `opencode.json` in your project root:
+
+```json
+{
+  "mcp": {
+    "heydb": {
+      "type": "local",
+      "command": "heydb",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Cursor
 
 Add to `.cursor/mcp.json`:
 
@@ -145,10 +198,10 @@ This prints a `CREATE USER` + `GRANT` + `FLUSH PRIVILEGES` block that you copy i
 
 ```
 .heydb/
-├── config.json      # connection config (keep private)
-├── .gitignore       # auto-generated, excludes sqlite and tmp files
-├── heydb.md         # human-readable schema (commit this)
-└── heydb.sqlite     # local query cache (do not commit)
+├── config.json           # connection config (keep private)
+├── .gitignore            # auto-generated
+├── {connection}.md       # human-readable schema (commit this)
+└── {connection}.sqlite   # local query cache (do not commit)
 ```
 
 ---
