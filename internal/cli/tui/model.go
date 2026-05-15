@@ -75,11 +75,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Adjust inner dimensions for frame border + padding + root chrome.
-		// Chrome: frame border (2) + frame padding (2) + logo (3) + tagline (1)
-		//         + blanks (3) + tab bar (2) + status (1) + help (1) = 15
+		// Tell tabs how much space they actually have.
 		innerW := msg.Width - 6 // 2 border + 2*2 padding
-		innerH := msg.Height - 15
+		innerH := msg.Height - chromeLines
 		if innerW < 0 {
 			innerW = 0
 		}
@@ -163,6 +161,11 @@ func (m Model) fanOut(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// chromeLines is the number of lines consumed by the root model's chrome
+// (frame border, padding, logo, tagline, tab bar, status bar, help line,
+// and the blank lines between them). Tab content gets the remainder.
+const chromeLines = 16
+
 // View renders the full TUI: logo, tab bar, active tab content, and status bar.
 func (m Model) View() string {
 	if m.width < minWidth {
@@ -183,9 +186,14 @@ func (m Model) View() string {
 	b.WriteString(m.renderTabBar())
 	b.WriteString("\n\n")
 
-	// Active tab content.
+	// Active tab content — truncate to available height.
+	contentHeight := m.height - chromeLines
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
 	if len(m.tabs) > 0 {
-		b.WriteString(m.tabs[m.activeTab].View())
+		content := m.tabs[m.activeTab].View()
+		b.WriteString(truncateLines(content, contentHeight))
 	}
 
 	b.WriteString("\n\n")
@@ -197,12 +205,16 @@ func (m Model) View() string {
 	// Help line.
 	b.WriteString(HelpStyle.Render("Tab/Shift+Tab: switch tabs • j/k: navigate • enter: select • q: quit"))
 
-	// Wrap everything in the frame.
-	innerWidth := m.width - 6
-	if innerWidth < 0 {
-		innerWidth = 0
-	}
 	return FrameStyle.Width(m.width - 2).Render(b.String())
+}
+
+// truncateLines ensures s has at most maxLines lines.
+func truncateLines(s string, maxLines int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[:maxLines], "\n")
 }
 
 func (m Model) renderTabBar() string {
