@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	mysqlAdapter "github.com/pvidaal07/heydb/internal/adapters/mysql"
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
-	"github.com/pvidaal07/heydb/internal/config"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
@@ -33,27 +31,13 @@ func init() {
 func runDiff(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	paths, _, conn, err := resolveActivePaths()
 	if err != nil {
-		return fmt.Errorf("diff: cannot determine working directory: %w", err)
-	}
-
-	dir := filepath.Join(cwd, heydbDir)
-	cfgPath := filepath.Join(dir, configFileName)
-
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return fmt.Errorf("diff: load config: %w", err)
-	}
-
-	_, conn, err := cfg.Active()
-	if err != nil {
-		return fmt.Errorf("diff: %w\n\nRun `heydb connect` to add a connection first.", err)
+		return fmt.Errorf("diff: %w", err)
 	}
 
 	// Load stored schema from SQLite.
-	sqlitePath := filepath.Join(dir, "heydb.sqlite")
-	store, err := sqlite.Open(sqlitePath)
+	store, err := sqlite.Open(paths.SQLite)
 	if err != nil {
 		return fmt.Errorf("diff: open sqlite store: %w\n\nRun `heydb sync` first.", err)
 	}
@@ -65,8 +49,8 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[debug] stored schema: %d tables, hash %s\n",
-			len(storedSchema.Tables), storedSchema.Hash[:12]+"...")
+		fmt.Fprintf(os.Stderr, "[debug] connection %q: %d tables, hash %s\n",
+			paths.ConnName, len(storedSchema.Tables), storedSchema.Hash[:12]+"...")
 	}
 
 	// Introspect live DB.

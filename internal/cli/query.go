@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -199,12 +197,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func openStore() (*sqlite.Store, func(), error) {
-	cwd, err := os.Getwd()
+	paths, _, _, err := resolveActivePaths()
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot determine working directory: %w", err)
+		return nil, nil, err
 	}
-	sqlitePath := filepath.Join(cwd, heydbDir, "heydb.sqlite")
-	store, err := sqlite.Open(sqlitePath)
+	store, err := sqlite.Open(paths.SQLite)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open schema store: %w\n\nRun `heydb sync` first.", err)
 	}

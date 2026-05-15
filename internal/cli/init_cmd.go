@@ -16,10 +16,10 @@ const (
 	defaultConfig   = `{"connections":{},"active_connection":"","version":1}` + "\n"
 	defaultGitignore = `# heydb — generated files
 config.json
-heydb.sqlite
+*.sqlite
 
-# heydb.md is intentionally tracked
-!heydb.md
+# schema markdown files are intentionally tracked
+!*.md
 `
 )
 

@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/pvidaal07/heydb/internal/adapters/markdown"
 	mysqlAdapter "github.com/pvidaal07/heydb/internal/adapters/mysql"
-	"github.com/pvidaal07/heydb/internal/config"
 )
 
 var reviewCmd = &cobra.Command{
@@ -32,38 +30,23 @@ func init() {
 func runReview(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	paths, _, conn, err := resolveActivePaths()
 	if err != nil {
-		return fmt.Errorf("review: cannot determine working directory: %w", err)
-	}
-
-	dir := filepath.Join(cwd, heydbDir)
-	cfgPath := filepath.Join(dir, configFileName)
-
-	// Load config.
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return fmt.Errorf("review: load config: %w", err)
-	}
-
-	_, conn, err := cfg.Active()
-	if err != nil {
-		return fmt.Errorf("review: %w\n\nRun `heydb connect` to add a connection first.", err)
+		return fmt.Errorf("review: %w", err)
 	}
 
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[debug] active connection: host=%s port=%d database=%s\n",
-			conn.Host, conn.Port, conn.Database)
+		fmt.Fprintf(os.Stderr, "[debug] connection %q: host=%s port=%d database=%s\n",
+			paths.ConnName, conn.Host, conn.Port, conn.Database)
 	}
 
-	// Read .heydb/heydb.md and parse the meta block to extract the stored hash.
-	mdPath := filepath.Join(dir, "heydb.md")
-	mdContent, err := os.ReadFile(mdPath)
+	// Read the connection's markdown file and parse the stored hash.
+	mdContent, err := os.ReadFile(paths.Markdown)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("review: heydb.md not found — run `heydb sync` first")
+			return fmt.Errorf("review: %s not found — run `heydb sync` first", paths.Markdown)
 		}
-		return fmt.Errorf("review: read heydb.md: %w", err)
+		return fmt.Errorf("review: read %s: %w", paths.Markdown, err)
 	}
 
 	parsed, err := markdown.Parse(string(mdContent))
@@ -109,7 +92,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	}
 
 	// Drift detected — print to stdout and exit 1.
-	fmt.Println("Schema has changed — run `heydb sync` to update heydb.md and heydb.sqlite")
+	fmt.Println("Schema has changed — run `heydb sync` to update")
 	os.Exit(1)
 	return nil // unreachable but satisfies the compiler
 }
