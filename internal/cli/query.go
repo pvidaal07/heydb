@@ -88,17 +88,21 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("describe: table %q not found\n\nAvailable tables: %s", args[0], strings.Join(names, ", "))
 	}
 
-	printTable(t)
+	annotation, _ := store.GetAnnotation(ctx, args[0])
+	printTable(t, annotation)
 	return nil
 }
 
-func printTable(t schema.Table) {
+func printTable(t schema.Table, annotation string) {
 	fmt.Printf("Table: %s\n", t.Name)
 	if t.Comment != "" {
 		fmt.Printf("Comment: %s\n", t.Comment)
 	}
 	if t.Engine != "" {
 		fmt.Printf("Engine: %s\n", t.Engine)
+	}
+	if annotation != "" {
+		fmt.Printf("Annotation: %s\n", annotation)
 	}
 	if len(t.PrimaryKey) > 0 {
 		fmt.Printf("Primary Key: %s\n", strings.Join(t.PrimaryKey, ", "))

@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS heydb_foreign_keys (
     ref_column       TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (table_name) REFERENCES heydb_tables(name) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS heydb_annotations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT    NOT NULL,
+    content    TEXT    NOT NULL DEFAULT '',
+    updated_at TEXT    NOT NULL DEFAULT '',
+    UNIQUE(table_name)
+);
 `
 
 // Store implements ports.SchemaStore using a local SQLite file.
@@ -387,6 +395,53 @@ func (s *Store) loadTableByName(ctx context.Context, name string) (schema.Table,
 		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 	return t, fkRows.Err()
+}
+
+// SaveAnnotation upserts an annotation for a table. The content is free-form text.
+func (s *Store) SaveAnnotation(ctx context.Context, tableName, content string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO heydb_annotations (table_name, content, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(table_name) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+		tableName, content, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("sqlite: save annotation for %q: %w", tableName, err)
+	}
+	return nil
+}
+
+// GetAnnotation returns the annotation for a single table, or empty string if none.
+func (s *Store) GetAnnotation(ctx context.Context, tableName string) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM heydb_annotations WHERE table_name = ?`, tableName).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sqlite: get annotation for %q: %w", tableName, err)
+	}
+	return content, nil
+}
+
+// GetAllAnnotations returns all annotations as a map of table_name → content.
+func (s *Store) GetAllAnnotations(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT table_name, content FROM heydb_annotations ORDER BY table_name`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get all annotations: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var name, content string
+		if err := rows.Scan(&name, &content); err != nil {
+			return nil, err
+		}
+		result[name] = content
+	}
+	return result, rows.Err()
 }
 
 func boolToInt(b bool) int {

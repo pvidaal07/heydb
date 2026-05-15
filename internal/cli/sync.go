@@ -62,19 +62,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Build DSN from connection config (respects per-connection timeout).
 	dsn := conn.DSN()
 
-	// Extract annotations from an existing heydb.md (if any) to preserve them.
-	var annotations map[string]string
-	mdPath := filepath.Join(dir, "heydb.md")
-	if existingContent, err := os.ReadFile(mdPath); err == nil {
-		if parsed, err := markdown.Parse(string(existingContent)); err == nil {
-			annotations = parsed.Annotations
-			if Verbose && len(annotations) > 0 {
-				fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation block(s) from existing heydb.md\n",
-					len(annotations))
-			}
-		}
-	}
-
 	// Open SQLite store.
 	sqlitePath := filepath.Join(dir, "heydb.sqlite")
 	store, err := sqlite.Open(sqlitePath)
@@ -82,6 +69,32 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("sync: open sqlite store: %w", err)
 	}
 	defer store.Close()
+
+	// Collect annotations from both sources (SQLite wins on conflict since
+	// it's the canonical store written by MCP agents).
+	annotations := make(map[string]string)
+
+	// Source 1: existing heydb.md
+	mdPath := filepath.Join(dir, "heydb.md")
+	if existingContent, err := os.ReadFile(mdPath); err == nil {
+		if parsed, err := markdown.Parse(string(existingContent)); err == nil {
+			for k, v := range parsed.Annotations {
+				annotations[k] = v
+			}
+		}
+	}
+
+	// Source 2: SQLite annotations (from MCP agents) — these take precedence.
+	if sqliteAnns, err := store.GetAllAnnotations(ctx); err == nil {
+		for k, v := range sqliteAnns {
+			annotations[k] = v
+		}
+	}
+
+	if Verbose && len(annotations) > 0 {
+		fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation(s) from heydb.md + sqlite\n",
+			len(annotations))
+	}
 
 	// Build MySQL introspector.
 	introspector := mysqlAdapter.New(dsn)
@@ -113,6 +126,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 	result, err := syncer.Run(ctx, conn.Database)
 	if err != nil {
 		return handleIntrospectionError(err)
+	}
+
+	// Persist annotations to SQLite so MCP agents can read them.
+	for tableName, content := range annotations {
+		if err := store.SaveAnnotation(ctx, tableName, content); err != nil {
+			if Verbose {
+				fmt.Fprintf(os.Stderr, "[debug] warning: failed to save annotation for %q: %v\n",
+					tableName, err)
+			}
+		}
 	}
 
 	fmt.Printf("Synced %d table(s) from %s\n", result.TablesCount, result.Database)
