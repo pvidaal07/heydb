@@ -1,0 +1,8 @@
+# Default — all changes require review
+* @pvidaal07
+
+# Workflow and release config — extra scrutiny
+.github/ @pvidaal07
+.goreleaser.yml @pvidaal07
+go.mod @pvidaal07
+go.sum @pvidaal07
