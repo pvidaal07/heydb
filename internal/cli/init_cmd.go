@@ -3,8 +3,10 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -78,5 +80,31 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Println("  heydb connect    — add a database connection")
 	fmt.Println("  heydb sync       — introspect the database and generate heydb.md")
 	fmt.Println("  heydb serve      — start the MCP server for AI agents")
+
+	// Non-fatal AI assistant detection hint.
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		printAIHint(homeDir, os.Stdout)
+	}
+
 	return nil
+}
+
+// printAIHint detects installed AI assistants and prints a hint suggesting
+// the user run "heydb setup-ai" to inject schema context. If no assistants
+// are detected, or if homeDir is empty, nothing is printed. Errors from
+// detection are silently swallowed — the hint is non-fatal.
+func printAIHint(homeDir string, out io.Writer) {
+	targets := detectAssistants(homeDir)
+	if len(targets) == 0 {
+		return
+	}
+
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.Name
+	}
+
+	fmt.Fprintf(out, "\nDetected AI assistants: %s. Run 'heydb setup-ai' to configure them.\n",
+		strings.Join(names, ", "))
 }

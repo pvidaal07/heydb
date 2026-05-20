@@ -80,6 +80,24 @@ Starts the MCP server over stdio. Point your AI tool at this command.
 heydb serve
 ```
 
+### 5. Configure your AI assistant (optional)
+
+Inject heydb context into your AI assistant's configuration file. This tells the assistant about your schema files, available MCP tools, and how to use them.
+
+```sh
+heydb setup-ai
+```
+
+Auto-detects installed assistants (Claude Code, OpenCode) and writes the context block. You can also target specific assistants:
+
+```sh
+heydb setup-ai --claude      # Claude Code only
+heydb setup-ai --opencode    # OpenCode only
+heydb setup-ai --all         # all supported assistants
+```
+
+The block is idempotent — running `setup-ai` again updates it in-place without duplicating content.
+
 ---
 
 ## Interactive TUI
@@ -133,14 +151,17 @@ Useful in CI to detect unapplied migrations.
 
 ## MCP tools
 
-The MCP server exposes four tools:
+The MCP server exposes seven tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
 
 | Tool | Description |
 |------|-------------|
+| `heydb_list_connections` | List all configured connections (name, active status, sync status) |
 | `heydb_list_tables` | List all tables with column count and comment |
 | `heydb_get_table` | Full details for a table (columns, indexes, FKs, annotations) |
 | `heydb_search` | Substring search across table names, column names, and comments |
 | `heydb_annotate` | Add or update annotations for a table (persisted across syncs) |
+| `heydb_annotate_column` | Annotate a specific column with business context |
+| `heydb_annotate_db` | Annotate the database itself (purpose, ownership, constraints) |
 
 ---
 
@@ -148,13 +169,22 @@ The MCP server exposes four tools:
 
 ### Claude Code
 
-Run this from your project directory:
+**Global (recommended)** — available in every project:
 
 ```sh
-claude mcp add heydb -- heydb serve
+claude mcp add heydb --scope user -- heydb serve
 ```
 
-Or add manually to `.claude/mcp.json` (project) or `~/.claude/mcp.json` (global):
+**Per project** — only available in the current directory:
+
+```sh
+claude mcp add heydb --scope project -- heydb serve
+```
+
+> Run `claude mcp list` to verify the server is connected. If it shows up in one
+> project but not another, it was added with `--scope project` instead of `--scope user`.
+
+Or add manually to `~/.claude/settings.json` (global) or `.claude/settings.json` (project):
 
 ```json
 {
