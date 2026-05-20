@@ -22,8 +22,11 @@ type ConfigReloadedMsg struct {
 
 // StoreOpenedMsg carries a freshly opened SchemaStore so the Schema and Search
 // tabs can share the same store instance without each tab opening its own.
+// Annotations is optional; when the store implements ports.AnnotationStore,
+// it is set automatically.
 type StoreOpenedMsg struct {
-	Store ports.SchemaStore
+	Store       ports.SchemaStore
+	Annotations ports.AnnotationStore
 }
 
 // SwitchTabMsg instructs the root model to activate the tab at Index.

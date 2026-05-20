@@ -23,24 +23,17 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
-// AnnotationStore is the optional interface for reading/writing annotations.
-// When provided, the server exposes the heydb_annotate tool.
-type AnnotationStore interface {
-	SaveAnnotation(ctx context.Context, tableName, content string) error
-	GetAnnotation(ctx context.Context, tableName string) (string, error)
-}
-
 // Server wraps an MCPServer and a SchemaStore.
 type Server struct {
 	store       ports.SchemaStore
-	annotations AnnotationStore
+	annotations ports.AnnotationStore
 	srv         *mcpserver.MCPServer
 }
 
 // New creates a new Server backed by the provided SchemaStore.
 // Call Serve() to start listening on stdio.
-// If annotations is non-nil, the heydb_annotate tool is registered.
-func New(store ports.SchemaStore, annotations AnnotationStore) *Server {
+// If annotations is non-nil, the annotation tools are registered.
+func New(store ports.SchemaStore, annotations ports.AnnotationStore) *Server {
 	s := &Server{store: store, annotations: annotations}
 	s.srv = mcpserver.NewMCPServer("heydb", "0.1.0")
 	s.registerTools()
@@ -108,6 +101,40 @@ func (s *Server) registerTools() {
 			),
 			s.handleAnnotate,
 		)
+
+		// ── heydb_annotate_column ───────────────────────────────────────────
+		s.srv.AddTool(
+			mcpgo.NewTool(
+				"heydb_annotate_column",
+				mcpgo.WithDescription("Add or update an annotation for a specific column. Use this to document business meaning, valid values, implicit relationships, or gotchas for individual fields."),
+				mcpgo.WithString("table_name",
+					mcpgo.Description("Name of the table containing the column."),
+					mcpgo.Required(),
+				),
+				mcpgo.WithString("column_name",
+					mcpgo.Description("Name of the column to annotate."),
+					mcpgo.Required(),
+				),
+				mcpgo.WithString("annotation",
+					mcpgo.Description("Free-form annotation text. Replaces any existing annotation for this column."),
+					mcpgo.Required(),
+				),
+			),
+			s.handleAnnotateColumn,
+		)
+
+		// ── heydb_annotate_db ───────────────────────────────────────────────
+		s.srv.AddTool(
+			mcpgo.NewTool(
+				"heydb_annotate_db",
+				mcpgo.WithDescription("Add or update the database-level annotation. Use this to document what this database is for, which system it belongs to, or any high-level context about the data it contains."),
+				mcpgo.WithString("annotation",
+					mcpgo.Description("Free-form annotation text. Replaces any existing database annotation."),
+					mcpgo.Required(),
+				),
+			),
+			s.handleAnnotateDB,
+		)
 	}
 }
 
@@ -140,13 +167,14 @@ func (s *Server) handleListTables(ctx context.Context, req mcpgo.CallToolRequest
 
 // columnDetail is the response shape for a single column in heydb_get_table.
 type columnDetail struct {
-	Name     string  `json:"name"`
-	Type     string  `json:"type"`
-	Nullable bool    `json:"nullable"`
-	Default  *string `json:"default,omitempty"`
-	Key      string  `json:"key,omitempty"`
-	Extra    string  `json:"extra,omitempty"`
-	Comment  string  `json:"comment,omitempty"`
+	Name       string  `json:"name"`
+	Type       string  `json:"type"`
+	Nullable   bool    `json:"nullable"`
+	Default    *string `json:"default,omitempty"`
+	Key        string  `json:"key,omitempty"`
+	Extra      string  `json:"extra,omitempty"`
+	Comment    string  `json:"comment,omitempty"`
+	Annotation string  `json:"annotation,omitempty"`
 }
 
 // indexDetail is the response shape for a single index.
@@ -200,10 +228,17 @@ func (s *Server) handleGetTable(ctx context.Context, req mcpgo.CallToolRequest) 
 
 	detail := tableToDetail(t)
 
-	// Attach annotation if available.
+	// Attach annotations if available.
 	if s.annotations != nil {
 		if ann, err := s.annotations.GetAnnotation(ctx, tableName); err == nil && ann != "" {
 			detail.Annotation = ann
+		}
+		if colAnns, err := s.annotations.GetAllColumnAnnotations(ctx, tableName); err == nil {
+			for i, col := range detail.Columns {
+				if ann, ok := colAnns[col.Name]; ok {
+					detail.Columns[i].Annotation = ann
+				}
+			}
 		}
 	}
 
@@ -277,6 +312,71 @@ func (s *Server) handleAnnotate(ctx context.Context, req mcpgo.CallToolRequest) 
 	}
 
 	return mcpgo.NewToolResultText(fmt.Sprintf("Annotation saved for table %q", tableName)), nil
+}
+
+func (s *Server) handleAnnotateColumn(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	tableName, _ := req.GetArguments()["table_name"].(string)
+	columnName, _ := req.GetArguments()["column_name"].(string)
+	annotation, _ := req.GetArguments()["annotation"].(string)
+	if tableName == "" {
+		return mcpgo.NewToolResultError("table_name argument is required"), nil
+	}
+	if columnName == "" {
+		return mcpgo.NewToolResultError("column_name argument is required"), nil
+	}
+	if annotation == "" {
+		return mcpgo.NewToolResultError("annotation argument is required"), nil
+	}
+
+	// Verify the table exists and the column exists within it.
+	t, err := s.store.GetTable(ctx, tableName)
+	if err != nil {
+		names, listErr := s.allTableNames(ctx)
+		if listErr != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("table %q not found", tableName)), nil
+		}
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("table %q not found. Available tables: %s",
+				tableName, strings.Join(names, ", ")),
+		), nil
+	}
+
+	found := false
+	for _, c := range t.Columns {
+		if c.Name == columnName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		colNames := make([]string, 0, len(t.Columns))
+		for _, c := range t.Columns {
+			colNames = append(colNames, c.Name)
+		}
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("column %q not found in table %q. Available columns: %s",
+				columnName, tableName, strings.Join(colNames, ", ")),
+		), nil
+	}
+
+	if err := s.annotations.SaveColumnAnnotation(ctx, tableName, columnName, annotation); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to save column annotation: %v", err)), nil
+	}
+
+	return mcpgo.NewToolResultText(fmt.Sprintf("Annotation saved for column %q.%q", tableName, columnName)), nil
+}
+
+func (s *Server) handleAnnotateDB(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	annotation, _ := req.GetArguments()["annotation"].(string)
+	if annotation == "" {
+		return mcpgo.NewToolResultError("annotation argument is required"), nil
+	}
+
+	if err := s.annotations.SaveDBAnnotation(ctx, annotation); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to save database annotation: %v", err)), nil
+	}
+
+	return mcpgo.NewToolResultText("Database annotation saved"), nil
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

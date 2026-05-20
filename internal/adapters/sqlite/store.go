@@ -12,7 +12,14 @@ import (
 	// Register the modernc sqlite driver as a side-effect.
 	_ "modernc.org/sqlite"
 
+	"github.com/pvidaal07/heydb/internal/domain/ports"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
+)
+
+// Compile-time check: Store must satisfy both ports.
+var (
+	_ ports.SchemaStore     = (*Store)(nil)
+	_ ports.AnnotationStore = (*Store)(nil)
 )
 
 const ddl = `
@@ -72,6 +79,21 @@ CREATE TABLE IF NOT EXISTS heydb_annotations (
     content    TEXT    NOT NULL DEFAULT '',
     updated_at TEXT    NOT NULL DEFAULT '',
     UNIQUE(table_name)
+);
+
+CREATE TABLE IF NOT EXISTS heydb_column_annotations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name  TEXT    NOT NULL,
+    column_name TEXT    NOT NULL,
+    content     TEXT    NOT NULL DEFAULT '',
+    updated_at  TEXT    NOT NULL DEFAULT '',
+    UNIQUE(table_name, column_name)
+);
+
+CREATE TABLE IF NOT EXISTS heydb_db_annotation (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    content    TEXT    NOT NULL DEFAULT '',
+    updated_at TEXT    NOT NULL DEFAULT ''
 );
 `
 
@@ -442,6 +464,86 @@ func (s *Store) GetAllAnnotations(ctx context.Context) (map[string]string, error
 		result[name] = content
 	}
 	return result, rows.Err()
+}
+
+// ── Column annotations ──────────────────────────────────────────────────────
+
+// SaveColumnAnnotation upserts an annotation for a specific column.
+func (s *Store) SaveColumnAnnotation(ctx context.Context, tableName, columnName, content string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO heydb_column_annotations (table_name, column_name, content, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(table_name, column_name) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+		tableName, columnName, content, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("sqlite: save column annotation for %q.%q: %w", tableName, columnName, err)
+	}
+	return nil
+}
+
+// GetColumnAnnotation returns the annotation for a specific column, or empty string if none.
+func (s *Store) GetColumnAnnotation(ctx context.Context, tableName, columnName string) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM heydb_column_annotations WHERE table_name = ? AND column_name = ?`,
+		tableName, columnName).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sqlite: get column annotation for %q.%q: %w", tableName, columnName, err)
+	}
+	return content, nil
+}
+
+// GetAllColumnAnnotations returns all column annotations for a table as a map of column_name → content.
+func (s *Store) GetAllColumnAnnotations(ctx context.Context, tableName string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT column_name, content FROM heydb_column_annotations WHERE table_name = ? ORDER BY column_name`,
+		tableName)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get all column annotations for %q: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var name, content string
+		if err := rows.Scan(&name, &content); err != nil {
+			return nil, err
+		}
+		result[name] = content
+	}
+	return result, rows.Err()
+}
+
+// ── Database annotation ─────────────────────────────────────────────────────
+
+// SaveDBAnnotation upserts the database-level annotation (singleton row, id=1).
+func (s *Store) SaveDBAnnotation(ctx context.Context, content string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO heydb_db_annotation (id, content, updated_at)
+		VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+		content, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("sqlite: save db annotation: %w", err)
+	}
+	return nil
+}
+
+// GetDBAnnotation returns the database-level annotation, or empty string if none.
+func (s *Store) GetDBAnnotation(ctx context.Context) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM heydb_db_annotation WHERE id = 1`).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("sqlite: get db annotation: %w", err)
+	}
+	return content, nil
 }
 
 func boolToInt(b bool) int {
