@@ -54,6 +54,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer store.Close()
 
 	// Start the MCP server (blocking — returns when stdin is closed).
-	mcpSrv := heydbmcp.New(store, store)
+	// TODO(PR-2): replace NewSingle with mcp.New(registry) after serve.go is rewritten.
+	mcpSrv := heydbmcp.NewSingle(store, store)
 	return mcpSrv.Serve()
 }
