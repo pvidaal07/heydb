@@ -98,14 +98,14 @@ func threeTableStore() *mockStore {
 }
 
 func TestSchemaTab_Title(t *testing.T) {
-	st := tab.NewSchemaTab(nil)
+	st := tab.NewSchemaTab(nil, nil)
 	if st.Title() != "Schema" {
 		t.Errorf("expected Title() == 'Schema', got %q", st.Title())
 	}
 }
 
 func TestSchemaTab_NilStore_EmptyState(t *testing.T) {
-	st := tab.NewSchemaTab(nil)
+	st := tab.NewSchemaTab(nil, nil)
 	view := st.View()
 	if !strings.Contains(view, "active connection") {
 		t.Errorf("expected empty-state message about active connection, got:\n%s", view)
@@ -114,7 +114,7 @@ func TestSchemaTab_NilStore_EmptyState(t *testing.T) {
 
 func TestSchemaTab_WithStore_ShowsTables(t *testing.T) {
 	store := threeTableStore()
-	st := tab.NewSchemaTab(store)
+	st := tab.NewSchemaTab(store, nil)
 
 	// Trigger load by sending WindowSizeMsg.
 	updated, _ := st.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -134,7 +134,7 @@ func TestSchemaTab_WithStore_ShowsTables(t *testing.T) {
 
 func TestSchemaTab_EnterOpensDetailView(t *testing.T) {
 	store := threeTableStore()
-	st := tab.NewSchemaTab(store)
+	st := tab.NewSchemaTab(store, nil)
 
 	// Trigger load.
 	updated, _ := st.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -153,7 +153,7 @@ func TestSchemaTab_EnterOpensDetailView(t *testing.T) {
 
 func TestSchemaTab_EscReturnsToList(t *testing.T) {
 	store := threeTableStore()
-	st := tab.NewSchemaTab(store)
+	st := tab.NewSchemaTab(store, nil)
 
 	// Trigger load.
 	updated, _ := st.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -176,7 +176,7 @@ func TestSchemaTab_EscReturnsToList(t *testing.T) {
 
 func TestSchemaTab_ConfigReloadedMsg_ClearsStore(t *testing.T) {
 	store := threeTableStore()
-	st := tab.NewSchemaTab(store)
+	st := tab.NewSchemaTab(store, nil)
 
 	// Load tables.
 	updated, _ := st.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

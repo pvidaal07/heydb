@@ -124,7 +124,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Then open the new store (if any) and broadcast StoreOpenedMsg.
 		if m.storeOpener != nil && m.cfg != nil && m.cfg.ActiveConnection != "" {
 			store, _ := m.storeOpener(m.cfg.ActiveConnection)
-			m2, storeCmd := m.fanOut(StoreOpenedMsg{Store: store})
+			var ann ports.AnnotationStore
+			if store != nil {
+				ann, _ = store.(ports.AnnotationStore)
+			}
+			m2, storeCmd := m.fanOut(StoreOpenedMsg{Store: store, Annotations: ann})
 			m = m2.(Model)
 			return m, tea.Batch(batchCmd, storeCmd)
 		}

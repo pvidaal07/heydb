@@ -15,7 +15,8 @@ import (
 
 // SchemaTab shows the schema browser: a table list with drill-down to detail view.
 type SchemaTab struct {
-	store ports.SchemaStore
+	store       ports.SchemaStore
+	annotations ports.AnnotationStore
 
 	tables []schema.Table
 	loaded bool
@@ -32,8 +33,9 @@ type SchemaTab struct {
 }
 
 // NewSchemaTab creates a SchemaTab. store may be nil until a connection is active.
-func NewSchemaTab(store ports.SchemaStore) SchemaTab {
-	return SchemaTab{store: store}
+// annotations is optional; when provided, column annotations are shown in detail view.
+func NewSchemaTab(store ports.SchemaStore, annotations ports.AnnotationStore) SchemaTab {
+	return SchemaTab{store: store, annotations: annotations}
 }
 
 func (s SchemaTab) Title() string     { return "Schema" }
@@ -56,6 +58,7 @@ func (s SchemaTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = s.store.Close()
 		}
 		s.store = msg.Store
+		s.annotations = msg.Annotations
 		s.loaded = false
 		s.tables = nil
 		s.inDetail = false
@@ -181,6 +184,16 @@ func (s SchemaTab) countDetailLines() int {
 		n++
 	} else {
 		n += len(t.Columns)
+		// Count extra lines for column annotations.
+		if s.annotations != nil {
+			if colAnns, err := s.annotations.GetAllColumnAnnotations(context.Background(), t.Name); err == nil {
+				for _, c := range t.Columns {
+					if ann, ok := colAnns[c.Name]; ok && ann != "" {
+						n++
+					}
+				}
+			}
+		}
 	}
 	if len(t.Indexes) > 0 {
 		n += 1 + 1 + len(t.Indexes) // blank + heading + items
@@ -259,6 +272,12 @@ func (s SchemaTab) renderDetail() string {
 	lines = append(lines, tui.TitleStyle.Render(t.Name))
 	lines = append(lines, "")
 
+	// Load column annotations if available.
+	var colAnns map[string]string
+	if s.annotations != nil {
+		colAnns, _ = s.annotations.GetAllColumnAnnotations(context.Background(), t.Name)
+	}
+
 	lines = append(lines, tui.HeadingStyle.Render(fmt.Sprintf("Columns (%d)", len(t.Columns))))
 	if len(t.Columns) == 0 {
 		lines = append(lines, tui.SubtextStyle.Render("  (none)"))
@@ -278,6 +297,9 @@ func (s SchemaTab) renderDetail() string {
 			}
 			line := fmt.Sprintf("  %-20s %s%s%s%s", c.Name, c.Type, nullable, extra, comment)
 			lines = append(lines, tui.UnselectedStyle.Render(line))
+			if ann, ok := colAnns[c.Name]; ok && ann != "" {
+				lines = append(lines, tui.SubtextStyle.Render("    📝 "+strings.TrimSpace(ann)))
+			}
 		}
 	}
 
