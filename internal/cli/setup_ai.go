@@ -41,20 +41,24 @@ without a live database connection.
 
 ### MCP Tools
 
-heydb exposes the following MCP tools when running heydb serve:
+heydb exposes the following MCP tools when running heydb serve.
+All tools accept an optional "connection" parameter; when omitted, the active
+connection is used.
 
-- **list_connections** — list all configured database connections
-- **list_tables** — list all tables with column counts for the active connection
-- **describe_table** — show full schema detail (columns, indexes, foreign keys) for one table
-- **search_columns** — search tables and columns by name or keyword
-- **get_annotations** — retrieve human-written annotations attached to tables or columns
-- **set_annotation** — attach a note to a table or column for future AI context
+- **heydb_list_connections** — list all configured database connections
+- **heydb_list_tables** — list all tables with column counts
+- **heydb_get_table** — get full table detail (columns, indexes, foreign keys, annotations)
+- **heydb_search** — search tables and columns by keyword
+- **heydb_annotate** — annotate a table with business context
+- **heydb_annotate_column** — annotate a specific column
+- **heydb_annotate_db** — annotate the database itself
 
 ### Multi-Connection Support
 
-heydb supports multiple database connections. Use list_connections to discover
-available connections, then switch context as needed. Each connection has its
-own schema store under .heydb/.
+heydb supports multiple database connections. Use heydb_list_connections to
+discover available connections, then pass the "connection" parameter to any
+tool to target a specific database. Each connection has its own schema store
+under .heydb/.
 
 ` + blockEnd + "\n"
 }

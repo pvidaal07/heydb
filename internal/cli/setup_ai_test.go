@@ -31,17 +31,32 @@ func TestGenerateBlockContent_HasMarkers(t *testing.T) {
 
 func TestGenerateBlockContent_HasAllMCPTools(t *testing.T) {
 	block := generateBlockContent()
-	tools := []string{
-		"list_connections",
-		"list_tables",
+	// Real heydb_* tool names registered in internal/mcp/server.go
+	realTools := []string{
+		"heydb_list_connections",
+		"heydb_list_tables",
+		"heydb_get_table",
+		"heydb_search",
+		"heydb_annotate",
+		"heydb_annotate_column",
+		"heydb_annotate_db",
+	}
+	for _, tool := range realTools {
+		if !strings.Contains(block, tool) {
+			t.Errorf("block missing real MCP tool name %q", tool)
+		}
+	}
+
+	// The old fictional names must NOT appear — they were never real tool names.
+	oldFictionalNames := []string{
 		"describe_table",
 		"search_columns",
 		"get_annotations",
 		"set_annotation",
 	}
-	for _, tool := range tools {
-		if !strings.Contains(block, tool) {
-			t.Errorf("block missing MCP tool name %q", tool)
+	for _, old := range oldFictionalNames {
+		if strings.Contains(block, old) {
+			t.Errorf("block contains old fictional tool name %q — must be replaced with heydb_* names", old)
 		}
 	}
 }
@@ -58,7 +73,12 @@ func TestGenerateBlockContent_HasSchemaPath(t *testing.T) {
 
 func TestGenerateBlockContent_HasMultiConnectionInfo(t *testing.T) {
 	block := generateBlockContent()
-	assertContains(t, block, "list_connections")
+	assertContains(t, block, "heydb_list_connections")
+}
+
+func TestGenerateBlockContent_HasConnectionParameter(t *testing.T) {
+	block := generateBlockContent()
+	assertContains(t, block, "connection")
 }
 
 // ---------------------------------------------------------------------------
