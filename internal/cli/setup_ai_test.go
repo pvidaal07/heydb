@@ -64,6 +64,8 @@ func TestGenerateBlockContent_HasAllMCPTools(t *testing.T) {
 func TestGenerateBlockContent_HasHeydbDescription(t *testing.T) {
 	block := generateBlockContent()
 	assertContains(t, block, "heydb")
+	assertContains(t, block, "MySQL")
+	assertContains(t, block, "Model Context Protocol")
 }
 
 func TestGenerateBlockContent_HasSchemaPath(t *testing.T) {
@@ -71,14 +73,27 @@ func TestGenerateBlockContent_HasSchemaPath(t *testing.T) {
 	assertContains(t, block, ".heydb/*.md")
 }
 
+func TestGenerateBlockContent_HasUsageGuidance(t *testing.T) {
+	block := generateBlockContent()
+	assertContains(t, block, "BEFORE writing SQL")
+	assertContains(t, block, "When to use")
+}
+
 func TestGenerateBlockContent_HasMultiConnectionInfo(t *testing.T) {
 	block := generateBlockContent()
 	assertContains(t, block, "heydb_list_connections")
+	assertContains(t, block, "Multi-Connection")
 }
 
 func TestGenerateBlockContent_HasConnectionParameter(t *testing.T) {
 	block := generateBlockContent()
 	assertContains(t, block, "connection")
+}
+
+func TestGenerateBlockContent_HasAnnotationGuidance(t *testing.T) {
+	block := generateBlockContent()
+	assertContains(t, block, "Annotations Are Persistent")
+	assertContains(t, block, "heydb sync")
 }
 
 // ---------------------------------------------------------------------------

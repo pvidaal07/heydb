@@ -32,33 +32,58 @@ func generateBlockContent() string {
 
 ## heydb — Database Schema Context
 
-heydb introspects your MySQL databases and exposes their schema to AI agents
-via the Model Context Protocol (MCP).
+This project uses [heydb](https://github.com/pvidaal07/heydb) to document
+and expose MySQL database schemas to AI agents via the Model Context Protocol
+(MCP). heydb is read-only — it never modifies the source database.
 
-Schema markdown files are stored in .heydb/*.md — one file per connection.
-These files are intentionally tracked in git so AI agents can reference them
-without a live database connection.
+### How to Use Schema Context
 
-### MCP Tools
+**BEFORE writing SQL queries, reasoning about the database, or suggesting
+schema changes, you MUST check the available schema context.** Two sources:
 
-heydb exposes the following MCP tools when running heydb serve.
-All tools accept an optional "connection" parameter; when omitted, the active
-connection is used.
+1. **Schema markdown files** in ` + "`" + `.heydb/*.md` + "`" + ` — one file per connection,
+   tracked in git. Read these directly for quick offline context.
+2. **MCP tools** (when ` + "`" + `heydb serve` + "`" + ` is running) — structured queries for
+   precise lookups, searches, and annotation management.
 
-- **heydb_list_connections** — list all configured database connections
-- **heydb_list_tables** — list all tables with column counts
-- **heydb_get_table** — get full table detail (columns, indexes, foreign keys, annotations)
-- **heydb_search** — search tables and columns by keyword
-- **heydb_annotate** — annotate a table with business context
-- **heydb_annotate_column** — annotate a specific column
-- **heydb_annotate_db** — annotate the database itself
+Use the markdown files for broad context (understanding the full schema).
+Use MCP tools for targeted queries (specific table details, searching across
+tables, or reading/writing annotations).
 
-### Multi-Connection Support
+### MCP Tools Reference
 
-heydb supports multiple database connections. Use heydb_list_connections to
-discover available connections, then pass the "connection" parameter to any
-tool to target a specific database. Each connection has its own schema store
-under .heydb/.
+All tools accept an optional ` + "`" + `connection` + "`" + ` parameter. When omitted, the
+active connection is used. Call ` + "`" + `heydb_list_connections` + "`" + ` first to discover
+available connections.
+
+| Tool | Purpose | When to use |
+|------|---------|-------------|
+| ` + "`" + `heydb_list_connections` + "`" + ` | List all configured connections (name, active, synced) | Before any multi-connection workflow |
+| ` + "`" + `heydb_list_tables` + "`" + ` | List all tables with column counts and comments | Getting an overview of the schema |
+| ` + "`" + `heydb_get_table` + "`" + ` | Full detail: columns, types, indexes, FKs, annotations | Before writing queries involving a table |
+| ` + "`" + `heydb_search` + "`" + ` | Search tables and columns by keyword | Finding where a concept lives in the schema |
+| ` + "`" + `heydb_annotate` + "`" + ` | Annotate a table with business context | Documenting what a table represents |
+| ` + "`" + `heydb_annotate_column` + "`" + ` | Annotate a specific column | Documenting field meaning, valid values, gotchas |
+| ` + "`" + `heydb_annotate_db` + "`" + ` | Annotate the database itself | Documenting system purpose, ownership, constraints |
+
+### Annotations Are Persistent
+
+Annotations survive ` + "`" + `heydb sync` + "`" + ` runs — they are never overwritten by schema
+introspection. Use them freely to document:
+- Business meaning ("This table stores invoices for the billing module")
+- Implicit relationships ("user_id references auth.users but has no FK constraint")
+- Data quality notes ("email column may contain legacy invalid addresses")
+- Access patterns ("This table is write-heavy, ~10k inserts/day")
+
+### Multi-Connection Workflows
+
+heydb serves all configured connections simultaneously. Each connection has
+its own schema store under ` + "`" + `.heydb/` + "`" + `. Common patterns:
+
+- **Cross-database context**: Pass ` + "`" + `connection` + "`" + ` to query different databases
+  within the same session
+- **Dev vs production**: Compare schemas across environments
+- **Related systems**: Query billing + CRM + accounting schemas together
 
 ` + blockEnd + "\n"
 }
