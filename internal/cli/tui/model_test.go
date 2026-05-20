@@ -23,7 +23,7 @@ func newTestModel(t *testing.T) tui.Model {
 	}
 	tabs := []tui.Tab{
 		tab.NewConnectionsTab(cfg, "/tmp/test-config.json"),
-		tab.NewSchemaTab(nil),
+		tab.NewSchemaTab(nil, nil),
 		tab.NewSearchTab(),
 	}
 	return tui.New(cfg, "/tmp/test-config.json", "test").WithTabs(tabs)

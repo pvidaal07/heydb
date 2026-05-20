@@ -72,6 +72,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Collect annotations from both sources (SQLite wins on conflict since
 	// it's the canonical store written by MCP agents).
 	annotations := make(map[string]string)
+	columnAnnotations := make(map[string]map[string]string)
+	var dbAnnotation string
 
 	// Source 1: existing markdown file.
 	if existingContent, err := os.ReadFile(paths.Markdown); err == nil {
@@ -79,6 +81,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 			for k, v := range parsed.Annotations {
 				annotations[k] = v
 			}
+			for tbl, cols := range parsed.ColumnAnnotations {
+				colMap := make(map[string]string)
+				for col, ann := range cols {
+					colMap[col] = ann
+				}
+				columnAnnotations[tbl] = colMap
+			}
+			dbAnnotation = parsed.DBAnnotation
 		}
 	}
 
@@ -89,9 +99,35 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if Verbose && len(annotations) > 0 {
+	// Source 2b: SQLite column annotations — take precedence over markdown.
+	if sqliteSchema, err := store.LoadSchema(ctx); err == nil {
+		for _, t := range sqliteSchema.Tables {
+			if colAnns, err := store.GetAllColumnAnnotations(ctx, t.Name); err == nil && len(colAnns) > 0 {
+				if columnAnnotations[t.Name] == nil {
+					columnAnnotations[t.Name] = make(map[string]string)
+				}
+				for col, ann := range colAnns {
+					columnAnnotations[t.Name][col] = ann
+				}
+			}
+		}
+	}
+
+	// Source 2c: SQLite DB annotation — takes precedence over markdown.
+	if sqliteDBann, err := store.GetDBAnnotation(ctx); err == nil && sqliteDBann != "" {
+		dbAnnotation = sqliteDBann
+	}
+
+	totalAnns := len(annotations)
+	for _, cols := range columnAnnotations {
+		totalAnns += len(cols)
+	}
+	if dbAnnotation != "" {
+		totalAnns++
+	}
+	if Verbose && totalAnns > 0 {
 		fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation(s) from markdown + sqlite\n",
-			len(annotations))
+			totalAnns)
 	}
 
 	// Build MySQL introspector.
@@ -113,9 +149,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 	defer mdFile.Close()
 
 	// Build markdown writer (satisfies introspection.SchemaWriter).
-	var mdOpts *markdown.WriteOptions
-	if len(annotations) > 0 {
-		mdOpts = &markdown.WriteOptions{Annotations: annotations}
+	mdOpts := &markdown.WriteOptions{
+		Annotations:      annotations,
+		ColumnAnnotations: columnAnnotations,
+		DBAnnotation:     dbAnnotation,
 	}
 	mdWriter := &markdownSchemaWriter{w: mdFile, opts: mdOpts}
 
@@ -132,6 +169,23 @@ func runSync(cmd *cobra.Command, args []string) error {
 			if Verbose {
 				fmt.Fprintf(os.Stderr, "[debug] warning: failed to save annotation for %q: %v\n",
 					tableName, err)
+			}
+		}
+	}
+	for tableName, cols := range columnAnnotations {
+		for colName, content := range cols {
+			if err := store.SaveColumnAnnotation(ctx, tableName, colName, content); err != nil {
+				if Verbose {
+					fmt.Fprintf(os.Stderr, "[debug] warning: failed to save column annotation for %q.%q: %v\n",
+						tableName, colName, err)
+				}
+			}
+		}
+	}
+	if dbAnnotation != "" {
+		if err := store.SaveDBAnnotation(ctx, dbAnnotation); err != nil {
+			if Verbose {
+				fmt.Fprintf(os.Stderr, "[debug] warning: failed to save db annotation: %v\n", err)
 			}
 		}
 	}

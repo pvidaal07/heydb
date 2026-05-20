@@ -63,20 +63,26 @@ func buildTUIModel(cfg *config.Config, cfgPath, cwd string) tui.Model {
 
 	// Try to open the store for the active connection at startup.
 	var initialStore ports.SchemaStore
+	var initialAnnotations ports.AnnotationStore
 	if cfg.ActiveConnection != "" {
-		initialStore, _ = opener(cfg.ActiveConnection)
+		if s, err := opener(cfg.ActiveConnection); err == nil {
+			initialStore = s
+			if ann, ok := s.(ports.AnnotationStore); ok {
+				initialAnnotations = ann
+			}
+		}
 	}
 
 	tabs := []tui.Tab{
 		tab.NewConnectionsTab(cfg, cfgPath),
-		tab.NewSchemaTab(initialStore),
+		tab.NewSchemaTab(initialStore, initialAnnotations),
 		tab.NewSearchTab(),
 	}
 
 	// Send the initial store to SearchTab if available.
 	searchTab := tab.NewSearchTab()
 	if initialStore != nil {
-		updated, _ := searchTab.Update(tui.StoreOpenedMsg{Store: initialStore})
+		updated, _ := searchTab.Update(tui.StoreOpenedMsg{Store: initialStore, Annotations: initialAnnotations})
 		if st, ok := updated.(tab.SearchTab); ok {
 			tabs[2] = st
 		}

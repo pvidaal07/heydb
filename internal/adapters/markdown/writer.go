@@ -28,6 +28,12 @@ type WriteOptions struct {
 	// Annotations maps table name → preserved annotation block content
 	// (everything between <!-- heydb:annotations --> and <!-- /heydb:annotations -->).
 	Annotations map[string]string
+
+	// ColumnAnnotations maps table name → (column name → annotation content).
+	ColumnAnnotations map[string]map[string]string
+
+	// DBAnnotation is the database-level annotation content.
+	DBAnnotation string
 }
 
 // Write generates the full heydb.md content for s and writes it to w.
@@ -43,6 +49,16 @@ func Write(w io.Writer, s schema.Schema, opts *WriteOptions) error {
 	// ── File header ──────────────────────────────────────────────────────────
 	b.WriteString("# heydb schema documentation\n\n")
 	b.WriteString(fmt.Sprintf("Database: **%s**\n\n", s.Database))
+
+	// ── Database annotation ──────────────────────────────────────────────────
+	if opts.DBAnnotation != "" {
+		b.WriteString("<!-- heydb:db-annotation -->\n")
+		b.WriteString(opts.DBAnnotation)
+		if !strings.HasSuffix(opts.DBAnnotation, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("<!-- /heydb:db-annotation -->\n\n")
+	}
 
 	// ── Meta block ───────────────────────────────────────────────────────────
 	b.WriteString("<!-- heydb:meta\n")
@@ -63,7 +79,7 @@ func Write(w io.Writer, s schema.Schema, opts *WriteOptions) error {
 
 	// ── Per-table sections ───────────────────────────────────────────────────
 	for idx, t := range s.Tables {
-		writeTable(b, t, opts.Annotations[t.Name])
+		writeTable(b, t, opts.Annotations[t.Name], opts.ColumnAnnotations[t.Name])
 		if idx < len(s.Tables)-1 {
 			b.WriteString("\n---\n\n")
 		}
@@ -74,7 +90,7 @@ func Write(w io.Writer, s schema.Schema, opts *WriteOptions) error {
 }
 
 // writeTable emits the full markdown block for a single table.
-func writeTable(b *strings.Builder, t schema.Table, annotation string) {
+func writeTable(b *strings.Builder, t schema.Table, annotation string, colAnnotations map[string]string) {
 	b.WriteString(fmt.Sprintf("<!-- heydb:table name=%q -->\n", t.Name))
 	b.WriteString(fmt.Sprintf("## %s\n\n", t.Name))
 
@@ -109,6 +125,20 @@ func writeTable(b *strings.Builder, t schema.Table, annotation string) {
 		))
 	}
 	b.WriteString("\n")
+
+	// Column annotations
+	if len(colAnnotations) > 0 {
+		for _, c := range t.Columns {
+			if ann, ok := colAnnotations[c.Name]; ok && ann != "" {
+				b.WriteString(fmt.Sprintf("<!-- heydb:col-annotation name=%q -->\n", c.Name))
+				b.WriteString(ann)
+				if !strings.HasSuffix(ann, "\n") {
+					b.WriteString("\n")
+				}
+				b.WriteString("<!-- /heydb:col-annotation -->\n\n")
+			}
+		}
+	}
 
 	// Primary key
 	if len(t.PrimaryKey) > 0 {
