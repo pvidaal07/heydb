@@ -31,26 +31,32 @@ func init() {
 func runDiff(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	paths, _, conn, err := resolveActivePaths()
+	dbPath := GlobalDBPath()
+	gs, err := sqlite.OpenGlobal(dbPath)
 	if err != nil {
-		return fmt.Errorf("diff: %w", err)
+		return fmt.Errorf("diff: open global DB: %w", err)
+	}
+	defer gs.Close()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("diff: cannot determine working directory: %w", err)
 	}
 
-	// Load stored schema from SQLite.
-	store, err := sqlite.Open(paths.SQLite)
+	_, conn, name, connStore, err := resolveActiveGlobalConnection(gs, cwd)
 	if err != nil {
-		return fmt.Errorf("diff: open sqlite store: %w\n\nRun `heydb sync` first.", err)
+		return fmt.Errorf("diff: %w\n\nRun `heydb sync` first.", err)
 	}
-	defer store.Close()
 
-	storedSchema, err := store.LoadSchema(ctx)
+	// Load stored schema from GlobalStore.
+	storedSchema, err := connStore.LoadSchema(ctx)
 	if err != nil {
 		return fmt.Errorf("diff: load stored schema: %w\n\nRun `heydb sync` first.", err)
 	}
 
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[debug] connection %q: %d tables, hash %s\n",
-			paths.ConnName, len(storedSchema.Tables), storedSchema.Hash[:12]+"...")
+			name, len(storedSchema.Tables), storedSchema.Hash[:12]+"...")
 	}
 
 	// Introspect live DB.
@@ -69,10 +75,10 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "%d tables\n", len(tableNames))
 
 	liveTables := make([]schema.Table, 0, len(tableNames))
-	for _, name := range tableNames {
-		t, err := introspector.GetTable(ctx, name)
+	for _, tblName := range tableNames {
+		t, err := introspector.GetTable(ctx, tblName)
 		if err != nil {
-			return fmt.Errorf("diff: get table %q: %w", name, err)
+			return fmt.Errorf("diff: get table %q: %w", tblName, err)
 		}
 		liveTables = append(liveTables, t)
 	}
@@ -97,7 +103,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		fmt.Printf("    %s %s\n", symbol, e.Detail)
 	}
 	fmt.Println()
-	fmt.Println("Run `heydb sync` to update heydb.md and heydb.sqlite")
+	fmt.Println("Run `heydb sync` to update the stored schema")
 
 	os.Exit(1)
 	return nil

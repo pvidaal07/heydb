@@ -1,22 +1,21 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"sort"
 
 	"github.com/spf13/cobra"
 
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
-	"github.com/pvidaal07/heydb/internal/config"
 	heydbmcp "github.com/pvidaal07/heydb/internal/mcp"
 )
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the MCP stdio server for all configured connections",
-	Long: `Opens every synced .heydb/{connection}.sqlite and starts an MCP server on
-stdio, exposing these tools to AI agents:
+	Long: `Opens every synced connection from ~/.heydb/heydb.db and starts an MCP
+server on stdio, exposing these tools to AI agents:
 
   heydb_list_connections  — list all configured database connections
   heydb_list_tables       — list all tables with column counts
@@ -35,77 +34,107 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-// buildRegistry loads sqlite stores for all connections defined in cfg and
-// returns a Registry. Connections whose sqlite file is missing or fails to
-// open are skipped with a warning — they appear unsynced in list_connections.
+// buildRegistryV2 loads schema stores for all connections in the project from
+// GlobalStore and returns a Registry. Connections that have not been synced
+// (no schema_meta row) are still listed — they appear as unsynced.
 // This function is extracted for testability.
-func buildRegistry(heydbDirPath string, cfg *config.Config) (*heydbmcp.Registry, error) {
+func buildRegistryV2(gs *sqlite.GlobalStore, projectID, activeConn string) (*heydbmcp.Registry, error) {
+	ctx := context.Background()
+
+	conns, err := gs.ListConnections(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("serve: list connections: %w", err)
+	}
+
 	entries := make(map[string]*heydbmcp.ConnEntry)
+	allNames := make([]string, 0, len(conns))
 
-	// Collect ALL connection names (sorted for determinism).
-	allNames := make([]string, 0, len(cfg.Connections))
-	for name := range cfg.Connections {
-		allNames = append(allNames, name)
-	}
-	sort.Strings(allNames)
+	for _, c := range conns {
+		allNames = append(allNames, c.Name)
 
-	// Open sqlite store for each connection. Missing/broken stores are skipped.
-	for _, name := range allNames {
-		sqlitePath := fmt.Sprintf("%s/%s.sqlite", heydbDirPath, name)
+		connID := projectID + "/" + c.Name
+		connStore := gs.ForConnection(connID)
 
-		// Skip connections whose sqlite file has not been synced yet.
-		if _, statErr := os.Stat(sqlitePath); os.IsNotExist(statErr) {
+		// Check if this connection has been synced by probing schema_meta.
+		if isSynced(ctx, gs, connID) {
 			if Verbose {
-				fmt.Fprintf(os.Stderr, "[debug] connection %q: no sqlite file — run `heydb sync`\n", name)
+				fmt.Fprintf(os.Stderr, "[debug] connection %q: schema available\n", c.Name)
 			}
-			continue
+			// GlobalStore implements AnnotationStore — pass it for annotation support.
+			entries[c.Name] = &heydbmcp.ConnEntry{Schema: connStore, Annotations: gs}
+		} else {
+			if Verbose {
+				fmt.Fprintf(os.Stderr, "[debug] connection %q: not synced — run `heydb sync`\n", c.Name)
+			}
 		}
-
-		store, err := sqlite.Open(sqlitePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] connection %q: skipping — %v\n", name, err)
-			continue
-		}
-
-		if Verbose {
-			fmt.Fprintf(os.Stderr, "[debug] connection %q: opened %s\n", name, sqlitePath)
-		}
-
-		entries[name] = &heydbmcp.ConnEntry{Schema: store, Annotations: store}
 	}
 
-	return heydbmcp.NewRegistry(entries, allNames, cfg.ActiveConnection), nil
+	return heydbmcp.NewRegistry(entries, allNames, activeConn), nil
+}
+
+// isSynced returns true if there is a schema_meta row for the given connID.
+func isSynced(ctx context.Context, gs *sqlite.GlobalStore, connID string) bool {
+	var count int
+	_ = gs.DB().QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM schema_meta WHERE connection_id = ?`, connID,
+	).Scan(&count)
+	return count > 0
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	dbPath := GlobalDBPath()
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		return fmt.Errorf("serve: open global DB: %w", err)
+	}
+	defer gs.Close()
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("serve: cannot determine working directory: %w", err)
 	}
 
-	dir := fmt.Sprintf("%s/%s", cwd, heydbDir)
-	cfgPath := fmt.Sprintf("%s/%s", dir, configFileName)
-
-	cfg, err := config.Load(cfgPath)
+	proj, err := gs.GetProjectByPath(ctx, cwd)
 	if err != nil {
-		return fmt.Errorf("serve: %w", err)
+		return fmt.Errorf("serve: lookup project: %w", err)
+	}
+	if proj == nil {
+		return fmt.Errorf("serve: no heydb project found for %q — run `heydb init` first", cwd)
 	}
 
-	if len(cfg.Connections) == 0 {
+	// Find the active connection name.
+	conns, err := gs.ListConnections(ctx, proj.ID)
+	if err != nil {
+		return fmt.Errorf("serve: list connections: %w", err)
+	}
+	if len(conns) == 0 {
 		return fmt.Errorf("serve: no connections configured\n\nRun `heydb connect` to add a connection first.")
 	}
 
-	registry, err := buildRegistry(dir, cfg)
+	activeConn := ""
+	for _, c := range conns {
+		if c.Active {
+			activeConn = c.Name
+			break
+		}
+	}
+
+	registry, err := buildRegistryV2(gs, proj.ID, activeConn)
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	defer registry.CloseAll()
 
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[debug] active connection: %q\n", cfg.ActiveConnection)
+		fmt.Fprintf(os.Stderr, "[debug] active connection: %q\n", activeConn)
 	}
 
+	// Read author from user_config for annotation authorship.
+	author, _ := gs.GetConfig(ctx, "author")
+
 	// Start the MCP server (blocking — returns when stdin is closed).
-	mcpSrv := heydbmcp.New(registry)
+	mcpSrv := heydbmcp.NewWithMeta(registry, proj.ID, author)
 	return mcpSrv.Serve()
 }

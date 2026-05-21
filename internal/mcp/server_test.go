@@ -15,6 +15,9 @@ import (
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
+// testProjectID is the project ID used in all server tests.
+const testProjectID = "test-project-1"
+
 // newTestServer builds a Server with a multi-connection registry for testing.
 //
 //	production — active, synced, has "users" and "orders" tables
@@ -46,7 +49,7 @@ func newTestServer(t *testing.T) *mcp.Server {
 		"production",
 	)
 
-	return mcp.New(reg)
+	return mcp.NewWithMeta(reg, testProjectID, "test-author")
 }
 
 // callTool creates an in-process MCP client, initializes it, calls the named
@@ -331,35 +334,191 @@ func TestServer_HandleGetTable_NotFoundInNamedConn(t *testing.T) {
 	}
 }
 
-// ── TestServer_HandleAnnotate ─────────────────────────────────────────────────
+// ── TestServer_HandleAnnotate (v2 accumulative) ───────────────────────────────
 
-func TestServer_HandleAnnotate_ConnectionRouting(t *testing.T) {
+func TestAnnotate_ReturnsUUID(t *testing.T) {
 	srv := newTestServer(t)
 	result := callTool(t, srv, "heydb_annotate", map[string]any{
-		"table_name": "products",
-		"annotation": "Product catalog",
-		"connection": "staging",
+		"table_name": "users",
+		"annotation": "User accounts",
+		"connection": "production",
 	})
 
 	if result.IsError {
-		t.Fatalf("heydb_annotate (staging/products) returned error: %s", firstText(t, result))
+		t.Fatalf("heydb_annotate returned error: %s", firstText(t, result))
 	}
 
 	text := firstText(t, result)
-	if !strings.Contains(text, "products") {
-		t.Errorf("expected table name in success message; got: %s", text)
+	var ann map[string]any
+	if err := json.Unmarshal([]byte(text), &ann); err != nil {
+		t.Fatalf("expected JSON response, unmarshal failed: %v\nraw: %s", err, text)
+	}
+	if id, _ := ann["id"].(string); id == "" {
+		t.Errorf("expected non-empty id in response; got: %s", text)
 	}
 }
 
-func TestServer_HandleAnnotateDB_ConnectionRouting(t *testing.T) {
+func TestAnnotate_AccumulatesMultiple(t *testing.T) {
 	srv := newTestServer(t)
-	result := callTool(t, srv, "heydb_annotate_db", map[string]any{
-		"annotation": "Staging environment data",
-		"connection": "staging",
+
+	// Two annotations on the same table.
+	callTool(t, srv, "heydb_annotate", map[string]any{
+		"table_name": "users",
+		"annotation": "First note",
+		"connection": "production",
+	})
+	callTool(t, srv, "heydb_annotate", map[string]any{
+		"table_name": "users",
+		"annotation": "Second note",
+		"connection": "production",
+	})
+
+	// Verify get_table includes both annotations.
+	result := callTool(t, srv, "heydb_get_table", map[string]any{
+		"table_name": "users",
+		"connection": "production",
+	})
+	if result.IsError {
+		t.Fatalf("heydb_get_table returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(text), &detail); err != nil {
+		t.Fatalf("unmarshal get_table response: %v", err)
+	}
+	anns, ok := detail["annotations"].([]any)
+	if !ok {
+		t.Fatalf("expected 'annotations' array in response; got: %s", text)
+	}
+	if len(anns) != 2 {
+		t.Errorf("expected 2 annotations after two annotate calls, got %d", len(anns))
+	}
+}
+
+func TestGetTable_AnnotationsIsArray(t *testing.T) {
+	srv := newTestServer(t)
+	result := callTool(t, srv, "heydb_get_table", map[string]any{
+		"table_name": "users",
+		"connection": "production",
 	})
 
 	if result.IsError {
-		t.Fatalf("heydb_annotate_db (staging) returned error: %s", firstText(t, result))
+		t.Fatalf("heydb_get_table returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(text), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// annotations must be an array (never null), even when empty.
+	raw, exists := detail["annotations"]
+	if !exists {
+		t.Fatalf("'annotations' field missing from response; got: %s", text)
+	}
+	if _, ok := raw.([]any); !ok {
+		t.Errorf("'annotations' must be an array, got %T; response: %s", raw, text)
+	}
+}
+
+func TestEditAnnotation_UpdatesContent(t *testing.T) {
+	srv := newTestServer(t)
+
+	// First annotate.
+	r := callTool(t, srv, "heydb_annotate", map[string]any{
+		"table_name": "users",
+		"annotation": "original",
+		"connection": "production",
+	})
+	if r.IsError {
+		t.Fatalf("annotate: %s", firstText(t, r))
+	}
+	var created map[string]any
+	if err := json.Unmarshal([]byte(firstText(t, r)), &created); err != nil {
+		t.Fatalf("unmarshal annotate response: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	// Then edit.
+	editResult := callTool(t, srv, "heydb_edit_annotation", map[string]any{
+		"id":      id,
+		"content": "updated content",
+	})
+	if editResult.IsError {
+		t.Fatalf("heydb_edit_annotation returned error: %s", firstText(t, editResult))
+	}
+
+	text := firstText(t, editResult)
+	var updated map[string]any
+	if err := json.Unmarshal([]byte(text), &updated); err != nil {
+		t.Fatalf("unmarshal edit response: %v", err)
+	}
+	if content, _ := updated["content"].(string); content != "updated content" {
+		t.Errorf("content: got %q, want %q", content, "updated content")
+	}
+}
+
+func TestEditAnnotation_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	result := callTool(t, srv, "heydb_edit_annotation", map[string]any{
+		"id":      "nonexistent-uuid",
+		"content": "whatever",
+	})
+
+	if !result.IsError {
+		t.Fatalf("expected error for nonexistent annotation; got: %s", firstText(t, result))
+	}
+}
+
+func TestDeleteAnnotation_RemovesFromGet(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Annotate.
+	r := callTool(t, srv, "heydb_annotate", map[string]any{
+		"table_name": "users",
+		"annotation": "to be deleted",
+		"connection": "production",
+	})
+	if r.IsError {
+		t.Fatalf("annotate: %s", firstText(t, r))
+	}
+	var created map[string]any
+	if err := json.Unmarshal([]byte(firstText(t, r)), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	id, _ := created["id"].(string)
+
+	// Delete.
+	del := callTool(t, srv, "heydb_delete_annotation", map[string]any{"id": id})
+	if del.IsError {
+		t.Fatalf("heydb_delete_annotation returned error: %s", firstText(t, del))
+	}
+
+	// Verify get_table shows empty annotations.
+	result := callTool(t, srv, "heydb_get_table", map[string]any{
+		"table_name": "users",
+		"connection": "production",
+	})
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(firstText(t, result)), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	anns, _ := detail["annotations"].([]any)
+	if len(anns) != 0 {
+		t.Errorf("expected 0 annotations after delete, got %d", len(anns))
+	}
+}
+
+func TestDeleteAnnotation_NotFound(t *testing.T) {
+	srv := newTestServer(t)
+	result := callTool(t, srv, "heydb_delete_annotation", map[string]any{
+		"id": "nonexistent-uuid",
+	})
+
+	if !result.IsError {
+		t.Fatalf("expected error for nonexistent annotation; got: %s", firstText(t, result))
 	}
 }
 

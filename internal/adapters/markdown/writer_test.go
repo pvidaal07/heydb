@@ -150,6 +150,81 @@ func TestWrite_PrimaryKeySection(t *testing.T) {
 	}
 }
 
+func TestWriteV2_AnnotationsWithAuthor(t *testing.T) {
+	now := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	annotations := []schema.Annotation{
+		{
+			ID:             "uuid-1",
+			TargetType:     "table",
+			TargetName:     "users",
+			Content:        "This table stores user accounts",
+			Author:         "pvidal",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             "uuid-2",
+			TargetType:     "table",
+			TargetName:     "users",
+			Content:        "Contains both active and deleted users",
+			Author:         "jsmith",
+			CreatedAt:      now.Add(-24 * time.Hour),
+			UpdatedAt:      now.Add(-24 * time.Hour),
+		},
+	}
+	opts := &markdown.WriteOptions{
+		V2Annotations: annotations,
+	}
+	var buf strings.Builder
+	if err := markdown.Write(&buf, sampleSchema(), opts); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "by pvidal") {
+		t.Error("output missing author 'pvidal'")
+	}
+	if !strings.Contains(out, "This table stores user accounts") {
+		t.Error("output missing annotation content")
+	}
+	if !strings.Contains(out, "by jsmith") {
+		t.Error("output missing author 'jsmith'")
+	}
+	if !strings.Contains(out, "**Annotation**") {
+		t.Error("output missing **Annotation** marker")
+	}
+}
+
+func TestWriteV2_DBAnnotationsWithAuthor(t *testing.T) {
+	now := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	annotations := []schema.Annotation{
+		{
+			ID:         "uuid-db",
+			TargetType: "db",
+			TargetName: "",
+			Content:    "Production database for myapp",
+			Author:     "pvidal",
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		},
+	}
+	opts := &markdown.WriteOptions{
+		V2Annotations: annotations,
+	}
+	var buf strings.Builder
+	if err := markdown.Write(&buf, sampleSchema(), opts); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Production database for myapp") {
+		t.Error("output missing DB annotation content")
+	}
+	if !strings.Contains(out, "by pvidal") {
+		t.Error("output missing author in DB annotation")
+	}
+}
+
 func TestWrite_ForeignKeys(t *testing.T) {
 	s := schema.Schema{
 		Database: "testdb",

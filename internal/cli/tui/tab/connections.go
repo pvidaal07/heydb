@@ -1,6 +1,7 @@
 package tab
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,14 +12,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/pvidaal07/heydb/internal/cli/tui"
-	"github.com/pvidaal07/heydb/internal/config"
+	"github.com/pvidaal07/heydb/internal/domain/ports"
+	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
 // ConnectionsTab shows the list of configured connections, a detail panel for
 // the selected one, and inline huh forms for add/edit/delete.
 type ConnectionsTab struct {
-	cfg     *config.Config
-	cfgPath string
+	connections []schema.Connection
+	activeConn  string
+	projectID   string
+	store       ports.ConnectionStore
 
 	names     []string
 	cursor    int
@@ -43,11 +47,13 @@ type confirmOverlay struct {
 	form       *huh.Form
 }
 
-// NewConnectionsTab creates a ConnectionsTab populated from cfg.
-func NewConnectionsTab(cfg *config.Config, cfgPath string) ConnectionsTab {
+// NewConnectionsTab creates a ConnectionsTab populated from a connections slice.
+func NewConnectionsTab(conns []schema.Connection, activeConn, projectID string, store ports.ConnectionStore) ConnectionsTab {
 	ct := ConnectionsTab{
-		cfg:     cfg,
-		cfgPath: cfgPath,
+		connections: conns,
+		activeConn:  activeConn,
+		projectID:   projectID,
+		store:       store,
 	}
 	ct.refreshNames()
 	return ct
@@ -104,8 +110,9 @@ func (c ConnectionsTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case tui.ConfigReloadedMsg:
-		c.cfg = msg.Cfg
+	case tui.ConnectionsChangedMsg:
+		c.connections = msg.Connections
+		c.activeConn = msg.ActiveConnName
 		c.refreshNames()
 		if c.cursor >= len(c.names) {
 			c.cursor = max(0, len(c.names)-1)
@@ -159,8 +166,8 @@ func (c *ConnectionsTab) renderList() string {
 
 	for i := start; i < end; i++ {
 		name := c.names[i]
-		isActive := name == c.cfg.ActiveConnection
-		conn := c.cfg.Connections[name]
+		isActive := name == c.activeConn
+		conn := c.findConn(name)
 		desc := fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
 
 		label := name
@@ -191,22 +198,17 @@ func (c *ConnectionsTab) renderDetail() string {
 	}
 
 	name := c.names[c.cursor]
-	conn := c.cfg.Connections[name]
-	timeout := conn.Timeout
-	if timeout == 0 {
-		timeout = 30
-	}
+	conn := c.findConn(name)
 
 	var b strings.Builder
 	b.WriteString(tui.TitleStyle.Render(name))
 	b.WriteString("\n\n")
 	b.WriteString(c.detailRow("Host", fmt.Sprintf("%s:%d", conn.Host, conn.Port)))
 	b.WriteString(c.detailRow("Database", conn.Database))
-	b.WriteString(c.detailRow("Username", conn.Username))
+	b.WriteString(c.detailRow("Username", conn.User))
 	b.WriteString(c.detailRow("Password", "****"))
-	b.WriteString(c.detailRow("Timeout", fmt.Sprintf("%ds", timeout)))
 
-	if name == c.cfg.ActiveConnection {
+	if name == c.activeConn {
 		b.WriteString("\n")
 		b.WriteString(tui.SuccessStyle.Render("Active connection"))
 	}
@@ -237,11 +239,21 @@ func (c *ConnectionsTab) listWidth() int {
 }
 
 func (c *ConnectionsTab) refreshNames() {
-	c.names = make([]string, 0, len(c.cfg.Connections))
-	for n := range c.cfg.Connections {
-		c.names = append(c.names, n)
+	c.names = make([]string, 0, len(c.connections))
+	for _, conn := range c.connections {
+		c.names = append(c.names, conn.Name)
 	}
 	sort.Strings(c.names)
+}
+
+// findConn returns the connection with the given name, or a zero-value Connection.
+func (c *ConnectionsTab) findConn(name string) schema.Connection {
+	for _, conn := range c.connections {
+		if conn.Name == name {
+			return conn
+		}
+	}
+	return schema.Connection{}
 }
 
 func (c ConnectionsTab) handleEnter() (tea.Model, tea.Cmd) {
@@ -249,16 +261,19 @@ func (c ConnectionsTab) handleEnter() (tea.Model, tea.Cmd) {
 		return c, nil
 	}
 	name := c.names[c.cursor]
-	if name == c.cfg.ActiveConnection {
+	if name == c.activeConn {
 		return c, nil
 	}
 
-	c.cfg.ActiveConnection = name
-	_ = config.Save(c.cfgPath, c.cfg)
+	ctx := context.Background()
+	_ = c.store.SetActive(ctx, c.projectID, name)
+	conns, _ := c.store.ListConnections(ctx, c.projectID)
+	c.connections = conns
+	c.activeConn = name
 	c.refreshNames()
 
-	newCfg := c.cfg
-	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
+	snapshot := tui.ConnectionsChangedMsg{Connections: conns, ActiveConnName: name}
+	return c, func() tea.Msg { return snapshot }
 }
 
 func (c ConnectionsTab) openAddForm() (tea.Model, tea.Cmd) {
@@ -280,20 +295,16 @@ func (c ConnectionsTab) openEditForm() (tea.Model, tea.Cmd) {
 		return c, nil
 	}
 	name := c.names[c.cursor]
-	conn := c.cfg.Connections[name]
+	conn := c.findConn(name)
 
 	c.editingName = name
 	c.fname = name
 	c.fhost = conn.Host
 	c.fport = strconv.Itoa(conn.Port)
 	c.fdatabase = conn.Database
-	c.fusername = conn.Username
+	c.fusername = conn.User
 	c.fpassword = "****"
-	timeout := conn.Timeout
-	if timeout == 0 {
-		timeout = 30
-	}
-	c.ftimeout = strconv.Itoa(timeout)
+	c.ftimeout = "30"
 	c.formOverlay = c.buildForm(true)
 	cmd := c.formOverlay.Init()
 	return c, cmd
@@ -334,8 +345,10 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 			if strings.TrimSpace(s) == "" {
 				return fmt.Errorf("connection name is required")
 			}
-			if _, exists := c.cfg.Connections[strings.TrimSpace(s)]; exists {
-				return fmt.Errorf("connection %q already exists", s)
+			for _, conn := range c.connections {
+				if conn.Name == strings.TrimSpace(s) {
+					return fmt.Errorf("connection %q already exists", s)
+				}
 			}
 			return nil
 		})
@@ -424,51 +437,58 @@ func (c ConnectionsTab) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (c ConnectionsTab) commitForm() (tea.Model, tea.Cmd) {
 	port, _ := strconv.Atoi(strings.TrimSpace(c.fport))
-	timeout, _ := strconv.Atoi(strings.TrimSpace(c.ftimeout))
 	if port == 0 {
 		port = 3306
-	}
-	if timeout == 0 {
-		timeout = 30
 	}
 
 	password := c.fpassword
 	if c.editingName != "" && password == "****" {
-		if existing, ok := c.cfg.Connections[c.editingName]; ok {
-			password = existing.Password
-		}
-	}
-
-	conn := config.Connection{
-		Driver:   "mysql",
-		Host:     strings.TrimSpace(c.fhost),
-		Port:     port,
-		Database: strings.TrimSpace(c.fdatabase),
-		Username: strings.TrimSpace(c.fusername),
-		Password: password,
-		Timeout:  timeout,
+		// Preserve existing password on edit.
+		existing := c.findConn(c.editingName)
+		password = existing.Password
 	}
 
 	name := strings.TrimSpace(c.fname)
+
+	conn := schema.Connection{
+		ProjectID: c.projectID,
+		Name:      name,
+		Host:      strings.TrimSpace(c.fhost),
+		Port:      port,
+		Database:  strings.TrimSpace(c.fdatabase),
+		User:      strings.TrimSpace(c.fusername),
+		Password:  password,
+	}
+
+	ctx := context.Background()
+
+	// If renaming, delete the old entry first.
 	if c.editingName != "" && c.editingName != name {
-		delete(c.cfg.Connections, c.editingName)
-		if c.cfg.ActiveConnection == c.editingName {
-			c.cfg.ActiveConnection = name
+		_ = c.store.DeleteConnection(ctx, c.projectID, c.editingName)
+		if c.activeConn == c.editingName {
+			c.activeConn = name
 		}
 	}
-	c.cfg.Connections[name] = conn
-	if len(c.cfg.Connections) == 1 {
-		c.cfg.ActiveConnection = name
+
+	_ = c.store.SaveConnection(ctx, c.projectID, conn)
+
+	// If this is the first connection, make it active.
+	conns, _ := c.store.ListConnections(ctx, c.projectID)
+	activeName := c.activeConn
+	if len(conns) == 1 {
+		_ = c.store.SetActive(ctx, c.projectID, name)
+		activeName = name
+		conns, _ = c.store.ListConnections(ctx, c.projectID)
 	}
 
-	_ = config.Save(c.cfgPath, c.cfg)
-
+	c.connections = conns
+	c.activeConn = activeName
 	c.formOverlay = nil
 	c.editingName = ""
 	c.refreshNames()
 
-	newCfg := c.cfg
-	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
+	snapshot := tui.ConnectionsChangedMsg{Connections: conns, ActiveConnName: activeName}
+	return c, func() tea.Msg { return snapshot }
 }
 
 func (c ConnectionsTab) updateDelete(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -497,17 +517,22 @@ func (c ConnectionsTab) commitDelete() (tea.Model, tea.Cmd) {
 	targetName := c.deleteOverlay.targetName
 	c.deleteOverlay = nil
 
-	delete(c.cfg.Connections, targetName)
-	if c.cfg.ActiveConnection == targetName {
-		c.cfg.ActiveConnection = ""
+	ctx := context.Background()
+	_ = c.store.DeleteConnection(ctx, c.projectID, targetName)
+
+	activeName := c.activeConn
+	if activeName == targetName {
+		activeName = ""
 	}
 
-	_ = config.Save(c.cfgPath, c.cfg)
+	conns, _ := c.store.ListConnections(ctx, c.projectID)
+	c.connections = conns
+	c.activeConn = activeName
 	c.refreshNames()
 	if c.cursor >= len(c.names) {
 		c.cursor = max(0, len(c.names)-1)
 	}
 
-	newCfg := c.cfg
-	return c, func() tea.Msg { return tui.ConfigReloadedMsg{Cfg: newCfg} }
+	snapshot := tui.ConnectionsChangedMsg{Connections: conns, ActiveConnName: activeName}
+	return c, func() tea.Msg { return snapshot }
 }

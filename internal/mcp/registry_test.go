@@ -2,8 +2,10 @@ package mcp_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pvidaal07/heydb/internal/domain/ports"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
@@ -42,29 +44,99 @@ func (m *mockSchemaStore) Close() error {
 // Ensure interface compliance.
 var _ ports.SchemaStore = (*mockSchemaStore)(nil)
 
-// mockAnnotationStore is a minimal in-memory implementation of ports.AnnotationStore.
+// mockAnnotationStore is an in-memory implementation of the v2 ports.AnnotationStore.
+// It stores annotations in a slice so tests can assert accumulative behaviour.
 type mockAnnotationStore struct {
-	closed bool
+	annotations []schema.Annotation
+	closed      bool
 }
 
-func (m *mockAnnotationStore) SaveAnnotation(_ context.Context, _, _ string) error { return nil }
-func (m *mockAnnotationStore) GetAnnotation(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (m *mockAnnotationStore) AddAnnotation(_ context.Context, ann schema.Annotation) (schema.Annotation, error) {
+	if ann.ID == "" {
+		ann.ID = fmt.Sprintf("mock-uuid-%d", len(m.annotations)+1)
+	}
+	now := time.Now()
+	ann.CreatedAt = now
+	ann.UpdatedAt = now
+	m.annotations = append(m.annotations, ann)
+	return ann, nil
 }
-func (m *mockAnnotationStore) GetAllAnnotations(_ context.Context) (map[string]string, error) {
-	return nil, nil
+
+func (m *mockAnnotationStore) GetAnnotations(_ context.Context, projectID, connectionName, targetType, targetName string) ([]schema.Annotation, error) {
+	var result []schema.Annotation
+	for _, a := range m.annotations {
+		if a.ProjectID == projectID && a.ConnectionName == connectionName &&
+			a.TargetType == targetType && a.TargetName == targetName {
+			result = append(result, a)
+		}
+	}
+	if result == nil {
+		result = []schema.Annotation{}
+	}
+	return result, nil
 }
-func (m *mockAnnotationStore) SaveColumnAnnotation(_ context.Context, _, _, _ string) error {
+
+func (m *mockAnnotationStore) GetAllAnnotations(_ context.Context, projectID, connectionName string) ([]schema.Annotation, error) {
+	var result []schema.Annotation
+	for _, a := range m.annotations {
+		if a.ProjectID == projectID && a.ConnectionName == connectionName {
+			result = append(result, a)
+		}
+	}
+	if result == nil {
+		result = []schema.Annotation{}
+	}
+	return result, nil
+}
+
+func (m *mockAnnotationStore) EditAnnotation(_ context.Context, id, newContent string) (schema.Annotation, error) {
+	for i, a := range m.annotations {
+		if a.ID == id {
+			m.annotations[i].Content = newContent
+			m.annotations[i].UpdatedAt = time.Now()
+			return m.annotations[i], nil
+		}
+	}
+	return schema.Annotation{}, fmt.Errorf("annotation %q not found", id)
+}
+
+func (m *mockAnnotationStore) DeleteAnnotation(_ context.Context, id string) error {
+	for i, a := range m.annotations {
+		if a.ID == id {
+			m.annotations = append(m.annotations[:i], m.annotations[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("annotation %q not found", id)
+}
+
+func (m *mockAnnotationStore) GetAnnotationsSince(_ context.Context, projectID string, since time.Time) ([]schema.Annotation, error) {
+	var result []schema.Annotation
+	for _, a := range m.annotations {
+		if a.ProjectID == projectID && a.UpdatedAt.After(since) {
+			result = append(result, a)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockAnnotationStore) ImportAnnotations(_ context.Context, annotations []schema.Annotation) error {
+	for _, ann := range annotations {
+		found := false
+		for i, a := range m.annotations {
+			if a.ID == ann.ID {
+				m.annotations[i] = ann
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.annotations = append(m.annotations, ann)
+		}
+	}
 	return nil
 }
-func (m *mockAnnotationStore) GetColumnAnnotation(_ context.Context, _, _ string) (string, error) {
-	return "", nil
-}
-func (m *mockAnnotationStore) GetAllColumnAnnotations(_ context.Context, _ string) (map[string]string, error) {
-	return nil, nil
-}
-func (m *mockAnnotationStore) SaveDBAnnotation(_ context.Context, _ string) error { return nil }
-func (m *mockAnnotationStore) GetDBAnnotation(_ context.Context) (string, error)  { return "", nil }
+
 func (m *mockAnnotationStore) Close() error {
 	m.closed = true
 	return nil

@@ -20,6 +20,15 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
+// formatAnnotationLine renders a single v2 annotation as a blockquote line.
+//
+//	> **Annotation** by author (YYYY-MM-DD): content
+func formatAnnotationLine(ann schema.Annotation) string {
+	date := ann.UpdatedAt.UTC().Format("2006-01-02")
+	return fmt.Sprintf("> **Annotation** by %s (%s): %s\n",
+		ann.Author, date, ann.Content)
+}
+
 const heydbVersion = "1.0"
 
 // WriteOptions carries optional state from a previous heydb.md parse, used to
@@ -27,13 +36,18 @@ const heydbVersion = "1.0"
 type WriteOptions struct {
 	// Annotations maps table name → preserved annotation block content
 	// (everything between <!-- heydb:annotations --> and <!-- /heydb:annotations -->).
+	// Used by legacy (v1) round-trip; ignored when V2Annotations is set.
 	Annotations map[string]string
 
 	// ColumnAnnotations maps table name → (column name → annotation content).
 	ColumnAnnotations map[string]map[string]string
 
-	// DBAnnotation is the database-level annotation content.
+	// DBAnnotation is the database-level annotation content (v1 legacy).
 	DBAnnotation string
+
+	// V2Annotations is the v2 list of accumulative annotations with author +
+	// timestamp. When non-nil, these are rendered instead of the legacy fields.
+	V2Annotations []schema.Annotation
 }
 
 // Write generates the full heydb.md content for s and writes it to w.
@@ -51,7 +65,18 @@ func Write(w io.Writer, s schema.Schema, opts *WriteOptions) error {
 	b.WriteString(fmt.Sprintf("Database: **%s**\n\n", s.Database))
 
 	// ── Database annotation ──────────────────────────────────────────────────
-	if opts.DBAnnotation != "" {
+	if opts.V2Annotations != nil {
+		// v2 path: render db-level annotations from the slice.
+		for _, ann := range opts.V2Annotations {
+			if ann.TargetType == "db" {
+				b.WriteString(formatAnnotationLine(ann))
+			}
+		}
+		if hasDBAnnotations(opts.V2Annotations) {
+			b.WriteString("\n")
+		}
+	} else if opts.DBAnnotation != "" {
+		// v1 legacy path.
 		b.WriteString("<!-- heydb:db-annotation -->\n")
 		b.WriteString(opts.DBAnnotation)
 		if !strings.HasSuffix(opts.DBAnnotation, "\n") {
@@ -79,7 +104,11 @@ func Write(w io.Writer, s schema.Schema, opts *WriteOptions) error {
 
 	// ── Per-table sections ───────────────────────────────────────────────────
 	for idx, t := range s.Tables {
-		writeTable(b, t, opts.Annotations[t.Name], opts.ColumnAnnotations[t.Name])
+		if opts.V2Annotations != nil {
+			writeTableV2(b, t, opts.V2Annotations)
+		} else {
+			writeTable(b, t, opts.Annotations[t.Name], opts.ColumnAnnotations[t.Name])
+		}
 		if idx < len(s.Tables)-1 {
 			b.WriteString("\n---\n\n")
 		}
@@ -199,6 +228,122 @@ func writeTable(b *strings.Builder, t schema.Table, annotation string, colAnnota
 			b.WriteString("\n")
 		}
 		b.WriteString("<!-- /heydb:annotations -->\n\n")
+	}
+
+	b.WriteString("<!-- /heydb:table -->\n")
+}
+
+// hasDBAnnotations returns true if any annotation in the list targets the database level.
+func hasDBAnnotations(annotations []schema.Annotation) bool {
+	for _, ann := range annotations {
+		if ann.TargetType == "db" {
+			return true
+		}
+	}
+	return false
+}
+
+// writeTableV2 emits a table block with v2 annotations (author + timestamp).
+func writeTableV2(b *strings.Builder, t schema.Table, annotations []schema.Annotation) {
+	b.WriteString(fmt.Sprintf("<!-- heydb:table name=%q -->\n", t.Name))
+	b.WriteString(fmt.Sprintf("## %s\n\n", t.Name))
+
+	if t.Comment != "" {
+		b.WriteString(fmt.Sprintf("> %s\n\n", t.Comment))
+	}
+	if t.Engine != "" {
+		b.WriteString(fmt.Sprintf("Engine: `%s`\n\n", t.Engine))
+	}
+
+	// Columns table
+	b.WriteString("### Columns\n\n")
+	b.WriteString("| Column | Type | Nullable | Default | Key | Extra | Comment |\n")
+	b.WriteString("|--------|------|----------|---------|-----|-------|----------|\n")
+	for _, c := range t.Columns {
+		def := ""
+		if c.Default != nil {
+			def = *c.Default
+		}
+		nullable := "NO"
+		if c.Nullable {
+			nullable = "YES"
+		}
+		b.WriteString(fmt.Sprintf("| %s | `%s` | %s | %s | %s | %s | %s |\n",
+			mdEscape(c.Name),
+			mdEscape(c.Type),
+			nullable,
+			mdEscape(def),
+			mdEscape(c.Key),
+			mdEscape(c.Extra),
+			mdEscape(c.Comment),
+		))
+
+		// Per-column v2 annotations
+		colKey := t.Name + "." + c.Name
+		for _, ann := range annotations {
+			if ann.TargetType == "column" && ann.TargetName == colKey {
+				b.WriteString(formatAnnotationLine(ann))
+			}
+		}
+	}
+	b.WriteString("\n")
+
+	// Primary key
+	if len(t.PrimaryKey) > 0 {
+		b.WriteString("**Primary Key:** ")
+		pks := make([]string, len(t.PrimaryKey))
+		for i, pk := range t.PrimaryKey {
+			pks[i] = fmt.Sprintf("`%s`", pk)
+		}
+		b.WriteString(strings.Join(pks, ", "))
+		b.WriteString("\n\n")
+	}
+
+	// Indexes
+	if len(t.Indexes) > 0 {
+		b.WriteString("### Indexes\n\n")
+		b.WriteString("| Name | Columns | Unique | Type |\n")
+		b.WriteString("|------|---------|--------|------|\n")
+		for _, idx := range t.Indexes {
+			unique := "NO"
+			if idx.Unique {
+				unique = "YES"
+			}
+			cols := make([]string, len(idx.Columns))
+			for i, c := range idx.Columns {
+				cols[i] = fmt.Sprintf("`%s`", c)
+			}
+			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				mdEscape(idx.Name),
+				strings.Join(cols, ", "),
+				unique,
+				idx.Type,
+			))
+		}
+		b.WriteString("\n")
+	}
+
+	// Foreign keys
+	if len(t.ForeignKeys) > 0 {
+		b.WriteString("### Foreign Keys\n\n")
+		b.WriteString("| Name | Column | References |\n")
+		b.WriteString("|------|--------|------------|\n")
+		for _, fk := range t.ForeignKeys {
+			b.WriteString(fmt.Sprintf("| %s | `%s` | `%s`.`%s` |\n",
+				mdEscape(fk.Name),
+				mdEscape(fk.Column),
+				mdEscape(fk.ReferencedTable),
+				mdEscape(fk.ReferencedColumn),
+			))
+		}
+		b.WriteString("\n")
+	}
+
+	// Table-level v2 annotations
+	for _, ann := range annotations {
+		if ann.TargetType == "table" && ann.TargetName == t.Name {
+			b.WriteString(formatAnnotationLine(ann))
+		}
 	}
 
 	b.WriteString("<!-- /heydb:table -->\n")

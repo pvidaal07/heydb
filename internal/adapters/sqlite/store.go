@@ -16,11 +16,11 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
-// Compile-time check: Store must satisfy both ports.
-var (
-	_ ports.SchemaStore     = (*Store)(nil)
-	_ ports.AnnotationStore = (*Store)(nil)
-)
+// Compile-time check: Store must satisfy SchemaStore.
+// NOTE: Store no longer implements AnnotationStore — annotations are handled
+// by GlobalStore as of PR-3. The old annotation methods are retained below
+// for backward compatibility until PR-5 cleanup.
+var _ ports.SchemaStore = (*Store)(nil)
 
 const ddl = `
 CREATE TABLE IF NOT EXISTS heydb_meta (

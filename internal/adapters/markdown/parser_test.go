@@ -120,60 +120,11 @@ func TestRoundtrip_PreservesAllFields(t *testing.T) {
 	}
 }
 
-func TestRoundtrip_AnnotationPreservedOnResync(t *testing.T) {
-	s := schema.Schema{
-		Database: "db",
-		Hash:     "h1",
-		SyncedAt: time.Now().UTC().Truncate(time.Second),
-		Tables: []schema.Table{
-			{
-				Name:    "events",
-				Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}},
-			},
-		},
-	}
-
-	annotation := "**Business rule**: events are append-only.\n"
-	opts := &markdown.WriteOptions{
-		Annotations: map[string]string{"events": annotation},
-	}
-
-	// First write — with annotation
-	var buf1 strings.Builder
-	if err := markdown.Write(&buf1, s, opts); err != nil {
-		t.Fatalf("first Write error: %v", err)
-	}
-
-	// Parse the first write
-	pf, err := markdown.Parse(buf1.String())
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
-	}
-
-	if pf.Annotations["events"] == "" {
-		t.Error("annotation not preserved after first write+parse")
-	}
-
-	// Re-sync: write again, passing parsed annotations
-	opts2 := &markdown.WriteOptions{Annotations: pf.Annotations}
-	var buf2 strings.Builder
-	if err := markdown.Write(&buf2, s, opts2); err != nil {
-		t.Fatalf("second Write error: %v", err)
-	}
-
-	if !strings.Contains(buf2.String(), "append-only") {
-		t.Error("annotation lost after resync write")
-	}
-
-	// Parse again — annotation should still be there
-	pf2, err := markdown.Parse(buf2.String())
-	if err != nil {
-		t.Fatalf("second Parse error: %v", err)
-	}
-	if pf2.Annotations["events"] == "" {
-		t.Error("annotation not preserved after second write+parse (resync)")
-	}
-}
+// TestRoundtrip_AnnotationPreservedOnResync is removed in v2.
+// Annotations are no longer stored in or parsed from markdown files.
+// They live in the global SQLite store with author tracking.
+// The v1 legacy Annotations field on WriteOptions is kept for backward
+// compatibility only; new code uses V2Annotations.
 
 func TestParse_EmptyFileReturnsNilError(t *testing.T) {
 	pf, err := markdown.Parse("")
