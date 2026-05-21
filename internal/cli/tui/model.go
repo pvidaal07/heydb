@@ -7,7 +7,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/pvidaal07/heydb/internal/config"
 	"github.com/pvidaal07/heydb/internal/domain/ports"
 )
 
@@ -24,18 +23,16 @@ type Model struct {
 	activeTab   int
 	width       int
 	height      int
-	cfg         *config.Config
-	cfgPath     string
+	activeConn  string
 	version     string
 	storeOpener StoreOpener
 }
 
-// New creates a root Model with all three tabs initialized.
-func New(cfg *config.Config, cfgPath, version string) Model {
+// New creates a root Model. activeConn is the name of the currently active connection.
+func New(activeConn, version string) Model {
 	return Model{
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		version: version,
+		activeConn: activeConn,
+		version:    version,
 	}
 }
 
@@ -116,14 +113,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-	case ConfigReloadedMsg:
-		m.cfg = msg.Cfg
-		// First fan-out the ConfigReloadedMsg so tabs clear their old state.
+	case ConnectionsChangedMsg:
+		m.activeConn = msg.ActiveConnName
+		// First fan-out the ConnectionsChangedMsg so tabs update their state.
 		m2, batchCmd := m.fanOut(msg)
 		m = m2.(Model)
 		// Then open the new store (if any) and broadcast StoreOpenedMsg.
-		if m.storeOpener != nil && m.cfg != nil && m.cfg.ActiveConnection != "" {
-			store, _ := m.storeOpener(m.cfg.ActiveConnection)
+		if m.storeOpener != nil && m.activeConn != "" {
+			store, _ := m.storeOpener(m.activeConn)
 			var ann ports.AnnotationStore
 			if store != nil {
 				ann, _ = store.(ports.AnnotationStore)
@@ -211,7 +208,6 @@ func (m Model) View() string {
 	return FrameStyle.Width(m.width - 2).Render(b.String())
 }
 
-
 func (m Model) renderTabBar() string {
 	var parts []string
 	for i, t := range m.tabs {
@@ -226,8 +222,8 @@ func (m Model) renderTabBar() string {
 
 func (m Model) renderStatusBar() string {
 	activeConn := SubtextStyle.Render("no active connection")
-	if m.cfg != nil && m.cfg.ActiveConnection != "" {
-		activeConn = StatusBarHighlight.Render(m.cfg.ActiveConnection)
+	if m.activeConn != "" {
+		activeConn = StatusBarHighlight.Render(m.activeConn)
 	}
 
 	return StatusBarStyle.Render(fmt.Sprintf("connection: %s", activeConn))

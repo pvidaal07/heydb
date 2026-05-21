@@ -3,13 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
-	"github.com/pvidaal07/heydb/internal/config"
+	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 )
 
 // version is injected at build time via -ldflags "-X github.com/pvidaal07/heydb/internal/cli.version=v1.2.3".
@@ -82,12 +81,18 @@ func init() {
 			if err != nil {
 				return fmt.Errorf("cannot determine working directory: %w", err)
 			}
-			cfgPath := filepath.Join(cwd, heydbDir, configFileName)
-			cfg, err := config.Load(cfgPath)
+			dbPath := GlobalDBPath()
+			gs, err := sqlite.OpenGlobal(dbPath)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+				// Global DB not available (heydb init not run) — show help instead.
+				return cmd.Help()
 			}
-			m := buildTUIModel(cfg, cfgPath, cwd)
+			defer gs.Close()
+			m, err := buildTUIModel(gs, cwd)
+			if err != nil {
+				// No project registered yet — show help instead.
+				return cmd.Help()
+			}
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("tui: %w", err)

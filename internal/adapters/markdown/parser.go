@@ -10,6 +10,8 @@ import (
 )
 
 // ParsedFile is the result of parsing an existing heydb.md.
+// In v2, annotation fields are no longer populated — annotations are sourced
+// from the global SQLite store, not from markdown files.
 type ParsedFile struct {
 	// Meta fields
 	SchemaHash   string
@@ -20,30 +22,27 @@ type ParsedFile struct {
 	// Tables extracted from all <!-- heydb:table --> blocks
 	Tables []schema.Table
 
-	// Annotations maps table name → raw content between annotation anchors.
-	// These are preserved on re-sync.
-	Annotations map[string]string
-
-	// ColumnAnnotations maps table name → (column name → annotation content).
+	// Annotations and ColumnAnnotations are kept for API compatibility
+	// but are always empty in v2 — annotation extraction has been removed.
+	// Use ports.AnnotationStore to read annotations.
+	Annotations       map[string]string
 	ColumnAnnotations map[string]map[string]string
-
-	// DBAnnotation is the database-level annotation content.
-	DBAnnotation string
+	DBAnnotation      string
 }
 
-// Regexp patterns — all multiline so we can extract block bodies with [^]* tricks.
+// Regexp patterns for structural parsing.
 var (
-	reMetaBlock     = regexp.MustCompile(`(?s)<!--\s*heydb:meta\s*\n(.*?)\s*-->`)
-	reTableBlock    = regexp.MustCompile(`(?s)<!--\s*heydb:table\s+name="([^"]+)"\s*-->(.*?)<!--\s*/heydb:table\s*-->`)
-	reAnnotation    = regexp.MustCompile(`(?s)<!--\s*heydb:annotations\s*-->\n?(.*?)<!--\s*/heydb:annotations\s*-->`)
-	reColAnnotation = regexp.MustCompile(`(?s)<!--\s*heydb:col-annotation\s+name="([^"]+)"\s*-->\n?(.*?)<!--\s*/heydb:col-annotation\s*-->`)
-	reDBAnnotation  = regexp.MustCompile(`(?s)<!--\s*heydb:db-annotation\s*-->\n?(.*?)<!--\s*/heydb:db-annotation\s*-->`)
+	reMetaBlock  = regexp.MustCompile(`(?s)<!--\s*heydb:meta\s*\n(.*?)\s*-->`)
+	reTableBlock = regexp.MustCompile(`(?s)<!--\s*heydb:table\s+name="([^"]+)"\s*-->(.*?)<!--\s*/heydb:table\s*-->`)
 )
 
 // Parse reads the content of a heydb.md file and returns the extracted data.
+// In v2, annotation extraction is removed — annotations are stored in the
+// global SQLite store, not in markdown files. Only structural data (meta,
+// tables, columns, indexes, foreign keys) is parsed.
 func Parse(content string) (*ParsedFile, error) {
 	pf := &ParsedFile{
-		Annotations:      make(map[string]string),
+		Annotations:       make(map[string]string),
 		ColumnAnnotations: make(map[string]map[string]string),
 	}
 
@@ -52,12 +51,7 @@ func Parse(content string) (*ParsedFile, error) {
 		parseMeta(m[1], pf)
 	}
 
-	// ── 2. Database annotation ────────────────────────────────────────────────
-	if m := reDBAnnotation.FindStringSubmatch(content); m != nil {
-		pf.DBAnnotation = m[1]
-	}
-
-	// ── 3. Table blocks ───────────────────────────────────────────────────────
+	// ── 2. Table blocks (structural only) ─────────────────────────────────────
 	tableMatches := reTableBlock.FindAllStringSubmatch(content, -1)
 	for _, tm := range tableMatches {
 		tableName := tm[1]
@@ -68,21 +62,8 @@ func Parse(content string) (*ParsedFile, error) {
 			return nil, fmt.Errorf("markdown: parse table %q: %w", tableName, err)
 		}
 		pf.Tables = append(pf.Tables, t)
-
-		// Extract table annotation block if present
-		if am := reAnnotation.FindStringSubmatch(tableBody); am != nil {
-			pf.Annotations[tableName] = am[1]
-		}
-
-		// Extract column annotation blocks if present
-		colMatches := reColAnnotation.FindAllStringSubmatch(tableBody, -1)
-		if len(colMatches) > 0 {
-			colAnns := make(map[string]string)
-			for _, cm := range colMatches {
-				colAnns[cm[1]] = cm[2]
-			}
-			pf.ColumnAnnotations[tableName] = colAnns
-		}
+		// Note: annotation blocks in tableBody are intentionally not extracted.
+		// Read annotations from GlobalStore.GetAllAnnotations instead.
 	}
 
 	return pf, nil

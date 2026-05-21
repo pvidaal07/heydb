@@ -74,7 +74,7 @@ func (s SearchTab) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.input.Focus()
 		return s, nil
 
-	case tui.ConfigReloadedMsg:
+	case tui.ConnectionsChangedMsg:
 		s.store = nil
 		s.results = nil
 		s.hasSearched = false

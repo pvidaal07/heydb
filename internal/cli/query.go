@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
+	"github.com/pvidaal07/heydb/internal/domain/ports"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
@@ -26,15 +28,24 @@ func init() {
 }
 
 func runTables(cmd *cobra.Command, args []string) error {
-	store, cleanup, err := openStore()
+	ctx := context.Background()
+
+	gs, closeGS, err := openGlobalStoreForCWD()
+	if err != nil {
+		return err
+	}
+	defer closeGS()
+
+	cwd, _ := cwdOrEmpty()
+	store, cleanup, err := openGlobalSchemaStore(gs, cwd)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	sc, err := store.LoadSchema(context.Background())
+	sc, err := store.LoadSchema(ctx)
 	if err != nil {
-		return fmt.Errorf("tables: %w", err)
+		return fmt.Errorf("tables: %w\n\nRun `heydb sync` first.", err)
 	}
 
 	if len(sc.Tables) == 0 {
@@ -70,24 +81,33 @@ var describeCmd = &cobra.Command{
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
-	store, cleanup, err := openStore()
+	ctx := context.Background()
+
+	gs, closeGS, err := openGlobalStoreForCWD()
+	if err != nil {
+		return err
+	}
+	defer closeGS()
+
+	cwd, _ := cwdOrEmpty()
+	store, cleanup, err := openGlobalSchemaStore(gs, cwd)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	ctx := context.Background()
 	t, err := store.GetTable(ctx, args[0])
 	if err != nil {
-		names, listErr := allTableNames(store, ctx)
+		names, listErr := allTableNamesV2(store, ctx)
 		if listErr != nil {
 			return fmt.Errorf("describe: table %q not found", args[0])
 		}
 		return fmt.Errorf("describe: table %q not found\n\nAvailable tables: %s", args[0], strings.Join(names, ", "))
 	}
 
-	annotation, _ := store.GetAnnotation(ctx, args[0])
-	printTable(t, annotation)
+	// Annotations are now in GlobalStore — CLI describe does not load them yet
+	// (full integration deferred to PR-5 docs command).
+	printTable(t, "")
 	return nil
 }
 
@@ -165,13 +185,22 @@ var searchCmd = &cobra.Command{
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	store, cleanup, err := openStore()
+	ctx := context.Background()
+
+	gs, closeGS, err := openGlobalStoreForCWD()
+	if err != nil {
+		return err
+	}
+	defer closeGS()
+
+	cwd, _ := cwdOrEmpty()
+	store, cleanup, err := openGlobalSchemaStore(gs, cwd)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	tables, err := store.SearchTables(context.Background(), args[0])
+	tables, err := store.SearchTables(ctx, args[0])
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
@@ -196,19 +225,32 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-func openStore() (*sqlite.Store, func(), error) {
-	paths, _, _, err := resolveActivePaths()
+// openGlobalStoreForCWD opens the GlobalStore for the current working directory.
+func openGlobalStoreForCWD() (*sqlite.GlobalStore, func(), error) {
+	dbPath := GlobalDBPath()
+	gs, err := sqlite.OpenGlobal(dbPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("open global DB: %w", err)
 	}
-	store, err := sqlite.Open(paths.SQLite)
+	return gs, func() { gs.Close() }, nil
+}
+
+// cwdOrEmpty returns the current working directory or empty string on error.
+func cwdOrEmpty() (string, error) {
+	return os.Getwd()
+}
+
+// openGlobalSchemaStore resolves the active connection for the given project
+// directory and returns a ConnSchemaStore. The caller must call cleanup().
+func openGlobalSchemaStore(gs *sqlite.GlobalStore, cwd string) (ports.SchemaStore, func(), error) {
+	_, _, _, connStore, err := resolveActiveGlobalConnection(gs, cwd)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open schema store: %w\n\nRun `heydb sync` first.", err)
 	}
-	return store, func() { store.Close() }, nil
+	return connStore, func() {}, nil
 }
 
-func allTableNames(store *sqlite.Store, ctx context.Context) ([]string, error) {
+func allTableNamesV2(store ports.SchemaStore, ctx context.Context) ([]string, error) {
 	sc, err := store.LoadSchema(ctx)
 	if err != nil {
 		return nil, err
