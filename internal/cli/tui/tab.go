@@ -3,8 +3,8 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/pvidaal07/heydb/internal/config"
 	"github.com/pvidaal07/heydb/internal/domain/ports"
+	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
 // Tab is implemented by every top-level tab in the TUI.
@@ -14,10 +14,11 @@ type Tab interface {
 	ShortHelp() string
 }
 
-// ConfigReloadedMsg is broadcast when the connection config changes (add, edit,
+// ConnectionsChangedMsg is broadcast when the connection list changes (add, edit,
 // delete, or switch active). All tabs must handle it to stay consistent.
-type ConfigReloadedMsg struct {
-	Cfg *config.Config
+type ConnectionsChangedMsg struct {
+	Connections    []schema.Connection // all connections for current project
+	ActiveConnName string              // name of active connection
 }
 
 // StoreOpenedMsg carries a freshly opened SchemaStore so the Schema and Search

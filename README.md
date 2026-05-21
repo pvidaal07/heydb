@@ -2,7 +2,7 @@
 
 Introspect MySQL databases and expose the schema to AI agents via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io).
 
-heydb generates human-readable schema docs and a queryable SQLite store from your live database, then serves them to tools like Claude Code and Cursor without granting direct database access.
+heydb syncs your live database schema into a local SQLite store, lets your team annotate tables and columns with business context, and serves everything to AI tools like Claude Code and Cursor — without granting them direct database access.
 
 ---
 
@@ -41,7 +41,7 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 
 ### 1. Initialize
 
-Run once per project. Creates `.heydb/` with a blank config.
+Run once per project. Creates `.heydb/` in the current directory and registers the project.
 
 ```sh
 heydb init
@@ -60,17 +60,14 @@ heydb connect
 
 ### 3. Sync the schema
 
-Introspects the active connection and writes schema files per connection.
+Introspects the active connection and stores the schema in `~/.heydb/heydb.db`.
 
 ```sh
 heydb sync
 ```
 
-Each connection gets its own files: `.heydb/{connection}.md` + `.heydb/{connection}.sqlite`.
-Commit the `.md` files to your repository — they document your schema in plain Markdown.
-
 > List synced connections: `heydb sync --list`
-> Delete schema files: `heydb sync --delete <name>`
+> Remove a connection's schema: `heydb sync --delete <name>`
 
 ### 4. Serve the MCP server
 
@@ -80,9 +77,20 @@ Starts the MCP server over stdio. Point your AI tool at this command.
 heydb serve
 ```
 
-### 5. Configure your AI assistant (optional)
+### 5. Push / pull annotations (optional — for teams)
 
-Inject heydb context into your AI assistant's configuration file. This tells the assistant about your schema files, available MCP tools, and how to use them.
+Share annotations with teammates by committing the `.heydb/` directory to git.
+
+```sh
+heydb push     # export new annotations as a chunk into .heydb/chunks/
+heydb pull     # import chunks from .heydb/chunks/ into the local store
+```
+
+Commit `.heydb/manifest.json` and `.heydb/chunks/` to git. Each teammate runs `heydb pull` after a `git pull` to receive the latest annotations.
+
+### 6. Configure your AI assistant (optional)
+
+Inject heydb context into your AI assistant's configuration file:
 
 ```sh
 heydb setup-ai
@@ -142,16 +150,48 @@ heydb search <keyword>        # search by name or comment
 
 ```sh
 heydb review        # exits 0 if up to date, 1 if drifted
-heydb diff          # shows exactly what changed
+heydb diff          # shows exactly what changed since last sync
 ```
 
 Useful in CI to detect unapplied migrations.
 
 ---
 
+## Generate documentation
+
+```sh
+heydb docs                        # write .heydb/{connection}.md
+heydb docs --connection <name>    # specific connection
+heydb docs --stdout               # print to stdout
+```
+
+Generates a Markdown file with the full schema (tables, columns, indexes, foreign keys) plus all accumulated annotations, including author and date.
+
+---
+
+## Collaborative annotations
+
+Annotations are accumulative — multiple annotations per table or column are allowed. Each annotation records the author and timestamp so you can see who wrote what and when.
+
+```
+> **Annotation** by pvidal (2026-05-21): This table stores user accounts
+> **Annotation** by jsmith (2026-05-20): Contains both active and deleted users
+```
+
+Annotations survive `heydb sync` runs — they are never overwritten by schema introspection.
+
+### Team workflow
+
+1. Add annotations via `heydb serve` (MCP tools) or TUI
+2. Run `heydb push` to export them as a chunk into `.heydb/chunks/`
+3. Commit `.heydb/manifest.json` and `.heydb/chunks/`
+4. Teammates run `git pull` then `heydb pull` to import the annotations
+
+---
+
 ## MCP tools
 
-The MCP server exposes seven tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
+The MCP server exposes nine tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
 
 | Tool | Description |
 |------|-------------|
@@ -159,9 +199,11 @@ The MCP server exposes seven tools. All tools accept an optional `connection` pa
 | `heydb_list_tables` | List all tables with column count and comment |
 | `heydb_get_table` | Full details for a table (columns, indexes, FKs, annotations) |
 | `heydb_search` | Substring search across table names, column names, and comments |
-| `heydb_annotate` | Add or update annotations for a table (persisted across syncs) |
+| `heydb_annotate` | Add an annotation for a table with business context |
 | `heydb_annotate_column` | Annotate a specific column with business context |
 | `heydb_annotate_db` | Annotate the database itself (purpose, ownership, constraints) |
+| `heydb_edit_annotation` | Edit the content of an existing annotation by UUID |
+| `heydb_delete_annotation` | Delete an annotation by UUID |
 
 ---
 
@@ -254,11 +296,16 @@ This prints a `CREATE USER` + `GRANT` + `FLUSH PRIVILEGES` block that you copy i
 
 ```
 .heydb/
-├── config.json           # connection config (keep private)
-├── .gitignore            # auto-generated
-├── {connection}.md       # human-readable schema (commit this)
-└── {connection}.sqlite   # local query cache (do not commit)
+├── manifest.json         # chunk manifest (commit this)
+├── chunks/               # annotation chunks (commit this)
+│   └── {hash}.chunk.gz   # gzipped JSONL annotation chunk
+└── .gitignore            # auto-generated
 ```
+
+**Never committed** — lives in `~/.heydb/heydb.db`:
+- All connection config (host, port, credentials)
+- Schema cache (tables, columns, indexes, foreign keys)
+- Annotation store (source of truth before push)
 
 ---
 

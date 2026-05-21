@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/pvidaal07/heydb/internal/adapters/markdown"
 	mysqlAdapter "github.com/pvidaal07/heydb/internal/adapters/mysql"
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
@@ -21,114 +19,72 @@ var syncDeleteFlag string
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Introspect the active connection and update schema files",
-	Long: `Connects to the active database, reads INFORMATION_SCHEMA, and writes:
-  .heydb/{connection}.md      — human-readable schema documentation
-  .heydb/{connection}.sqlite  — machine-queryable schema store for heydb serve
+	Short: "Introspect the active connection and update schema in the global DB",
+	Long: `Connects to the active database, reads INFORMATION_SCHEMA, and writes
+schema data to ~/.heydb/heydb.db (global database).
 
-Any existing heydb:annotations blocks are preserved verbatim.
+Schema is stored per-connection and can be queried by heydb serve and heydb tui.
+Run heydb docs to generate Markdown documentation from the stored schema.
 
 Flags:
-  --list       List all synced connections
-  --delete X   Delete schema files for connection X`,
+  --list       List all connections with synced schema
+  --delete X   Delete schema data for connection X`,
 	RunE: runSync,
 }
 
 func init() {
-	syncCmd.Flags().BoolVar(&syncListFlag, "list", false, "list synced connections")
-	syncCmd.Flags().StringVar(&syncDeleteFlag, "delete", "", "delete schema files for a connection")
+	syncCmd.Flags().BoolVar(&syncListFlag, "list", false, "list connections with synced schema")
+	syncCmd.Flags().StringVar(&syncDeleteFlag, "delete", "", "delete schema data for a connection")
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	if syncListFlag {
-		return runSyncList()
-	}
-	if syncDeleteFlag != "" {
-		return runSyncDelete(syncDeleteFlag)
-	}
-
 	ctx := context.Background()
 
-	paths, _, conn, err := resolveActivePaths()
+	dbPath := GlobalDBPath()
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		return fmt.Errorf("sync: open global DB: %w", err)
+	}
+	defer gs.Close()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("sync: cannot determine working directory: %w", err)
+	}
+
+	proj, err := gs.GetProjectByPath(ctx, cwd)
+	if err != nil {
+		return fmt.Errorf("sync: lookup project: %w", err)
+	}
+	if proj == nil {
+		return fmt.Errorf("sync: no heydb project found for %q — run `heydb init` first", cwd)
+	}
+
+	if syncListFlag {
+		return listSyncedConnectionsV2(ctx, gs, proj.ID)
+	}
+	if syncDeleteFlag != "" {
+		return deleteSyncedSchemaV2(ctx, gs, proj.ID, syncDeleteFlag)
+	}
+
+	return runSyncV2(ctx, gs, proj.ID, cwd)
+}
+
+// runSyncV2 performs the full sync: introspects MySQL and writes schema to GlobalStore.
+func runSyncV2(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd string) error {
+	connID, conn, name, connSchemaStore, err := resolveActiveGlobalConnection(gs, cwd)
 	if err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
+	_ = connID // used inside resolveActiveGlobalConnection
 
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[debug] connection %q: host=%s port=%d database=%s\n",
-			paths.ConnName, conn.Host, conn.Port, conn.Database)
+			name, conn.Host, conn.Port, conn.Database)
 	}
 
 	dsn := conn.DSN()
-
-	// Open SQLite store.
-	store, err := sqlite.Open(paths.SQLite)
-	if err != nil {
-		return fmt.Errorf("sync: open sqlite store: %w", err)
-	}
-	defer store.Close()
-
-	// Collect annotations from both sources (SQLite wins on conflict since
-	// it's the canonical store written by MCP agents).
-	annotations := make(map[string]string)
-	columnAnnotations := make(map[string]map[string]string)
-	var dbAnnotation string
-
-	// Source 1: existing markdown file.
-	if existingContent, err := os.ReadFile(paths.Markdown); err == nil {
-		if parsed, err := markdown.Parse(string(existingContent)); err == nil {
-			for k, v := range parsed.Annotations {
-				annotations[k] = v
-			}
-			for tbl, cols := range parsed.ColumnAnnotations {
-				colMap := make(map[string]string)
-				for col, ann := range cols {
-					colMap[col] = ann
-				}
-				columnAnnotations[tbl] = colMap
-			}
-			dbAnnotation = parsed.DBAnnotation
-		}
-	}
-
-	// Source 2: SQLite annotations (from MCP agents) — these take precedence.
-	if sqliteAnns, err := store.GetAllAnnotations(ctx); err == nil {
-		for k, v := range sqliteAnns {
-			annotations[k] = v
-		}
-	}
-
-	// Source 2b: SQLite column annotations — take precedence over markdown.
-	if sqliteSchema, err := store.LoadSchema(ctx); err == nil {
-		for _, t := range sqliteSchema.Tables {
-			if colAnns, err := store.GetAllColumnAnnotations(ctx, t.Name); err == nil && len(colAnns) > 0 {
-				if columnAnnotations[t.Name] == nil {
-					columnAnnotations[t.Name] = make(map[string]string)
-				}
-				for col, ann := range colAnns {
-					columnAnnotations[t.Name][col] = ann
-				}
-			}
-		}
-	}
-
-	// Source 2c: SQLite DB annotation — takes precedence over markdown.
-	if sqliteDBann, err := store.GetDBAnnotation(ctx); err == nil && sqliteDBann != "" {
-		dbAnnotation = sqliteDBann
-	}
-
-	totalAnns := len(annotations)
-	for _, cols := range columnAnnotations {
-		totalAnns += len(cols)
-	}
-	if dbAnnotation != "" {
-		totalAnns++
-	}
-	if Verbose && totalAnns > 0 {
-		fmt.Fprintf(os.Stderr, "[debug] preserved %d annotation(s) from markdown + sqlite\n",
-			totalAnns)
-	}
 
 	// Build MySQL introspector.
 	introspector := mysqlAdapter.New(dsn)
@@ -141,121 +97,97 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "[debug] connected to MySQL — starting introspection")
 	}
 
-	// Open markdown file for writing.
-	mdFile, err := os.Create(paths.Markdown)
-	if err != nil {
-		return fmt.Errorf("sync: create %s: %w", paths.Markdown, err)
-	}
-	defer mdFile.Close()
-
-	// Build markdown writer (satisfies introspection.SchemaWriter).
-	mdOpts := &markdown.WriteOptions{
-		Annotations:      annotations,
-		ColumnAnnotations: columnAnnotations,
-		DBAnnotation:     dbAnnotation,
-	}
-	mdWriter := &markdownSchemaWriter{w: mdFile, opts: mdOpts}
-
-	// Run sync use-case.
-	syncer := introspection.NewSyncer(introspector, store, mdWriter, Verbose)
+	// Run sync use-case with no markdown writer (schema only, docs are generated separately).
+	syncer := introspection.NewSyncer(introspector, connSchemaStore, nil, Verbose)
 	result, err := syncer.Run(ctx, conn.Database)
 	if err != nil {
 		return handleIntrospectionError(err)
 	}
 
-	// Persist annotations to SQLite so MCP agents can read them.
-	for tableName, content := range annotations {
-		if err := store.SaveAnnotation(ctx, tableName, content); err != nil {
-			if Verbose {
-				fmt.Fprintf(os.Stderr, "[debug] warning: failed to save annotation for %q: %v\n",
-					tableName, err)
-			}
-		}
-	}
-	for tableName, cols := range columnAnnotations {
-		for colName, content := range cols {
-			if err := store.SaveColumnAnnotation(ctx, tableName, colName, content); err != nil {
-				if Verbose {
-					fmt.Fprintf(os.Stderr, "[debug] warning: failed to save column annotation for %q.%q: %v\n",
-						tableName, colName, err)
-				}
-			}
-		}
-	}
-	if dbAnnotation != "" {
-		if err := store.SaveDBAnnotation(ctx, dbAnnotation); err != nil {
-			if Verbose {
-				fmt.Fprintf(os.Stderr, "[debug] warning: failed to save db annotation: %v\n", err)
-			}
-		}
-	}
-
-	fmt.Printf("Synced %d table(s) from %s (connection: %s)\n", result.TablesCount, result.Database, paths.ConnName)
-	fmt.Printf("  schema:      %s\n", paths.Markdown)
-	fmt.Printf("  store:       %s\n", paths.SQLite)
+	fmt.Printf("Synced %d table(s) from %s (connection: %s)\n", result.TablesCount, result.Database, name)
 	fmt.Printf("  schema_hash: %s\n", result.Hash[:12]+"...")
+	fmt.Printf("  stored in:   %s\n", GlobalDBPath())
 
 	return nil
 }
 
-func runSyncList() error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("sync: %w", err)
-	}
-	dir := filepath.Join(cwd, heydbDir)
+// resolveActiveGlobalConnection opens GlobalStore, finds the project by cwd,
+// and returns the active connection along with a scoped ConnSchemaStore.
+// Returns: connID, connection, connectionName, connSchemaStore, error.
+func resolveActiveGlobalConnection(gs *sqlite.GlobalStore, cwd string) (string, schema.Connection, string, *sqlite.ConnSchemaStore, error) {
+	ctx := context.Background()
 
-	entries, err := os.ReadDir(dir)
+	proj, err := gs.GetProjectByPath(ctx, cwd)
 	if err != nil {
-		return fmt.Errorf("sync: read .heydb/: %w", err)
+		return "", schema.Connection{}, "", nil, fmt.Errorf("lookup project: %w", err)
+	}
+	if proj == nil {
+		return "", schema.Connection{}, "", nil, fmt.Errorf("no heydb project found for %q — run `heydb init` first", cwd)
 	}
 
-	found := false
-	for _, e := range entries {
-		name := e.Name()
-		if filepath.Ext(name) == ".sqlite" {
-			connName := strings.TrimSuffix(name, ".sqlite")
-			mdExists := "no"
-			if _, err := os.Stat(filepath.Join(dir, connName+".md")); err == nil {
-				mdExists = "yes"
-			}
-			fmt.Printf("  %-20s  sqlite: yes  md: %s\n", connName, mdExists)
-			found = true
+	conns, err := gs.ListConnections(ctx, proj.ID)
+	if err != nil {
+		return "", schema.Connection{}, "", nil, fmt.Errorf("list connections: %w", err)
+	}
+
+	var active *schema.Connection
+	for i := range conns {
+		if conns[i].Active {
+			active = &conns[i]
+			break
 		}
 	}
-	if !found {
-		fmt.Println("No synced connections found. Run `heydb sync` to sync the active connection.")
+	if active == nil {
+		return "", schema.Connection{}, "", nil, fmt.Errorf(
+			"no active connection — run `heydb connect --use <name>` to set one")
 	}
-	return nil
+
+	connID := proj.ID + "/" + active.Name
+	connSchemaStore := gs.ForConnection(connID)
+	return connID, *active, active.Name, connSchemaStore, nil
 }
 
-func runSyncDelete(connName string) error {
-	paths, err := resolvePathsForDir(connName)
+// listSyncedConnectionsV2 prints all connections for the project from GlobalStore.
+func listSyncedConnectionsV2(ctx context.Context, gs *sqlite.GlobalStore, projectID string) error {
+	conns, err := gs.ListConnections(ctx, projectID)
 	if err != nil {
-		return fmt.Errorf("sync: %w", err)
+		return fmt.Errorf("sync: list connections: %w", err)
 	}
 
-	removed := 0
-	for _, p := range []string{paths.SQLite, paths.Markdown} {
-		if err := os.Remove(p); err == nil {
-			fmt.Printf("  removed %s\n", p)
-			removed++
-		}
+	if len(conns) == 0 {
+		fmt.Println("No connections configured. Run `heydb connect` to add one, then `heydb sync` to sync.")
+		return nil
 	}
-	if removed == 0 {
-		return fmt.Errorf("sync: no schema files found for connection %q", connName)
+
+	fmt.Println("Connections:")
+	for _, c := range conns {
+		active := ""
+		if c.Active {
+			active = " (active)"
+		}
+		fmt.Printf("  %-20s  %s:%d/%s%s\n", c.Name, c.Host, c.Port, c.Database, active)
 	}
 	return nil
 }
 
-// markdownSchemaWriter adapts markdown.Write to the introspection.SchemaWriter interface.
-type markdownSchemaWriter struct {
-	w    *os.File
-	opts *markdown.WriteOptions
-}
+// deleteSyncedSchemaV2 removes schema data for a connection from GlobalStore.
+// It is idempotent — no error if there is no data for the connection.
+func deleteSyncedSchemaV2(ctx context.Context, gs *sqlite.GlobalStore, projectID, connName string) error {
+	connID := projectID + "/" + connName
+	db := gs.DB()
 
-func (m *markdownSchemaWriter) WriteSchema(s schema.Schema) error {
-	return markdown.Write(m.w, s, m.opts)
+	// Delete schema rows for this connection (cascade handles child tables).
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM schema_tables WHERE connection_id = ?`, connID); err != nil {
+		return fmt.Errorf("sync: delete schema_tables for %q: %w", connName, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM schema_meta WHERE connection_id = ?`, connID); err != nil {
+		return fmt.Errorf("sync: delete schema_meta for %q: %w", connName, err)
+	}
+
+	fmt.Printf("Schema data for connection %q removed from global DB.\n", connName)
+	return nil
 }
 
 // handleIntrospectionError inspects errors from MySQL and returns actionable messages.

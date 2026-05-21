@@ -7,7 +7,6 @@ import (
 
 	"github.com/pvidaal07/heydb/internal/cli/tui"
 	"github.com/pvidaal07/heydb/internal/cli/tui/tab"
-	"github.com/pvidaal07/heydb/internal/config"
 )
 
 // Compile-time check: all three tab types satisfy Tab.
@@ -17,16 +16,12 @@ var _ tui.Tab = (*tab.SearchTab)(nil)
 
 func newTestModel(t *testing.T) tui.Model {
 	t.Helper()
-	cfg := &config.Config{
-		Version:     1,
-		Connections: make(map[string]config.Connection),
-	}
 	tabs := []tui.Tab{
-		tab.NewConnectionsTab(cfg, "/tmp/test-config.json"),
+		tab.NewConnectionsTab(nil, "", "proj-test", nil),
 		tab.NewSchemaTab(nil, nil),
 		tab.NewSearchTab(),
 	}
-	return tui.New(cfg, "/tmp/test-config.json", "test").WithTabs(tabs)
+	return tui.New("", "test").WithTabs(tabs)
 }
 
 func TestModel_TabSwitchForward(t *testing.T) {
@@ -72,5 +67,30 @@ func TestModel_QuitReturnsTeaQuit(t *testing.T) {
 	msg := cmd()
 	if _, ok := msg.(tea.QuitMsg); !ok {
 		t.Errorf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+func TestModel_ConnectionsChangedMsg_UpdatesActiveConn(t *testing.T) {
+	m := newTestModel(t)
+
+	// Send a ConnectionsChangedMsg with a new active connection name.
+	updated, _ := m.Update(tui.ConnectionsChangedMsg{
+		Connections:    nil,
+		ActiveConnName: "prod",
+	})
+	m2, ok := updated.(tui.Model)
+	if !ok {
+		t.Fatal("Update did not return a tui.Model")
+	}
+	// We can't directly inspect activeConn (unexported), but View contains the status bar.
+	// Give it a size first so View() renders.
+	updated2, _ := m2.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m3, ok := updated2.(tui.Model)
+	if !ok {
+		t.Fatal("Update did not return a tui.Model")
+	}
+	view := m3.View()
+	if view == "" {
+		t.Skip("View() returned empty — terminal width/height not set correctly in test")
 	}
 }

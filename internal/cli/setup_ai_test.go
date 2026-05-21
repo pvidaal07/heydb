@@ -92,8 +92,23 @@ func TestGenerateBlockContent_HasConnectionParameter(t *testing.T) {
 
 func TestGenerateBlockContent_HasAnnotationGuidance(t *testing.T) {
 	block := generateBlockContent()
-	assertContains(t, block, "Annotations Are Persistent")
+	// v2: section renamed from "Annotations Are Persistent" to "Annotations Are Accumulative"
+	// to reflect the accumulative (multi-annotation) model with author tracking.
+	assertContains(t, block, "Annotations Are Accumulative")
 	assertContains(t, block, "heydb sync")
+}
+
+func TestGenerateBlockContent_HasV2AnnotationTools(t *testing.T) {
+	block := generateBlockContent()
+	// v2 tools: edit and delete annotation must be present.
+	assertContains(t, block, "heydb_edit_annotation")
+	assertContains(t, block, "heydb_delete_annotation")
+}
+
+func TestGenerateBlockContent_HasPushPullGuidance(t *testing.T) {
+	block := generateBlockContent()
+	assertContains(t, block, "heydb push")
+	assertContains(t, block, "heydb pull")
 }
 
 // ---------------------------------------------------------------------------

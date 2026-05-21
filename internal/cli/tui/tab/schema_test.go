@@ -174,7 +174,7 @@ func TestSchemaTab_EscReturnsToList(t *testing.T) {
 	}
 }
 
-func TestSchemaTab_ConfigReloadedMsg_ClearsStore(t *testing.T) {
+func TestSchemaTab_ConnectionsChangedMsg_ClearsStore(t *testing.T) {
 	store := threeTableStore()
 	st := tab.NewSchemaTab(store, nil)
 
@@ -182,7 +182,7 @@ func TestSchemaTab_ConfigReloadedMsg_ClearsStore(t *testing.T) {
 	updated, _ := st.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	st = updated.(tab.SchemaTab)
 
-	// ConfigReloadedMsg with nil cfg clears the store (handled by tui_cmd store reopen).
+	// ConnectionsChangedMsg clears the store (handled by tui_cmd store reopen).
 	updated, _ = st.Update(tui.StoreOpenedMsg{Store: nil})
 	st = updated.(tab.SchemaTab)
 

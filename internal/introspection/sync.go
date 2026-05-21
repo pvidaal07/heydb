@@ -99,9 +99,11 @@ func (s *Syncer) Run(ctx context.Context, databaseName string) (SyncResult, erro
 		return SyncResult{}, fmt.Errorf("sync: save schema to sqlite: %w", err)
 	}
 
-	// 6. Write schema to output (e.g. heydb.md).
-	if err := s.writer.WriteSchema(sc); err != nil {
-		return SyncResult{}, fmt.Errorf("sync: write schema: %w", err)
+	// 6. Write schema to output (e.g. heydb.md) — only if a writer is provided.
+	if s.writer != nil {
+		if err := s.writer.WriteSchema(sc); err != nil {
+			return SyncResult{}, fmt.Errorf("sync: write schema: %w", err)
+		}
 	}
 
 	return SyncResult{
