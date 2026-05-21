@@ -163,6 +163,81 @@ func TestServer_HandleListTables_DefaultConn(t *testing.T) {
 	}
 }
 
+func TestServer_HandleListTables_FilterByName(t *testing.T) {
+	srv := newTestServer(t)
+	// filter: "user" → should only return tables matching "user"
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{
+		"filter": "user",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables (filter) returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	if !strings.Contains(text, "users") {
+		t.Errorf("expected 'users' in filtered response; got: %s", text)
+	}
+	// "orders" should NOT appear — doesn't match "user"
+	if strings.Contains(text, "orders") {
+		t.Errorf("filtered response should not contain 'orders'; got: %s", text)
+	}
+}
+
+func TestServer_HandleListTables_FilterNoMatch(t *testing.T) {
+	srv := newTestServer(t)
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{
+		"filter": "nonexistent",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables (filter no match) returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	// Should return an empty array
+	var entries []json.RawMessage
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for non-matching filter; got %d", len(entries))
+	}
+}
+
+func TestServer_HandleListTables_FilterCaseInsensitive(t *testing.T) {
+	srv := newTestServer(t)
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{
+		"filter": "USER",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables (filter case) returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	if !strings.Contains(text, "users") {
+		t.Errorf("case-insensitive filter should match 'users'; got: %s", text)
+	}
+}
+
+func TestServer_HandleListTables_FilterEmpty(t *testing.T) {
+	srv := newTestServer(t)
+	// Empty filter → same as no filter, return all
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{
+		"filter": "",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables (empty filter) returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	if !strings.Contains(text, "users") || !strings.Contains(text, "orders") {
+		t.Errorf("empty filter should return all tables; got: %s", text)
+	}
+}
+
 func TestServer_HandleListTables_NamedConn(t *testing.T) {
 	srv := newTestServer(t)
 	// connection: "staging" → routes to staging schema

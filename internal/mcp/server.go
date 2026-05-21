@@ -86,7 +86,10 @@ func (s *Server) registerTools() {
 	s.srv.AddTool(
 		mcpgo.NewTool(
 			"heydb_list_tables",
-			mcpgo.WithDescription("List all tables in the documented database schema, with column counts and comments."),
+			mcpgo.WithDescription("List tables in the documented database schema, with column counts and comments. For large schemas, use the filter parameter to narrow results and reduce response size."),
+			mcpgo.WithString("filter",
+				mcpgo.Description("Optional keyword to filter tables by name (case-insensitive substring match). Only tables whose name contains this keyword are returned."),
+			),
 			mcpgo.WithString("connection",
 				mcpgo.Description("Optional connection name. Defaults to the active connection."),
 			),
@@ -211,7 +214,8 @@ type tableListEntry struct {
 }
 
 func (s *Server) handleListTables(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	entry, _, err := s.resolveConnection(req.GetArguments())
+	args := req.GetArguments()
+	entry, _, err := s.resolveConnection(args)
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
@@ -221,8 +225,14 @@ func (s *Server) handleListTables(ctx context.Context, req mcpgo.CallToolRequest
 		return mcpgo.NewToolResultError(fmt.Sprintf("failed to load schema: %v", err)), nil
 	}
 
+	filter, _ := args["filter"].(string)
+	lowerFilter := strings.ToLower(filter)
+
 	entries := make([]tableListEntry, 0, len(sc.Tables))
 	for _, t := range sc.Tables {
+		if lowerFilter != "" && !strings.Contains(strings.ToLower(t.Name), lowerFilter) {
+			continue
+		}
 		entries = append(entries, tableListEntry{
 			Name:        t.Name,
 			ColumnCount: len(t.Columns),
