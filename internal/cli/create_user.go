@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/pvidaal07/heydb/internal/validation"
 	"github.com/spf13/cobra"
 )
 
@@ -28,8 +29,8 @@ func init() {
 type permScope string
 
 const (
-	scopeSchemaOnly    permScope = "schema_only"
-	scopeSelectAll     permScope = "select_all"
+	scopeSchemaOnly     permScope = "schema_only"
+	scopeSelectAll      permScope = "select_all"
 	scopeSelectSpecific permScope = "select_specific"
 )
 
@@ -50,12 +51,14 @@ func runCreateUser(cmd *cobra.Command, args []string) error {
 			huh.NewInput().
 				Title("MySQL username to create").
 				Placeholder("heydb_reader").
+				Validate(validation.ValidateMySQLIdentifier).
 				Value(&mysqlUsername),
 
 			huh.NewInput().
 				Title("Host restriction").
 				Description("Use % to allow connections from any host, or specify an IP/hostname").
 				Placeholder("%").
+				Validate(validation.ValidateHost).
 				Value(&mysqlHost),
 
 			huh.NewSelect[string]().
@@ -123,7 +126,7 @@ func runCreateUser(cmd *cobra.Command, args []string) error {
 						if strings.TrimSpace(s) == "" {
 							return fmt.Errorf("database name is required for this permission scope")
 						}
-						return nil
+						return validation.ValidateMySQLIdentifier(s)
 					}).
 					Value(&mysqlDatabase),
 			),
@@ -143,6 +146,16 @@ func runCreateUser(cmd *cobra.Command, args []string) error {
 					Validate(func(s string) error {
 						if strings.TrimSpace(s) == "" {
 							return fmt.Errorf("at least one table name is required")
+						}
+						// Validate each table name individually.
+						for _, raw := range strings.Split(s, ",") {
+							table := strings.TrimSpace(raw)
+							if table == "" {
+								continue
+							}
+							if err := validation.ValidateMySQLIdentifier(table); err != nil {
+								return fmt.Errorf("table %q: %w", table, err)
+							}
 						}
 						return nil
 					}).
@@ -173,7 +186,10 @@ func runCreateUser(cmd *cobra.Command, args []string) error {
 	mysqlDatabase = strings.TrimSpace(mysqlDatabase)
 
 	// ── Generate SQL ─────────────────────────────────────────────────────────
-	sql := buildCreateUserSQL(mysqlUsername, finalPassword, mysqlHost, permScope(scope), mysqlDatabase, specificTables)
+	sql, err := buildCreateUserSQL(mysqlUsername, finalPassword, mysqlHost, permScope(scope), mysqlDatabase, specificTables)
+	if err != nil {
+		return fmt.Errorf("create-user: %w", err)
+	}
 
 	// ── Print output ─────────────────────────────────────────────────────────
 	fmt.Println()
@@ -199,10 +215,40 @@ func runCreateUser(cmd *cobra.Command, args []string) error {
 }
 
 // buildCreateUserSQL assembles the CREATE USER + GRANT + FLUSH SQL string.
-func buildCreateUserSQL(username, password, host string, scope permScope, database, specificTables string) string {
+// Returns an error if any identifier or host value fails validation — no SQL
+// is produced in that case. Passwords are never rejected; single quotes are
+// escaped as '' (standard SQL string escaping).
+func buildCreateUserSQL(username, password, host string, scope permScope, database, specificTables string) (string, error) {
+	// Validate identifiers.
+	if err := validation.ValidateMySQLIdentifier(username); err != nil {
+		return "", fmt.Errorf("invalid username: %w", err)
+	}
+	if err := validation.ValidateHost(host); err != nil {
+		return "", fmt.Errorf("invalid host: %w", err)
+	}
+	if scope == scopeSelectAll || scope == scopeSelectSpecific {
+		if err := validation.ValidateMySQLIdentifier(database); err != nil {
+			return "", fmt.Errorf("invalid database name: %w", err)
+		}
+	}
+	if scope == scopeSelectSpecific {
+		for _, raw := range strings.Split(specificTables, ",") {
+			table := strings.TrimSpace(raw)
+			if table == "" {
+				continue
+			}
+			if err := validation.ValidateMySQLIdentifier(table); err != nil {
+				return "", fmt.Errorf("invalid table name: %w", err)
+			}
+		}
+	}
+
+	// Password is not validated (any content is allowed) — only escaped.
+	safePassword := escapeSingleQuote(password)
+
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED BY '%s';\n", username, host, password))
+	b.WriteString(fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED BY '%s';\n", username, host, safePassword))
 	b.WriteString("\n")
 
 	switch scope {
@@ -228,7 +274,14 @@ func buildCreateUserSQL(username, password, host string, scope permScope, databa
 	b.WriteString("\n")
 	b.WriteString("FLUSH PRIVILEGES;\n")
 
-	return b.String()
+	return b.String(), nil
+}
+
+// escapeSingleQuote escapes single-quote characters in s by doubling them
+// (SQL standard: ' → ''). This makes s safe for interpolation inside a
+// single-quoted SQL string literal.
+func escapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
 // generatePassword returns a cryptographically random password of the given

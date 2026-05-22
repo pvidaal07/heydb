@@ -1499,6 +1499,238 @@ func TestSearchTables_Dedup(t *testing.T) {
 	}
 }
 
+// ── T-ENC: Password encryption at storage ────────────────────────────────────
+
+// TestSaveConnection_StoresCiphertext verifies that the password written to the
+// SQLite row is NOT equal to the original plaintext. This is the core
+// property: at-rest encryption prevents reading credentials directly from the
+// SQLite file.
+func TestSaveConnection_StoresCiphertext(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	projectID := "proj-enc-1"
+
+	conn := schema.Connection{
+		Name:     "enc-test",
+		Host:     "127.0.0.1",
+		Port:     3306,
+		Database: "testdb",
+		User:     "user",
+		Password: "supersecret",
+	}
+
+	if err := gs.SaveConnection(ctx, projectID, conn); err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+
+	// Read raw value directly from SQLite — must NOT equal plaintext.
+	var stored string
+	err = gs.DB().QueryRowContext(ctx,
+		`SELECT password FROM connections WHERE project_id = ? AND name = ?`,
+		projectID, conn.Name,
+	).Scan(&stored)
+	if err != nil {
+		t.Fatalf("raw SELECT: %v", err)
+	}
+
+	if stored == conn.Password {
+		t.Error("password stored as plaintext — expected ciphertext")
+	}
+	if stored == "" {
+		t.Error("stored password is empty — encryption failed silently")
+	}
+}
+
+// TestGetConnection_ReturnsDecryptedPassword verifies the round-trip:
+// SaveConnection encrypts, GetConnection decrypts. Caller always sees plaintext.
+func TestGetConnection_ReturnsDecryptedPassword(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	projectID := "proj-enc-2"
+
+	want := "p@$$w0rd!WithSpecialChars"
+	conn := schema.Connection{
+		Name:     "enc-roundtrip",
+		Host:     "localhost",
+		Port:     3306,
+		Database: "app",
+		User:     "reader",
+		Password: want,
+	}
+
+	if err := gs.SaveConnection(ctx, projectID, conn); err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+
+	got, err := gs.GetConnection(ctx, projectID, conn.Name)
+	if err != nil {
+		t.Fatalf("GetConnection: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetConnection returned nil")
+	}
+	if got.Password != want {
+		t.Errorf("GetConnection password = %q, want %q", got.Password, want)
+	}
+}
+
+// TestListConnections_ReturnsDecryptedPasswords verifies that ListConnections
+// also decrypts passwords for every row returned.
+func TestListConnections_ReturnsDecryptedPasswords(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	projectID := "proj-enc-3"
+
+	conns := []schema.Connection{
+		{Name: "alpha", Host: "h1", Port: 3306, Database: "db1", User: "u1", Password: "secret-alpha"},
+		{Name: "beta", Host: "h2", Port: 3306, Database: "db2", User: "u2", Password: "secret-beta"},
+	}
+	for _, c := range conns {
+		if err := gs.SaveConnection(ctx, projectID, c); err != nil {
+			t.Fatalf("SaveConnection %q: %v", c.Name, err)
+		}
+	}
+
+	list, err := gs.ListConnections(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListConnections: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 connections, got %d", len(list))
+	}
+
+	byName := make(map[string]string, len(list))
+	for _, c := range list {
+		byName[c.Name] = c.Password
+	}
+
+	for _, original := range conns {
+		if byName[original.Name] != original.Password {
+			t.Errorf("ListConnections[%q].Password = %q, want %q",
+				original.Name, byName[original.Name], original.Password)
+		}
+	}
+}
+
+// TestGetConnection_MigratesPlaintextPassword verifies lazy migration: if a
+// connection was stored as plaintext (pre-encryption), GetConnection must
+// return the plaintext password correctly and re-encrypt it in the DB row.
+func TestGetConnection_MigratesPlaintextPassword(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	projectID := "proj-enc-migration"
+	connName := "legacy"
+	plainPW := "oldpassword123"
+	connID := projectID + "/" + connName
+
+	// Insert directly as plaintext, bypassing SaveConnection.
+	_, err = gs.DB().ExecContext(ctx, `
+		INSERT INTO connections (id, project_id, name, host, port, database, user, password, is_active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		connID, projectID, connName, "localhost", 3306, "db", "u", plainPW,
+	)
+	if err != nil {
+		t.Fatalf("raw INSERT: %v", err)
+	}
+
+	// GetConnection must detect plaintext (decryption fails), return it, and re-encrypt.
+	got, err := gs.GetConnection(ctx, projectID, connName)
+	if err != nil {
+		t.Fatalf("GetConnection (migration): %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetConnection returned nil")
+	}
+	if got.Password != plainPW {
+		t.Errorf("GetConnection password = %q, want %q", got.Password, plainPW)
+	}
+
+	// After migration: raw value must no longer be plaintext.
+	var stored string
+	err = gs.DB().QueryRowContext(ctx,
+		`SELECT password FROM connections WHERE project_id = ? AND name = ?`,
+		projectID, connName,
+	).Scan(&stored)
+	if err != nil {
+		t.Fatalf("raw SELECT after migration: %v", err)
+	}
+	if stored == plainPW {
+		t.Error("password still plaintext after migration — re-encrypt failed")
+	}
+}
+
+// TestGetConnection_CorruptedCiphertextReturnsError verifies that valid base64
+// but invalid GCM data produces a descriptive error, not a silent empty password.
+func TestGetConnection_CorruptedCiphertextReturnsError(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	projectID := "proj-enc-corrupt"
+	connName := "corrupt"
+	connID := projectID + "/" + connName
+
+	// Insert a value that:
+	// 1. Decodes from base64 successfully (so it looks encrypted)
+	// 2. But fails GCM authentication (corrupted ciphertext)
+	// 32 bytes of base64-valid but GCM-invalid data (nonce + garbage tag).
+	corruptedB64 := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // 32 bytes of zeroes, valid b64
+	_, err = gs.DB().ExecContext(ctx, `
+		INSERT INTO connections (id, project_id, name, host, port, database, user, password, is_active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		connID, projectID, connName, "localhost", 3306, "db", "u", corruptedB64,
+	)
+	if err != nil {
+		t.Fatalf("raw INSERT: %v", err)
+	}
+
+	_, err = gs.GetConnection(ctx, projectID, connName)
+	if err == nil {
+		t.Fatal("expected error for corrupted ciphertext, got nil")
+	}
+	if err.Error() == "" {
+		t.Error("error message is empty — must be descriptive")
+	}
+}
+
 func TestSearchTables_BackwardCompatibility(t *testing.T) {
 	dbPath, cleanup := tempDB(t)
 	defer cleanup()
