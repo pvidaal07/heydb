@@ -8,6 +8,8 @@ import (
 	cryptorand "crypto/rand"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -157,7 +159,8 @@ CREATE INDEX IF NOT EXISTS idx_implicit_rel_to
 
 // GlobalStore implements all global-scoped ports using a single SQLite file.
 type GlobalStore struct {
-	db *sql.DB
+	db     *sql.DB
+	encKey []byte // AES-256 key for password encryption; derived in OpenGlobal
 }
 
 // OpenGlobal opens (or creates) the global SQLite database at the given path,
@@ -186,7 +189,21 @@ func OpenGlobal(path string) (*GlobalStore, error) {
 		return nil, fmt.Errorf("global: DDL bootstrap: %w", err)
 	}
 
-	return &GlobalStore{db: db}, nil
+	// Derive encryption key: heydbDir is the directory that contains the DB file.
+	// The salt file (key.salt) lives in the same directory.
+	heydbDir := filepath.Dir(path)
+	salt, err := ensureSalt(heydbDir)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("global: encryption key setup: %w", err)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "localhost" // safe fallback — key stability is best-effort
+	}
+	encKey := deriveKey(hostname, salt)
+
+	return &GlobalStore{db: db, encKey: encKey}, nil
 }
 
 // Close releases the underlying database connection. Safe to call multiple
@@ -284,9 +301,15 @@ func (g *GlobalStore) GetProjectByID(ctx context.Context, id string) (*schema.Pr
 
 // SaveConnection inserts or replaces a connection for the given project.
 // A UUID is generated from the project_id + name combination as a stable ID.
+// The password is encrypted with AES-256-GCM before storage.
 func (g *GlobalStore) SaveConnection(ctx context.Context, projectID string, conn schema.Connection) error {
+	cipherPW, err := encrypt(conn.Password, g.encKey)
+	if err != nil {
+		return fmt.Errorf("global: SaveConnection %q: encrypt password: %w", conn.Name, err)
+	}
+
 	connID := projectID + "/" + conn.Name
-	_, err := g.db.ExecContext(ctx, `
+	_, err = g.db.ExecContext(ctx, `
 		INSERT INTO connections (id, project_id, name, host, port, database, user, password, is_active)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, name) DO UPDATE SET
@@ -296,7 +319,7 @@ func (g *GlobalStore) SaveConnection(ctx context.Context, projectID string, conn
 		    user      = excluded.user,
 		    password  = excluded.password`,
 		connID, projectID, conn.Name,
-		conn.Host, conn.Port, conn.Database, conn.User, conn.Password,
+		conn.Host, conn.Port, conn.Database, conn.User, cipherPW,
 		boolToInt(conn.Active),
 	)
 	if err != nil {
@@ -306,16 +329,22 @@ func (g *GlobalStore) SaveConnection(ctx context.Context, projectID string, conn
 }
 
 // GetConnection returns the connection with the given name for a project.
-// Returns (nil, nil) when not found.
+// Returns (nil, nil) when not found. The password is decrypted transparently.
+//
+// Lazy migration: if decryption fails, the stored value is assumed to be a
+// legacy plaintext password. It is re-encrypted and written back so that
+// subsequent reads use the encrypted path. This is a one-time migration per
+// connection — after this call the row is always encrypted.
 func (g *GlobalStore) GetConnection(ctx context.Context, projectID, name string) (*schema.Connection, error) {
 	var c schema.Connection
 	var active int
+	var storedPW string
 	err := g.db.QueryRowContext(ctx, `
 		SELECT name, host, port, database, user, password, is_active, project_id
 		FROM connections
 		WHERE project_id = ? AND name = ?`,
 		projectID, name).
-		Scan(&c.Name, &c.Host, &c.Port, &c.Database, &c.User, &c.Password, &active, &c.ProjectID)
+		Scan(&c.Name, &c.Host, &c.Port, &c.Database, &c.User, &storedPW, &active, &c.ProjectID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -323,10 +352,66 @@ func (g *GlobalStore) GetConnection(ctx context.Context, projectID, name string)
 		return nil, fmt.Errorf("global: GetConnection %q: %w", name, err)
 	}
 	c.Active = active == 1
+
+	plainPW, err := decrypt(storedPW, g.encKey)
+	if err != nil {
+		// Decryption failure — could be a legacy plaintext password or truly corrupt data.
+		// Distinguish by attempting base64 decode: if it fails, it's definitely plaintext.
+		// If base64 succeeds but GCM fails, it could still be coincidentally-valid-b64 plaintext
+		// or genuinely corrupted. We re-try with a corruption-detection heuristic:
+		// a valid GCM ciphertext must be at least nonce (12 bytes) + tag (16 bytes) = 28 bytes
+		// after base64 decode, and the stored value must look like base64 (no spaces, etc.).
+		// If the stored value is short or looks like a human password, treat as plaintext.
+		if isLikelyPlaintext(storedPW) {
+			// Lazy migration: re-encrypt and write back.
+			plainPW = storedPW
+			if reencErr := g.reencryptPassword(ctx, projectID, name, plainPW); reencErr != nil {
+				// Non-fatal: migration failed but we can still return the plaintext.
+				// Next read will retry migration.
+				_ = reencErr
+			}
+		} else {
+			// Looks like it was meant to be encrypted but is corrupted.
+			return nil, fmt.Errorf("global: GetConnection %q: %w", name, err)
+		}
+	}
+
+	c.Password = plainPW
 	return &c, nil
 }
 
+// reencryptPassword writes an encrypted version of plainPW back to the DB row,
+// completing lazy migration for a connection that was stored as plaintext.
+func (g *GlobalStore) reencryptPassword(ctx context.Context, projectID, name, plainPW string) error {
+	cipherPW, err := encrypt(plainPW, g.encKey)
+	if err != nil {
+		return fmt.Errorf("global: reencryptPassword %q: %w", name, err)
+	}
+	_, err = g.db.ExecContext(ctx,
+		`UPDATE connections SET password = ? WHERE project_id = ? AND name = ?`,
+		cipherPW, projectID, name)
+	return err
+}
+
+// isLikelyPlaintext returns true when s is almost certainly a human-typed
+// password rather than an AES-256-GCM ciphertext encoded as base64.
+//
+// Heuristic: a valid ciphertext base64-decodes to at least 28 bytes (12-byte
+// nonce + 16-byte GCM tag, with zero plaintext). If s fails base64 decoding
+// OR the decoded length is below 28 bytes, it cannot be a valid ciphertext —
+// treat it as plaintext. This covers the common case of short passwords and
+// passwords with non-base64 characters (spaces, @, etc.).
+func isLikelyPlaintext(s string) bool {
+	raw, err := decodeBase64(s)
+	if err != nil {
+		return true // cannot be base64-encoded ciphertext
+	}
+	return len(raw) < 28 // too short to be a valid GCM ciphertext
+}
+
 // ListConnections returns all connections for a project, ordered by name.
+// Passwords are decrypted transparently. Rows with legacy plaintext passwords
+// are migrated lazily (re-encrypted and written back) on first read.
 func (g *GlobalStore) ListConnections(ctx context.Context, projectID string) ([]schema.Connection, error) {
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT name, host, port, database, user, password, is_active, project_id
@@ -343,10 +428,23 @@ func (g *GlobalStore) ListConnections(ctx context.Context, projectID string) ([]
 	for rows.Next() {
 		var c schema.Connection
 		var active int
-		if err := rows.Scan(&c.Name, &c.Host, &c.Port, &c.Database, &c.User, &c.Password, &active, &c.ProjectID); err != nil {
+		var storedPW string
+		if err := rows.Scan(&c.Name, &c.Host, &c.Port, &c.Database, &c.User, &storedPW, &active, &c.ProjectID); err != nil {
 			return nil, fmt.Errorf("global: ListConnections scan: %w", err)
 		}
 		c.Active = active == 1
+
+		plainPW, decErr := decrypt(storedPW, g.encKey)
+		if decErr != nil {
+			if isLikelyPlaintext(storedPW) {
+				// Lazy migration: re-encrypt and write back.
+				plainPW = storedPW
+				_ = g.reencryptPassword(ctx, projectID, c.Name, plainPW)
+			} else {
+				return nil, fmt.Errorf("global: ListConnections decrypt %q: %w", c.Name, decErr)
+			}
+		}
+		c.Password = plainPW
 		result = append(result, c)
 	}
 	return result, rows.Err()

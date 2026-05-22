@@ -8,8 +8,13 @@ import (
 // buildCreateUserSQL and generatePassword are unexported — tested here in
 // the same package (white-box testing).
 
+// ── Valid inputs (existing tests updated for (string, error) return) ──────────
+
 func TestBuildCreateUserSQL_SchemaOnly(t *testing.T) {
-	sql := buildCreateUserSQL("reader", "pass123", "%", scopeSchemaOnly, "", "")
+	sql, err := buildCreateUserSQL("reader", "pass123", "%", scopeSchemaOnly, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	assertContains(t, sql, "CREATE USER 'reader'@'%' IDENTIFIED BY 'pass123';")
 	assertContains(t, sql, "GRANT SELECT ON information_schema.*")
@@ -22,7 +27,10 @@ func TestBuildCreateUserSQL_SchemaOnly(t *testing.T) {
 }
 
 func TestBuildCreateUserSQL_SelectAll(t *testing.T) {
-	sql := buildCreateUserSQL("reader", "pass", "localhost", scopeSelectAll, "myapp", "")
+	sql, err := buildCreateUserSQL("reader", "pass", "localhost", scopeSelectAll, "myapp", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	assertContains(t, sql, "CREATE USER 'reader'@'localhost' IDENTIFIED BY 'pass';")
 	assertContains(t, sql, "GRANT SELECT ON information_schema.*")
@@ -31,7 +39,10 @@ func TestBuildCreateUserSQL_SelectAll(t *testing.T) {
 }
 
 func TestBuildCreateUserSQL_SelectSpecific(t *testing.T) {
-	sql := buildCreateUserSQL("reader", "pass", "%", scopeSelectSpecific, "myapp", "users, orders, products")
+	sql, err := buildCreateUserSQL("reader", "pass", "%", scopeSelectSpecific, "myapp", "users, orders, products")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	assertContains(t, sql, "CREATE USER 'reader'@'%' IDENTIFIED BY 'pass';")
 	assertContains(t, sql, "GRANT SELECT ON information_schema.*")
@@ -47,15 +58,145 @@ func TestBuildCreateUserSQL_SelectSpecific(t *testing.T) {
 }
 
 func TestBuildCreateUserSQL_HostIsInjected(t *testing.T) {
-	sql := buildCreateUserSQL("u", "p", "10.0.0.5", scopeSchemaOnly, "", "")
+	sql, err := buildCreateUserSQL("u", "p", "10.0.0.5", scopeSchemaOnly, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertContains(t, sql, "'u'@'10.0.0.5'")
 }
 
 func TestBuildCreateUserSQL_SpecificTablesTrimsSpaces(t *testing.T) {
-	sql := buildCreateUserSQL("r", "p", "%", scopeSelectSpecific, "db", "  tbl1 ,  tbl2  ")
+	sql, err := buildCreateUserSQL("r", "p", "%", scopeSelectSpecific, "db", "  tbl1 ,  tbl2  ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	assertContains(t, sql, "GRANT SELECT ON `db`.`tbl1` TO 'r'@'%';")
 	assertContains(t, sql, "GRANT SELECT ON `db`.`tbl2` TO 'r'@'%';")
 }
+
+// ── Injection rejection tests (new, Phase 3) ──────────────────────────────────
+
+func TestBuildCreateUserSQL_RejectsInjectionInUsername(t *testing.T) {
+	injections := []string{
+		"'; DROP TABLE users; --",
+		"root'--",
+		"user`name",
+		"user;name",
+		"user name",
+		"my-user",
+	}
+	for _, payload := range injections {
+		_, err := buildCreateUserSQL(payload, "pass", "%", scopeSchemaOnly, "", "")
+		if err == nil {
+			t.Errorf("buildCreateUserSQL: expected error for username=%q, got nil", payload)
+		}
+	}
+}
+
+func TestBuildCreateUserSQL_RejectsInjectionInDatabase(t *testing.T) {
+	injections := []string{
+		"`mydb` UNION SELECT",
+		"mydb; DROP TABLE users",
+		"my-db",
+	}
+	for _, payload := range injections {
+		_, err := buildCreateUserSQL("reader", "pass", "%", scopeSelectAll, payload, "")
+		if err == nil {
+			t.Errorf("buildCreateUserSQL: expected error for database=%q, got nil", payload)
+		}
+	}
+}
+
+func TestBuildCreateUserSQL_RejectsInjectionInTable(t *testing.T) {
+	injections := []string{
+		"users`; DROP TABLE users; --",
+		"tbl'injection",
+		"my-table",
+	}
+	for _, payload := range injections {
+		_, err := buildCreateUserSQL("reader", "pass", "%", scopeSelectSpecific, "mydb", payload)
+		if err == nil {
+			t.Errorf("buildCreateUserSQL: expected error for table=%q, got nil", payload)
+		}
+	}
+}
+
+func TestBuildCreateUserSQL_RejectsInjectionInHost(t *testing.T) {
+	injections := []string{
+		"'; DROP TABLE users; --",
+		"host`name",
+		"host;name",
+	}
+	for _, payload := range injections {
+		_, err := buildCreateUserSQL("reader", "pass", payload, scopeSchemaOnly, "", "")
+		if err == nil {
+			t.Errorf("buildCreateUserSQL: expected error for host=%q, got nil", payload)
+		}
+	}
+}
+
+// ── Password escaping (new, Phase 3) ─────────────────────────────────────────
+
+func TestBuildCreateUserSQL_EscapesSingleQuoteInPassword(t *testing.T) {
+	sql, err := buildCreateUserSQL("reader", "pass'word", "%", scopeSchemaOnly, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Single quote in password must be escaped as ''
+	assertContains(t, sql, "IDENTIFIED BY 'pass''word'")
+}
+
+func TestBuildCreateUserSQL_PasswordWithDoubleDash(t *testing.T) {
+	// Passwords with -- are enclosed in a string literal, so they're safe.
+	sql, err := buildCreateUserSQL("reader", "pass--word", "%", scopeSchemaOnly, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, sql, "IDENTIFIED BY 'pass--word'")
+}
+
+func TestBuildCreateUserSQL_PasswordWithSemicolon(t *testing.T) {
+	// Semicolons are enclosed in the string literal — safe after escaping.
+	sql, err := buildCreateUserSQL("reader", "pass;word", "%", scopeSchemaOnly, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, sql, "IDENTIFIED BY 'pass;word'")
+}
+
+// ── escapeSingleQuote ─────────────────────────────────────────────────────────
+
+func TestEscapeSingleQuote_BasicEscape(t *testing.T) {
+	got := escapeSingleQuote("pass'word")
+	want := "pass''word"
+	if got != want {
+		t.Errorf("escapeSingleQuote: want %q, got %q", want, got)
+	}
+}
+
+func TestEscapeSingleQuote_MultipleQuotes(t *testing.T) {
+	got := escapeSingleQuote("it's a 'test'")
+	want := "it''s a ''test''"
+	if got != want {
+		t.Errorf("escapeSingleQuote: want %q, got %q", want, got)
+	}
+}
+
+func TestEscapeSingleQuote_NoQuotes(t *testing.T) {
+	got := escapeSingleQuote("normalpassword")
+	if got != "normalpassword" {
+		t.Errorf("escapeSingleQuote: no-op expected, got %q", got)
+	}
+}
+
+func TestEscapeSingleQuote_EmptyString(t *testing.T) {
+	got := escapeSingleQuote("")
+	if got != "" {
+		t.Errorf("escapeSingleQuote: empty string expected, got %q", got)
+	}
+}
+
+// ── generatePassword ──────────────────────────────────────────────────────────
 
 func TestGeneratePassword_NonEmpty(t *testing.T) {
 	p, err := generatePassword(24)

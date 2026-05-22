@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,10 +12,9 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 
-	"database/sql"
-
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
+	"github.com/pvidaal07/heydb/internal/validation"
 )
 
 var connectCmd = &cobra.Command{
@@ -167,8 +167,8 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 				Description("A unique label for this connection (e.g. local, staging, prod)").
 				Placeholder("mydb").
 				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("connection name is required")
+					if err := validation.ValidateConnectionName(strings.TrimSpace(s)); err != nil {
+						return err
 					}
 					if existingNames[strings.TrimSpace(s)] {
 						return fmt.Errorf("connection %q already exists — choose a different name", s)
@@ -180,6 +180,9 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 			huh.NewInput().
 				Title("Host").
 				Placeholder("127.0.0.1").
+				Validate(func(s string) error {
+					return validation.ValidateHost(strings.TrimSpace(s))
+				}).
 				Value(&host),
 
 			huh.NewInput().
@@ -197,23 +200,13 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 			huh.NewInput().
 				Title("Database").
 				Placeholder("myapp").
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("database name is required")
-					}
-					return nil
-				}).
+				Validate(validation.ValidateMySQLIdentifier).
 				Value(&database),
 
 			huh.NewInput().
 				Title("Username").
 				Placeholder("heydb_reader").
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("username is required")
-					}
-					return nil
-				}).
+				Validate(validation.ValidateMySQLIdentifier).
 				Value(&username),
 
 			huh.NewInput().
@@ -301,11 +294,10 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 		}
 	}
 
-	// Security warning — always shown.
+	// Encryption notice — always shown.
 	fmt.Println()
-	fmt.Println("WARNING: The password is stored in plaintext in ~/.heydb/heydb.db.")
-	fmt.Println("         This file is on your local machine. Be careful with backups")
-	fmt.Println("         and shared environments.")
+	fmt.Println("NOTE: The password is encrypted at rest in ~/.heydb/heydb.db.")
+	fmt.Println("      Be careful with backups and shared environments.")
 
 	return nil
 }
