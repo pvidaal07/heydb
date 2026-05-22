@@ -14,6 +14,7 @@ import (
 	"github.com/pvidaal07/heydb/internal/cli/tui"
 	"github.com/pvidaal07/heydb/internal/domain/ports"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
+	"github.com/pvidaal07/heydb/internal/validation"
 )
 
 // ConnectionsTab shows the list of configured connections, a detail panel for
@@ -342,8 +343,8 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 
 	if !isEdit {
 		nameField = nameField.Validate(func(s string) error {
-			if strings.TrimSpace(s) == "" {
-				return fmt.Errorf("connection name is required")
+			if err := validation.ValidateConnectionName(strings.TrimSpace(s)); err != nil {
+				return err
 			}
 			for _, conn := range c.connections {
 				if conn.Name == strings.TrimSpace(s) {
@@ -360,6 +361,9 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 			huh.NewInput().
 				Title("Host").
 				Placeholder("127.0.0.1").
+				Validate(func(s string) error {
+					return validation.ValidateHost(strings.TrimSpace(s))
+				}).
 				Value(&c.fhost),
 			huh.NewInput().
 				Title("Port").
@@ -375,22 +379,12 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 			huh.NewInput().
 				Title("Database").
 				Placeholder("myapp").
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("database is required")
-					}
-					return nil
-				}).
+				Validate(validation.ValidateMySQLIdentifier).
 				Value(&c.fdatabase),
 			huh.NewInput().
 				Title("Username").
 				Placeholder("heydb_reader").
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("username is required")
-					}
-					return nil
-				}).
+				Validate(validation.ValidateMySQLIdentifier).
 				Value(&c.fusername),
 			huh.NewInput().
 				Title("Password").
