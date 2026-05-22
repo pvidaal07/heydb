@@ -19,9 +19,12 @@ type SchemaStore interface {
 	GetTable(ctx context.Context, name string) (schema.Table, error)
 
 	// SearchTables performs a case-insensitive substring search across
-	// table names, column names, and comment fields.
+	// table names, column names, comment fields, annotation content, and
+	// implicit relationship table/column names.
+	// projectID and connectionName scope the annotation and relationship
+	// queries; pass empty strings if not available (e.g. from CLI or TUI).
 	// Returns an empty (non-nil) slice when there are no matches.
-	SearchTables(ctx context.Context, query string) ([]schema.Table, error)
+	SearchTables(ctx context.Context, query, projectID, connectionName string) ([]schema.Table, error)
 
 	// Close releases the underlying database connection.
 	Close() error

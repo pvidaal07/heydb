@@ -11,10 +11,11 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/ports"
 )
 
-// ConnEntry holds the two store interfaces for a single connection.
+// ConnEntry holds the store interfaces for a single connection.
 type ConnEntry struct {
-	Schema      ports.SchemaStore
-	Annotations ports.AnnotationStore
+	Schema        ports.SchemaStore
+	Annotations   ports.AnnotationStore
+	Relationships ports.RelationshipStore
 }
 
 // ConnectionInfo is the wire shape returned by heydb_list_connections.
@@ -112,6 +113,11 @@ func (r *Registry) CloseAll() error {
 		if c, ok := entry.Annotations.(io.Closer); ok {
 			if err := c.Close(); err != nil {
 				errs = append(errs, fmt.Sprintf("close %q annotations: %v", name, err))
+			}
+		}
+		if c, ok := entry.Relationships.(io.Closer); ok {
+			if err := c.Close(); err != nil {
+				errs = append(errs, fmt.Sprintf("close %q relationships: %v", name, err))
 			}
 		}
 	}

@@ -1,17 +1,20 @@
 // Package mcp provides a thin wrapper around mark3labs/mcp-go that exposes
 // tools for querying and annotating heydb connection schemas:
 //
-//   - heydb_list_connections  — list all configured connections with status
-//   - heydb_list_tables       — list all tables with column counts and comments
-//   - heydb_get_table         — return full detail for one table (incl. annotations)
-//   - heydb_search            — substring search across table/column names
-//   - heydb_annotate          — add a table-level annotation (accumulative)
-//   - heydb_annotate_column   — add a column-level annotation (accumulative)
-//   - heydb_annotate_db       — add a database-level annotation (accumulative)
-//   - heydb_edit_annotation   — edit an annotation by UUID
-//   - heydb_delete_annotation — delete an annotation by UUID
+//   - heydb_list_connections    — list all configured connections with status
+//   - heydb_list_tables         — list all tables with column counts and comments
+//   - heydb_get_table           — return full detail for one table (incl. annotations + implicit FKs)
+//   - heydb_search              — search across table/column names, annotations, and relationships
+//   - heydb_annotate            — add a table-level annotation (accumulative)
+//   - heydb_annotate_column     — add a column-level annotation (accumulative)
+//   - heydb_annotate_db         — add a database-level annotation (accumulative)
+//   - heydb_edit_annotation     — edit an annotation by UUID
+//   - heydb_delete_annotation   — delete an annotation by UUID
+//   - heydb_add_relationship    — add an implicit (undocumented) foreign-key relationship
+//   - heydb_delete_relationship — delete an implicit relationship by UUID
+//   - heydb_list_relationships  — list all implicit relationships for a connection
 //
-// All schema/annotation tools accept an optional "connection" parameter.
+// All tools accept an optional "connection" parameter.
 // When omitted, the active connection is used.
 //
 // The server reads from SQLite exclusively via a Registry of open store pairs.
@@ -237,6 +240,65 @@ func (s *Server) registerTools() {
 		),
 		s.handleDeleteAnnotation,
 	)
+
+	// ── heydb_add_relationship ───────────────────────────────────────────────
+	s.srv.AddTool(
+		mcpgo.NewTool(
+			"heydb_add_relationship",
+			mcpgo.WithDescription("Document an implicit (undocumented) foreign-key relationship between two tables. Both tables and columns must exist in the schema."),
+			mcpgo.WithString("from_table",
+				mcpgo.Description("The child/many-side table name."),
+				mcpgo.Required(),
+			),
+			mcpgo.WithString("from_column",
+				mcpgo.Description("The column on from_table that references to_table."),
+				mcpgo.Required(),
+			),
+			mcpgo.WithString("to_table",
+				mcpgo.Description("The parent/one-side table name."),
+				mcpgo.Required(),
+			),
+			mcpgo.WithString("to_column",
+				mcpgo.Description("The column on to_table being referenced."),
+				mcpgo.Required(),
+			),
+			mcpgo.WithString("label",
+				mcpgo.Description("Optional human-readable description of the relationship."),
+			),
+			mcpgo.WithString("connection",
+				mcpgo.Description("Optional connection name. Defaults to the active connection."),
+			),
+		),
+		s.handleAddRelationship,
+	)
+
+	// ── heydb_delete_relationship ────────────────────────────────────────────
+	s.srv.AddTool(
+		mcpgo.NewTool(
+			"heydb_delete_relationship",
+			mcpgo.WithDescription("Delete an implicit relationship by its UUID."),
+			mcpgo.WithString("id",
+				mcpgo.Description("UUID of the implicit relationship to delete."),
+				mcpgo.Required(),
+			),
+			mcpgo.WithString("connection",
+				mcpgo.Description("Optional connection name. Defaults to the active connection."),
+			),
+		),
+		s.handleDeleteRelationship,
+	)
+
+	// ── heydb_list_relationships ─────────────────────────────────────────────
+	s.srv.AddTool(
+		mcpgo.NewTool(
+			"heydb_list_relationships",
+			mcpgo.WithDescription("List all implicit relationships for the active or specified connection."),
+			mcpgo.WithString("connection",
+				mcpgo.Description("Optional connection name. Defaults to the active connection."),
+			),
+		),
+		s.handleListRelationships,
+	)
 }
 
 // ── connection resolution ─────────────────────────────────────────────────────
@@ -312,11 +374,13 @@ type indexDetail struct {
 }
 
 // fkDetail is the response shape for a single foreign key.
+// Implicit is true for user-defined relationships that are not enforced by the DB engine.
 type fkDetail struct {
 	Name             string `json:"name"`
 	Column           string `json:"column"`
 	ReferencedTable  string `json:"referenced_table"`
 	ReferencedColumn string `json:"referenced_column"`
+	Implicit         bool   `json:"implicit"`
 }
 
 // annotationDetail is the wire shape for a single annotation in heydb_get_table.
@@ -383,19 +447,51 @@ func (s *Server) handleGetTable(ctx context.Context, req mcpgo.CallToolRequest) 
 		}
 	}
 
+	// Merge implicit relationships into foreign_keys with Implicit:true.
+	if entry.Relationships != nil && s.projectID != "" {
+		rels, err := entry.Relationships.GetRelationshipsByTable(ctx, s.projectID, connName, tableName)
+		if err == nil {
+			for _, rel := range rels {
+				var fk fkDetail
+				if rel.FromTable == tableName {
+					// Forward reference: this table is the child side.
+					fk = fkDetail{
+						Name:             rel.Label,
+						Column:           rel.FromColumn,
+						ReferencedTable:  rel.ToTable,
+						ReferencedColumn: rel.ToColumn,
+						Implicit:         true,
+					}
+				} else {
+					// Reverse reference: this table is the parent side; swap from↔to.
+					fk = fkDetail{
+						Name:             rel.Label,
+						Column:           rel.ToColumn,
+						ReferencedTable:  rel.FromTable,
+						ReferencedColumn: rel.FromColumn,
+						Implicit:         true,
+					}
+				}
+				detail.ForeignKeys = append(detail.ForeignKeys, fk)
+			}
+		}
+	}
+
 	return jsonResult(detail)
 }
 
 // searchResultEntry is the response shape for heydb_search, including matched columns.
+// MatchSource indicates which source matched: "table_name", "column_name", "annotation", or "relationship".
 type searchResultEntry struct {
 	Name           string   `json:"name"`
 	ColumnCount    int      `json:"column_count"`
 	Comment        string   `json:"comment,omitempty"`
 	MatchedColumns []string `json:"matched_columns,omitempty"`
+	MatchSource    string   `json:"match_source,omitempty"`
 }
 
 func (s *Server) handleSearch(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	entry, _, err := s.resolveConnection(req.GetArguments())
+	entry, connName, err := s.resolveConnection(req.GetArguments())
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
@@ -405,30 +501,121 @@ func (s *Server) handleSearch(ctx context.Context, req mcpgo.CallToolRequest) (*
 		return mcpgo.NewToolResultError("query argument is required"), nil
 	}
 
-	tables, err := entry.Schema.SearchTables(ctx, query)
+	tables, err := entry.Schema.SearchTables(ctx, query, s.projectID, connName)
 	if err != nil {
 		return mcpgo.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
 	lowerQuery := strings.ToLower(query)
-	entries := make([]searchResultEntry, 0, len(tables))
+
+	// Build a deduplication map: table name → searchResultEntry.
+	// We preserve insertion order via an ordered slice.
+	resultMap := make(map[string]searchResultEntry)
+	resultOrder := make([]string, 0, len(tables))
+
+	// Build sets of tables that matched via annotation or relationship so we
+	// can classify match_source accurately. These are cheap indexed queries.
+	annotationMatches := make(map[string]bool)
+	relationshipMatches := make(map[string]bool)
+
+	if entry.Annotations != nil {
+		allAnns, _ := entry.Annotations.GetAllAnnotations(ctx, s.projectID, connName)
+		for _, a := range allAnns {
+			if strings.Contains(strings.ToLower(a.Content), lowerQuery) {
+				annotationMatches[a.TargetName] = true
+			}
+		}
+	}
+
+	if entry.Relationships != nil {
+		allRels, _ := entry.Relationships.ListRelationships(ctx, s.projectID, connName)
+		for _, r := range allRels {
+			if strings.Contains(strings.ToLower(r.FromTable), lowerQuery) ||
+				strings.Contains(strings.ToLower(r.FromColumn), lowerQuery) ||
+				strings.Contains(strings.ToLower(r.ToTable), lowerQuery) ||
+				strings.Contains(strings.ToLower(r.ToColumn), lowerQuery) ||
+				strings.Contains(strings.ToLower(r.Label), lowerQuery) {
+				relationshipMatches[r.FromTable] = true
+				relationshipMatches[r.ToTable] = true
+			}
+		}
+	}
+
 	for _, t := range tables {
 		var matched []string
+		matchSource := classifyMatchSource(t.Name, lowerQuery, annotationMatches, relationshipMatches)
 		for _, c := range t.Columns {
 			if strings.Contains(strings.ToLower(c.Name), lowerQuery) ||
 				strings.Contains(strings.ToLower(c.Comment), lowerQuery) {
 				matched = append(matched, c.Name)
 			}
 		}
-		entries = append(entries, searchResultEntry{
+		if _, seen := resultMap[t.Name]; !seen {
+			resultOrder = append(resultOrder, t.Name)
+		}
+		resultMap[t.Name] = searchResultEntry{
 			Name:           t.Name,
 			ColumnCount:    len(t.Columns),
 			Comment:        t.Comment,
 			MatchedColumns: matched,
-		})
+			MatchSource:    matchSource,
+		}
+	}
+
+	// Include tables found via annotation/relationship that SearchTables missed.
+	for name := range annotationMatches {
+		if _, seen := resultMap[name]; !seen {
+			t, err := entry.Schema.GetTable(ctx, name)
+			if err != nil {
+				continue
+			}
+			resultOrder = append(resultOrder, name)
+			resultMap[name] = searchResultEntry{
+				Name:        t.Name,
+				ColumnCount: len(t.Columns),
+				Comment:     t.Comment,
+				MatchSource: "annotation",
+			}
+		}
+	}
+	for name := range relationshipMatches {
+		if _, seen := resultMap[name]; !seen {
+			t, err := entry.Schema.GetTable(ctx, name)
+			if err != nil {
+				continue
+			}
+			resultOrder = append(resultOrder, name)
+			resultMap[name] = searchResultEntry{
+				Name:        t.Name,
+				ColumnCount: len(t.Columns),
+				Comment:     t.Comment,
+				MatchSource: "relationship",
+			}
+		}
+	}
+
+	entries := make([]searchResultEntry, 0, len(resultOrder))
+	for _, name := range resultOrder {
+		entries = append(entries, resultMap[name])
 	}
 
 	return jsonResult(entries)
+}
+
+// classifyMatchSource determines why a table appeared in search results.
+// Priority: table_name > column_name > annotation > relationship.
+func classifyMatchSource(tableName, lowerQuery string, annotationMatches, relationshipMatches map[string]bool) string {
+	if strings.Contains(strings.ToLower(tableName), lowerQuery) {
+		return "table_name"
+	}
+	// If not matched by table name, check if it was an annotation or relationship match.
+	if annotationMatches[tableName] {
+		return "annotation"
+	}
+	if relationshipMatches[tableName] {
+		return "relationship"
+	}
+	return "column_name"
 }
 
 func (s *Server) handleAnnotate(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -654,7 +841,174 @@ func (s *Server) handleDeleteAnnotation(ctx context.Context, req mcpgo.CallToolR
 	return mcpgo.NewToolResultText(fmt.Sprintf("Annotation %q deleted", id)), nil
 }
 
+// ── relationship handlers ─────────────────────────────────────────────────────
+
+// relationshipDetail is the wire shape for an implicit relationship in tool responses.
+type relationshipDetail struct {
+	ID             string `json:"id"`
+	FromTable      string `json:"from_table"`
+	FromColumn     string `json:"from_column"`
+	ToTable        string `json:"to_table"`
+	ToColumn       string `json:"to_column"`
+	Label          string `json:"label,omitempty"`
+	Author         string `json:"author,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+}
+
+func (s *Server) handleAddRelationship(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	args := req.GetArguments()
+	entry, connName, err := s.resolveConnection(args)
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+
+	fromTable, _ := args["from_table"].(string)
+	fromColumn, _ := args["from_column"].(string)
+	toTable, _ := args["to_table"].(string)
+	toColumn, _ := args["to_column"].(string)
+	label, _ := args["label"].(string)
+
+	if fromTable == "" {
+		return mcpgo.NewToolResultError("from_table argument is required"), nil
+	}
+	if fromColumn == "" {
+		return mcpgo.NewToolResultError("from_column argument is required"), nil
+	}
+	if toTable == "" {
+		return mcpgo.NewToolResultError("to_table argument is required"), nil
+	}
+	if toColumn == "" {
+		return mcpgo.NewToolResultError("to_column argument is required"), nil
+	}
+
+	if entry.Relationships == nil {
+		return mcpgo.NewToolResultError("relationship store not available for this connection"), nil
+	}
+
+	// Validate from_table and from_column exist.
+	fromT, err := entry.Schema.GetTable(ctx, fromTable)
+	if err != nil {
+		names, _ := allTableNames(ctx, entry)
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("from_table %q not found. Available tables: %s",
+				fromTable, strings.Join(names, ", ")),
+		), nil
+	}
+	if !columnExists(fromT, fromColumn) {
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("from_column %q not found in table %q", fromColumn, fromTable),
+		), nil
+	}
+
+	// Validate to_table and to_column exist.
+	toT, err := entry.Schema.GetTable(ctx, toTable)
+	if err != nil {
+		names, _ := allTableNames(ctx, entry)
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("to_table %q not found. Available tables: %s",
+				toTable, strings.Join(names, ", ")),
+		), nil
+	}
+	if !columnExists(toT, toColumn) {
+		return mcpgo.NewToolResultError(
+			fmt.Sprintf("to_column %q not found in table %q", toColumn, toTable),
+		), nil
+	}
+
+	rel := schema.ImplicitRelationship{
+		ProjectID:      s.projectID,
+		ConnectionName: connName,
+		FromTable:      fromTable,
+		FromColumn:     fromColumn,
+		ToTable:        toTable,
+		ToColumn:       toColumn,
+		Label:          label,
+		Author:         s.author,
+	}
+	created, err := entry.Relationships.AddRelationship(ctx, rel)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to save relationship: %v", err)), nil
+	}
+
+	return jsonResult(relationshipDetail{
+		ID:         created.ID,
+		FromTable:  created.FromTable,
+		FromColumn: created.FromColumn,
+		ToTable:    created.ToTable,
+		ToColumn:   created.ToColumn,
+		Label:      created.Label,
+		Author:     created.Author,
+		CreatedAt:  created.CreatedAt.Format("2006-01-02T15:04:05Z"),
+	})
+}
+
+func (s *Server) handleDeleteRelationship(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	args := req.GetArguments()
+	entry, _, err := s.resolveConnection(args)
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+
+	id, _ := args["id"].(string)
+	if id == "" {
+		return mcpgo.NewToolResultError("id argument is required"), nil
+	}
+
+	if entry.Relationships == nil {
+		return mcpgo.NewToolResultError("relationship store not available for this connection"), nil
+	}
+
+	if err := entry.Relationships.DeleteRelationship(ctx, id); err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to delete relationship: %v", err)), nil
+	}
+
+	return jsonResult(map[string]any{"deleted": true, "id": id})
+}
+
+func (s *Server) handleListRelationships(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	args := req.GetArguments()
+	entry, connName, err := s.resolveConnection(args)
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+
+	if entry.Relationships == nil {
+		return jsonResult([]relationshipDetail{})
+	}
+
+	rels, err := entry.Relationships.ListRelationships(ctx, s.projectID, connName)
+	if err != nil {
+		return mcpgo.NewToolResultError(fmt.Sprintf("failed to list relationships: %v", err)), nil
+	}
+
+	result := make([]relationshipDetail, 0, len(rels))
+	for _, r := range rels {
+		result = append(result, relationshipDetail{
+			ID:         r.ID,
+			FromTable:  r.FromTable,
+			FromColumn: r.FromColumn,
+			ToTable:    r.ToTable,
+			ToColumn:   r.ToColumn,
+			Label:      r.Label,
+			Author:     r.Author,
+			CreatedAt:  r.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	return jsonResult(result)
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// columnExists returns true if tableName has a column named columnName.
+func columnExists(t schema.Table, columnName string) bool {
+	for _, c := range t.Columns {
+		if c.Name == columnName {
+			return true
+		}
+	}
+	return false
+}
 
 // allTableNames returns a list of all table names from a ConnEntry's schema store.
 func allTableNames(ctx context.Context, entry *ConnEntry) ([]string, error) {

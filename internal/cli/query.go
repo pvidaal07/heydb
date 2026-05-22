@@ -200,7 +200,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	tables, err := store.SearchTables(ctx, args[0])
+	// Pass empty strings for projectID and connectionName — the CLI search
+	// path does not have these available. Annotation/relationship search
+	// is only available via the MCP server.
+	tables, err := store.SearchTables(ctx, args[0], "", "")
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}

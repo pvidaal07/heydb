@@ -33,8 +33,25 @@ func (m *mockSchemaStore) GetTable(_ context.Context, name string) (schema.Table
 	}
 	return schema.Table{}, context.DeadlineExceeded // any non-nil error
 }
-func (m *mockSchemaStore) SearchTables(_ context.Context, _ string) ([]schema.Table, error) {
-	return nil, nil
+func (m *mockSchemaStore) SearchTables(_ context.Context, query, _, _ string) ([]schema.Table, error) {
+	if query == "" {
+		return nil, nil
+	}
+	lower := strings.ToLower(query)
+	var result []schema.Table
+	for _, t := range m.tables {
+		if strings.Contains(strings.ToLower(t.Name), lower) {
+			result = append(result, t)
+			continue
+		}
+		for _, c := range t.Columns {
+			if strings.Contains(strings.ToLower(c.Name), lower) {
+				result = append(result, t)
+				break
+			}
+		}
+	}
+	return result, nil
 }
 func (m *mockSchemaStore) Close() error {
 	m.closed = true
@@ -145,13 +162,117 @@ func (m *mockAnnotationStore) Close() error {
 // Ensure interface compliance.
 var _ ports.AnnotationStore = (*mockAnnotationStore)(nil)
 
+// mockRelationshipStore is a minimal in-memory implementation of ports.RelationshipStore.
+type mockRelationshipStore struct {
+	relationships []schema.ImplicitRelationship
+	closed        bool
+}
+
+func (m *mockRelationshipStore) AddRelationship(_ context.Context, rel schema.ImplicitRelationship) (schema.ImplicitRelationship, error) {
+	if rel.ID == "" {
+		rel.ID = fmt.Sprintf("mock-rel-uuid-%d", len(m.relationships)+1)
+	}
+	rel.CreatedAt = time.Now()
+	m.relationships = append(m.relationships, rel)
+	return rel, nil
+}
+
+func (m *mockRelationshipStore) DeleteRelationship(_ context.Context, id string) error {
+	for i, r := range m.relationships {
+		if r.ID == id {
+			m.relationships = append(m.relationships[:i], m.relationships[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("relationship %q not found", id)
+}
+
+func (m *mockRelationshipStore) ListRelationships(_ context.Context, projectID, connectionName string) ([]schema.ImplicitRelationship, error) {
+	var result []schema.ImplicitRelationship
+	for _, r := range m.relationships {
+		if r.ProjectID == projectID && r.ConnectionName == connectionName {
+			result = append(result, r)
+		}
+	}
+	if result == nil {
+		result = []schema.ImplicitRelationship{}
+	}
+	return result, nil
+}
+
+func (m *mockRelationshipStore) GetRelationshipsByTable(_ context.Context, projectID, connectionName, tableName string) ([]schema.ImplicitRelationship, error) {
+	var result []schema.ImplicitRelationship
+	for _, r := range m.relationships {
+		if r.ProjectID == projectID && r.ConnectionName == connectionName &&
+			(r.FromTable == tableName || r.ToTable == tableName) {
+			result = append(result, r)
+		}
+	}
+	if result == nil {
+		result = []schema.ImplicitRelationship{}
+	}
+	return result, nil
+}
+
+func (m *mockRelationshipStore) Close() error {
+	m.closed = true
+	return nil
+}
+
+// Ensure interface compliance.
+var _ ports.RelationshipStore = (*mockRelationshipStore)(nil)
+
 // ── helper ───────────────────────────────────────────────────────────────────
 
 // makeEntry creates a ConnEntry with fresh mocks.
 func makeEntry() *mcp.ConnEntry {
 	return &mcp.ConnEntry{
-		Schema:      &mockSchemaStore{},
-		Annotations: &mockAnnotationStore{},
+		Schema:        &mockSchemaStore{},
+		Annotations:   &mockAnnotationStore{},
+		Relationships: &mockRelationshipStore{},
+	}
+}
+
+// ── TestConnEntry_RelationshipsField ─────────────────────────────────────────
+
+func TestConnEntry_RelationshipsField(t *testing.T) {
+	rel := &mockRelationshipStore{}
+	entry := &mcp.ConnEntry{
+		Schema:        &mockSchemaStore{},
+		Annotations:   &mockAnnotationStore{},
+		Relationships: rel,
+	}
+
+	if entry.Relationships == nil {
+		t.Error("ConnEntry.Relationships should be non-nil when set")
+	}
+	if entry.Relationships != rel {
+		t.Error("ConnEntry.Relationships should return the assigned store")
+	}
+}
+
+// TestRegistry_CloseAll_ClosesRelationshipStore verifies that CloseAll closes
+// the Relationships store if it implements io.Closer.
+func TestRegistry_CloseAll_ClosesRelationshipStore(t *testing.T) {
+	relStore := &mockRelationshipStore{}
+	reg := mcp.NewRegistry(
+		map[string]*mcp.ConnEntry{
+			"conn1": {
+				Schema:        &mockSchemaStore{},
+				Annotations:   &mockAnnotationStore{},
+				Relationships: relStore,
+			},
+		},
+		[]string{"conn1"},
+		"conn1",
+	)
+
+	if err := reg.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() unexpected error: %v", err)
+	}
+
+	if !relStore.closed {
+		t.Error("conn1 relationship store was not closed")
 	}
 }
 

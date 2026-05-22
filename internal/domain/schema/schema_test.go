@@ -89,6 +89,26 @@ func TestComputeHash_EmptySlice(t *testing.T) {
 	}
 }
 
+func TestForeignKey_ImplicitDefaultFalse(t *testing.T) {
+	var fk schema.ForeignKey
+	if fk.Implicit != false {
+		t.Errorf("expected ForeignKey{}.Implicit to be false by default, got %v", fk.Implicit)
+	}
+}
+
+func TestForeignKey_ImplicitCanBeSetTrue(t *testing.T) {
+	fk := schema.ForeignKey{
+		Name:             "fk_orders_client",
+		Column:           "client_id",
+		ReferencedTable:  "clients",
+		ReferencedColumn: "id",
+		Implicit:         true,
+	}
+	if !fk.Implicit {
+		t.Errorf("expected Implicit=true, got false")
+	}
+}
+
 func TestComputeHash_VersionStability(t *testing.T) {
 	// This test pins the known hash value for a stable schema.
 	// If this test breaks, the canonical form changed — it's a breaking change.

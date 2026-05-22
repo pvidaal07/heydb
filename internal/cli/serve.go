@@ -17,13 +17,16 @@ var serveCmd = &cobra.Command{
 	Long: `Opens every synced connection from ~/.heydb/heydb.db and starts an MCP
 server on stdio, exposing these tools to AI agents:
 
-  heydb_list_connections  — list all configured database connections
-  heydb_list_tables       — list all tables with column counts
-  heydb_get_table         — get full table detail (columns, indexes, foreign keys)
-  heydb_search            — search tables and columns by keyword
-  heydb_annotate          — annotate a table with business context
-  heydb_annotate_column   — annotate a specific column
-  heydb_annotate_db       — annotate the database itself
+  heydb_list_connections    — list all configured database connections
+  heydb_list_tables         — list all tables with column counts
+  heydb_get_table           — get full table detail (columns, indexes, FKs, annotations)
+  heydb_search              — search across table/column names, annotations, and relationships
+  heydb_annotate            — annotate a table with business context
+  heydb_annotate_column     — annotate a specific column
+  heydb_annotate_db         — annotate the database itself
+  heydb_add_relationship    — document an implicit FK relationship between two tables
+  heydb_delete_relationship — delete an implicit relationship by UUID
+  heydb_list_relationships  — list all implicit relationships for the connection
 
 All tools accept an optional "connection" parameter. When omitted, the active
 connection is used. Run heydb sync first to populate the schema stores.`,
@@ -60,8 +63,8 @@ func buildRegistryV2(gs *sqlite.GlobalStore, projectID, activeConn string) (*hey
 			if Verbose {
 				fmt.Fprintf(os.Stderr, "[debug] connection %q: schema available\n", c.Name)
 			}
-			// GlobalStore implements AnnotationStore — pass it for annotation support.
-			entries[c.Name] = &heydbmcp.ConnEntry{Schema: connStore, Annotations: gs}
+			// GlobalStore implements AnnotationStore and RelationshipStore — pass it for both.
+			entries[c.Name] = &heydbmcp.ConnEntry{Schema: connStore, Annotations: gs, Relationships: gs}
 		} else {
 			if Verbose {
 				fmt.Fprintf(os.Stderr, "[debug] connection %q: not synced — run `heydb sync`\n", c.Name)
