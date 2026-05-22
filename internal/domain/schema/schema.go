@@ -49,12 +49,14 @@ type Index struct {
 	Type    string   `json:"type"` // BTREE, FULLTEXT, HASH, etc.
 }
 
-// ForeignKey represents a single foreign key constraint.
+// ForeignKey represents a single foreign key constraint, either native (enforced
+// by the database engine) or implicit (user-defined, stored in heydb).
 type ForeignKey struct {
 	Name             string `json:"name"`
 	Column           string `json:"column"`
 	ReferencedTable  string `json:"referenced_table"`
 	ReferencedColumn string `json:"referenced_column"`
+	Implicit         bool   `json:"implicit,omitempty"` // true for user-defined implicit relationships
 }
 
 // canonicalTable is the minimal representation used for hash computation.

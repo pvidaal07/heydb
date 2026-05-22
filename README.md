@@ -191,19 +191,22 @@ Annotations survive `heydb sync` runs — they are never overwritten by schema i
 
 ## MCP tools
 
-The MCP server exposes nine tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
+The MCP server exposes twelve tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
 
 | Tool | Description |
 |------|-------------|
 | `heydb_list_connections` | List all configured connections (name, active status, sync status) |
 | `heydb_list_tables` | List all tables with column count and comment |
-| `heydb_get_table` | Full details for a table (columns, indexes, FKs, annotations) |
-| `heydb_search` | Substring search across table names, column names, and comments |
+| `heydb_get_table` | Full details for a table (columns, indexes, FKs including implicit, annotations) |
+| `heydb_search` | Search across table/column names, annotation content, and implicit relationships |
 | `heydb_annotate` | Add an annotation for a table with business context |
 | `heydb_annotate_column` | Annotate a specific column with business context |
 | `heydb_annotate_db` | Annotate the database itself (purpose, ownership, constraints) |
 | `heydb_edit_annotation` | Edit the content of an existing annotation by UUID |
 | `heydb_delete_annotation` | Delete an annotation by UUID |
+| `heydb_add_relationship` | Document an implicit (undocumented) FK relationship between two tables |
+| `heydb_delete_relationship` | Delete an implicit relationship by UUID |
+| `heydb_list_relationships` | List all implicit relationships for the active connection |
 
 ---
 

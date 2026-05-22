@@ -39,6 +39,7 @@ func TestOpenGlobal_CreatesTablesOnFreshDB(t *testing.T) {
 	tables := []string{
 		"user_config", "projects", "connections", "annotations", "sync_chunks",
 		"schema_meta", "schema_tables", "schema_columns", "schema_indexes", "schema_foreign_keys",
+		"implicit_relationships",
 	}
 	for _, tbl := range tables {
 		var count int
@@ -943,4 +944,615 @@ func TestGlobalStore_IsChunkImported_True(t *testing.T) {
 	if !imported {
 		t.Error("expected true after MarkChunkImported, got false")
 	}
+}
+
+// ── T-05: RelationshipStore ────────────────────────────────────────────────────
+
+// relFixture returns a minimal valid ImplicitRelationship for tests.
+func relFixture() schema.ImplicitRelationship {
+	return schema.ImplicitRelationship{
+		ProjectID:      "proj-rel-1",
+		ConnectionName: "dev",
+		FromTable:      "orders",
+		FromColumn:     "client_id",
+		ToTable:        "clients",
+		ToColumn:       "id",
+		Label:          "order belongs to client",
+		Author:         "alice",
+	}
+}
+
+// seedSchemaForRelTests saves a minimal schema with orders and clients tables
+// into GlobalStore so relationship validation has something to work with.
+// (GlobalStore does NOT validate table/column existence — that's MCP handler
+// responsibility — but we seed anyway for completeness with T-06 search tests.)
+func seedSchemaForRelTests(t *testing.T, gs *sqlite.GlobalStore, connID string) {
+	t.Helper()
+	ctx := context.Background()
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-rel-1",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{
+				Name: "orders",
+				Columns: []schema.Column{
+					{Name: "id", OrdinalPos: 1, Type: "int"},
+					{Name: "client_id", OrdinalPos: 2, Type: "int"},
+				},
+			},
+			{
+				Name: "clients",
+				Columns: []schema.Column{
+					{Name: "id", OrdinalPos: 1, Type: "int"},
+					{Name: "name", OrdinalPos: 2, Type: "varchar(255)"},
+				},
+			},
+		},
+	}
+	store := gs.ForConnection(connID)
+	if err := store.SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("seedSchemaForRelTests: SaveSchema: %v", err)
+	}
+}
+
+func TestRelationshipStore_AddAndList(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	rel := relFixture()
+
+	created, err := gs.AddRelationship(ctx, rel)
+	if err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+	if created.ID == "" {
+		t.Error("expected non-empty ID after AddRelationship")
+	}
+	if created.Author != "alice" {
+		t.Errorf("expected Author=%q, got %q", "alice", created.Author)
+	}
+	if created.CreatedAt.IsZero() {
+		t.Error("expected non-zero CreatedAt after AddRelationship")
+	}
+
+	list, err := gs.ListRelationships(ctx, rel.ProjectID, rel.ConnectionName)
+	if err != nil {
+		t.Fatalf("ListRelationships: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 relationship, got %d", len(list))
+	}
+	if list[0].FromTable != "orders" {
+		t.Errorf("expected FromTable=%q, got %q", "orders", list[0].FromTable)
+	}
+	if list[0].ToTable != "clients" {
+		t.Errorf("expected ToTable=%q, got %q", "clients", list[0].ToTable)
+	}
+}
+
+func TestRelationshipStore_DuplicateRejected(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	rel := relFixture()
+
+	if _, err := gs.AddRelationship(ctx, rel); err != nil {
+		t.Fatalf("first AddRelationship: %v", err)
+	}
+	_, err = gs.AddRelationship(ctx, rel)
+	if err == nil {
+		t.Fatal("expected error on duplicate AddRelationship, got nil")
+	}
+}
+
+func TestRelationshipStore_AuthorRequired(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	rel := relFixture()
+	rel.Author = ""
+
+	_, err = gs.AddRelationship(ctx, rel)
+	if err == nil {
+		t.Fatal("expected error when Author is empty, got nil")
+	}
+}
+
+func TestRelationshipStore_DeleteExisting(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	rel := relFixture()
+
+	created, err := gs.AddRelationship(ctx, rel)
+	if err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+
+	if err := gs.DeleteRelationship(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteRelationship: %v", err)
+	}
+
+	list, err := gs.ListRelationships(ctx, rel.ProjectID, rel.ConnectionName)
+	if err != nil {
+		t.Fatalf("ListRelationships after delete: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected 0 relationships after delete, got %d", len(list))
+	}
+}
+
+func TestRelationshipStore_DeleteUnknown(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	err = gs.DeleteRelationship(ctx, "nonexistent-uuid")
+	if err == nil {
+		t.Fatal("expected error when deleting nonexistent relationship, got nil")
+	}
+}
+
+func TestRelationshipStore_GetByTable_Bidirectional(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	rel := relFixture() // orders.client_id → clients.id
+
+	if _, err := gs.AddRelationship(ctx, rel); err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+
+	// Query as from_table (orders).
+	fromResults, err := gs.GetRelationshipsByTable(ctx, rel.ProjectID, rel.ConnectionName, "orders")
+	if err != nil {
+		t.Fatalf("GetRelationshipsByTable(orders): %v", err)
+	}
+	if len(fromResults) != 1 {
+		t.Errorf("expected 1 result for from_table=orders, got %d", len(fromResults))
+	}
+
+	// Query as to_table (clients).
+	toResults, err := gs.GetRelationshipsByTable(ctx, rel.ProjectID, rel.ConnectionName, "clients")
+	if err != nil {
+		t.Fatalf("GetRelationshipsByTable(clients): %v", err)
+	}
+	if len(toResults) != 1 {
+		t.Errorf("expected 1 result for to_table=clients, got %d", len(toResults))
+	}
+
+	// Query for a table not involved — must return empty.
+	noneResults, err := gs.GetRelationshipsByTable(ctx, rel.ProjectID, rel.ConnectionName, "products")
+	if err != nil {
+		t.Fatalf("GetRelationshipsByTable(products): %v", err)
+	}
+	if len(noneResults) != 0 {
+		t.Errorf("expected 0 results for products, got %d", len(noneResults))
+	}
+}
+
+func TestRelationshipStore_SyncPreservesRelationships(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-rel-1/dev"
+	seedSchemaForRelTests(t, gs, connID)
+
+	// Add relationships.
+	rel1 := relFixture()
+	rel2 := schema.ImplicitRelationship{
+		ProjectID:      "proj-rel-1",
+		ConnectionName: "dev",
+		FromTable:      "clients",
+		FromColumn:     "id",
+		ToTable:        "orders",
+		ToColumn:       "client_id",
+		Author:         "bob",
+	}
+
+	if _, err := gs.AddRelationship(ctx, rel1); err != nil {
+		t.Fatalf("AddRelationship 1: %v", err)
+	}
+	if _, err := gs.AddRelationship(ctx, rel2); err != nil {
+		t.Fatalf("AddRelationship 2: %v", err)
+	}
+
+	// Re-sync the schema (SaveSchema deletes schema rows but must NOT touch implicit_relationships).
+	store := gs.ForConnection(connID)
+	newSC := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-rel-2",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{Name: "orders", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+			{Name: "clients", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+		},
+	}
+	if err := store.SaveSchema(ctx, newSC); err != nil {
+		t.Fatalf("SaveSchema (re-sync): %v", err)
+	}
+
+	// Relationships must still exist.
+	list, err := gs.ListRelationships(ctx, "proj-rel-1", "dev")
+	if err != nil {
+		t.Fatalf("ListRelationships after sync: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 relationships after sync, got %d", len(list))
+	}
+}
+
+// ── T-06: Enhanced SearchTables ────────────────────────────────────────────────
+
+func TestSearchTables_AnnotationMatch(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-search-1/dev"
+	projectID := "proj-search-1"
+	connName := "dev"
+
+	// Seed schema.
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-search-1",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{Name: "pedidos", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+		},
+	}
+	if err := gs.ForConnection(connID).SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	// Seed annotation with "albaranes" content on the "pedidos" table.
+	ann := schema.Annotation{
+		ProjectID:      projectID,
+		ConnectionName: connName,
+		TargetType:     "table",
+		TargetName:     "pedidos",
+		Content:        "This table handles albaranes and delivery notes",
+		Author:         "alice",
+	}
+	if _, err := gs.AddAnnotation(ctx, ann); err != nil {
+		t.Fatalf("AddAnnotation: %v", err)
+	}
+
+	// Search for "albaranes" — should find "pedidos" via annotation match.
+	store := gs.ForConnection(connID)
+	results, err := store.SearchTables(ctx, "albaranes", projectID, connName)
+	if err != nil {
+		t.Fatalf("SearchTables: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected 'pedidos' to be found via annotation match, got 0 results")
+	}
+	found := false
+	for _, tbl := range results {
+		if tbl.Name == "pedidos" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'pedidos' in results, got: %v", tableNames(results))
+	}
+}
+
+func TestSearchTables_RelationshipMatch_ByTable(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-search-2/dev"
+	projectID := "proj-search-2"
+	connName := "dev"
+
+	// Seed schema.
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-search-2",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{Name: "orders", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+			{Name: "clients", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+		},
+	}
+	if err := gs.ForConnection(connID).SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	// Seed relationship: orders.client_id → clients.id
+	rel := schema.ImplicitRelationship{
+		ProjectID:      projectID,
+		ConnectionName: connName,
+		FromTable:      "orders",
+		FromColumn:     "client_id",
+		ToTable:        "clients",
+		ToColumn:       "id",
+		Author:         "alice",
+	}
+	if _, err := gs.AddRelationship(ctx, rel); err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+
+	// Search for "clients" — should find "orders" because clients is to_table.
+	store := gs.ForConnection(connID)
+	results, err := store.SearchTables(ctx, "clients", projectID, connName)
+	if err != nil {
+		t.Fatalf("SearchTables: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results via relationship match, got 0")
+	}
+}
+
+func TestSearchTables_RelationshipMatch_ByColumn(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-search-3/dev"
+	projectID := "proj-search-3"
+	connName := "dev"
+
+	// Seed schema.
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-search-3",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{Name: "invoices", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}, {Name: "merchant_ref", OrdinalPos: 2, Type: "int"}}},
+			{Name: "merchants", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+		},
+	}
+	if err := gs.ForConnection(connID).SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	// Seed relationship with a column name "merchant_ref".
+	rel := schema.ImplicitRelationship{
+		ProjectID:      projectID,
+		ConnectionName: connName,
+		FromTable:      "invoices",
+		FromColumn:     "merchant_ref",
+		ToTable:        "merchants",
+		ToColumn:       "id",
+		Author:         "alice",
+	}
+	if _, err := gs.AddRelationship(ctx, rel); err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+
+	// Search for "merchant_ref" — should find "invoices" via from_column.
+	store := gs.ForConnection(connID)
+	results, err := store.SearchTables(ctx, "merchant_ref", projectID, connName)
+	if err != nil {
+		t.Fatalf("SearchTables: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected 'invoices' found via from_column match, got 0 results")
+	}
+	found := false
+	for _, tbl := range results {
+		if tbl.Name == "invoices" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'invoices' in results, got: %v", tableNames(results))
+	}
+}
+
+func TestSearchTables_Dedup(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-search-4/dev"
+	projectID := "proj-search-4"
+	connName := "dev"
+
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-search-4",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{Name: "orders", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+			{Name: "clients", Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}}},
+		},
+	}
+	if err := gs.ForConnection(connID).SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	// Annotate "orders" with content containing "orders".
+	ann := schema.Annotation{
+		ProjectID:      projectID,
+		ConnectionName: connName,
+		TargetType:     "table",
+		TargetName:     "orders",
+		Content:        "Main orders table",
+		Author:         "alice",
+	}
+	if _, err := gs.AddAnnotation(ctx, ann); err != nil {
+		t.Fatalf("AddAnnotation: %v", err)
+	}
+
+	// Add relationship from orders to clients.
+	rel := schema.ImplicitRelationship{
+		ProjectID:      projectID,
+		ConnectionName: connName,
+		FromTable:      "orders",
+		FromColumn:     "client_id",
+		ToTable:        "clients",
+		ToColumn:       "id",
+		Author:         "alice",
+	}
+	if _, err := gs.AddRelationship(ctx, rel); err != nil {
+		t.Fatalf("AddRelationship: %v", err)
+	}
+
+	// Search for "orders" — matches by name AND annotation AND relationship.
+	// Must appear exactly once.
+	store := gs.ForConnection(connID)
+	results, err := store.SearchTables(ctx, "orders", projectID, connName)
+	if err != nil {
+		t.Fatalf("SearchTables: %v", err)
+	}
+
+	count := 0
+	for _, tbl := range results {
+		if tbl.Name == "orders" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 'orders' to appear exactly once, got %d times in results: %v", count, tableNames(results))
+	}
+}
+
+func TestSearchTables_BackwardCompatibility(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	connID := "proj-search-5/dev"
+	projectID := "proj-search-5"
+	connName := "dev"
+
+	sc := schema.Schema{
+		Database: "testdb",
+		Hash:     "hash-search-5",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{
+				Name: "users",
+				Columns: []schema.Column{
+					{Name: "id", OrdinalPos: 1, Type: "int"},
+					{Name: "email", OrdinalPos: 2, Type: "varchar(255)"},
+				},
+			},
+		},
+	}
+	if err := gs.ForConnection(connID).SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	// Pre-existing name match must still work.
+	store := gs.ForConnection(connID)
+	results, err := store.SearchTables(ctx, "user", projectID, connName)
+	if err != nil {
+		t.Fatalf("SearchTables: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected 'users' to be found via name match, got 0 results")
+	}
+	if results[0].Name != "users" {
+		t.Errorf("expected 'users', got %q", results[0].Name)
+	}
+}
+
+// tableNames extracts table names from a slice for readable test errors.
+func tableNames(tables []schema.Table) []string {
+	names := make([]string, len(tables))
+	for i, t := range tables {
+		names[i] = t.Name
+	}
+	return names
 }

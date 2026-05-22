@@ -38,7 +38,7 @@ func (m *mockStore) GetTable(_ context.Context, name string) (schema.Table, erro
 	return schema.Table{}, nil
 }
 
-func (m *mockStore) SearchTables(_ context.Context, query string) ([]schema.Table, error) {
+func (m *mockStore) SearchTables(_ context.Context, query, _, _ string) ([]schema.Table, error) {
 	var result []schema.Table
 	for _, t := range m.tables {
 		if strings.Contains(strings.ToLower(t.Name), strings.ToLower(query)) {

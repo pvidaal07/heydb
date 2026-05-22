@@ -127,6 +127,55 @@ func TestBuildRegistryV2_AnnotationStoreIsSet(t *testing.T) {
 	}
 }
 
+// TestBuildRegistryV2_RelationshipStoreIsSet verifies that each ConnEntry in the
+// registry has a non-nil Relationships field backed by GlobalStore.
+func TestBuildRegistryV2_RelationshipStoreIsSet(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/heydb.db"
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	proj := schema.Project{ID: "proj-rel-1", Name: "rel-app", RepoPath: dir}
+	if err := gs.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	conn := schema.Connection{Name: "local", Host: "127.0.0.1", Port: 3306, Database: "app", User: "u", Password: "p"}
+	if err := gs.SaveConnection(ctx, proj.ID, conn); err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+
+	// Save schema so the connection is "synced".
+	connID := proj.ID + "/" + conn.Name
+	store := gs.ForConnection(connID)
+	sc := schema.Schema{
+		Database: conn.Database, Hash: "hash", Engine: "mysql", Version: "1.0",
+		Tables: []schema.Table{{Name: "users"}},
+	}
+	if err := store.SaveSchema(ctx, sc); err != nil {
+		t.Fatalf("SaveSchema: %v", err)
+	}
+
+	reg, err := buildRegistryV2(gs, proj.ID, "local")
+	if err != nil {
+		t.Fatalf("buildRegistryV2: %v", err)
+	}
+	defer reg.CloseAll()
+
+	entry, _, err := reg.Resolve("local")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if entry.Relationships == nil {
+		t.Error("expected ConnEntry.Relationships to be non-nil (backed by GlobalStore)")
+	}
+}
+
 // TestBuildRegistryV2_NoConnections verifies that buildRegistryV2 returns
 // an empty registry (no error) when no connections exist.
 func TestBuildRegistryV2_NoConnections(t *testing.T) {

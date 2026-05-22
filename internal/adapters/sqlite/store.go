@@ -249,7 +249,10 @@ func (s *Store) GetTable(ctx context.Context, name string) (schema.Table, error)
 // SearchTables returns tables whose name, column names, or comments contain
 // query as a case-insensitive substring. Returns a non-nil empty slice on no
 // matches.
-func (s *Store) SearchTables(ctx context.Context, query string) ([]schema.Table, error) {
+// projectID and connectionName are accepted for API compatibility with the
+// ports.SchemaStore interface; Store is a legacy per-connection store and
+// does not use them.
+func (s *Store) SearchTables(ctx context.Context, query, projectID, connectionName string) ([]schema.Table, error) {
 	like := "%" + query + "%"
 
 	rows, err := s.db.QueryContext(ctx, `
