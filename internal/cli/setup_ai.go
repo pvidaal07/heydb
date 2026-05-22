@@ -60,13 +60,16 @@ available connections.
 |------|---------|-------------|
 | ` + "`" + `heydb_list_connections` + "`" + ` | List all configured connections (name, active, synced) | Before any multi-connection workflow |
 | ` + "`" + `heydb_list_tables` + "`" + ` | List all tables with column counts and comments | Getting an overview of the schema |
-| ` + "`" + `heydb_get_table` + "`" + ` | Full detail: columns, types, indexes, FKs, annotations[] | Before writing queries involving a table |
-| ` + "`" + `heydb_search` + "`" + ` | Search tables and columns by keyword | Finding where a concept lives in the schema |
+| ` + "`" + `heydb_get_table` + "`" + ` | Full detail: columns, types, indexes, FKs (including implicit), annotations[] | Before writing queries involving a table |
+| ` + "`" + `heydb_search` + "`" + ` | Search across table/column names, annotation content, and implicit relationships | Finding where a concept lives in the schema |
 | ` + "`" + `heydb_annotate` + "`" + ` | Add an annotation to a table with business context | Documenting what a table represents |
 | ` + "`" + `heydb_annotate_column` + "`" + ` | Add an annotation to a specific column | Documenting field meaning, valid values, gotchas |
 | ` + "`" + `heydb_annotate_db` + "`" + ` | Annotate the database itself | Documenting system purpose, ownership, constraints |
 | ` + "`" + `heydb_edit_annotation` + "`" + ` | Edit an existing annotation by UUID | Correcting or updating a note |
 | ` + "`" + `heydb_delete_annotation` + "`" + ` | Delete an annotation by UUID | Removing outdated or incorrect notes |
+| ` + "`" + `heydb_add_relationship` + "`" + ` | Document an implicit FK relationship between two tables | When tables are logically related but have no DB-enforced FK |
+| ` + "`" + `heydb_delete_relationship` + "`" + ` | Delete an implicit relationship by UUID | Removing outdated or incorrect relationships |
+| ` + "`" + `heydb_list_relationships` + "`" + ` | List all implicit relationships for the connection | Discovering documented implicit joins |
 
 ### Annotations Are Accumulative
 

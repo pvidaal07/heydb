@@ -22,9 +22,10 @@ var cryptoRandRead = cryptorand.Read
 
 // Compile-time assertions: GlobalStore must satisfy all global ports.
 var (
-	_ ports.ProjectStore    = (*GlobalStore)(nil)
-	_ ports.ConnectionStore = (*GlobalStore)(nil)
-	_ ports.AnnotationStore = (*GlobalStore)(nil)
+	_ ports.ProjectStore      = (*GlobalStore)(nil)
+	_ ports.ConnectionStore   = (*GlobalStore)(nil)
+	_ ports.AnnotationStore   = (*GlobalStore)(nil)
+	_ ports.RelationshipStore = (*GlobalStore)(nil)
 )
 
 // globalDDL contains CREATE TABLE IF NOT EXISTS statements for all global tables.
@@ -131,6 +132,27 @@ CREATE TABLE IF NOT EXISTS schema_foreign_keys (
     ref_column    TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (connection_id, table_name) REFERENCES schema_tables(connection_id, name) ON DELETE CASCADE
 );
+
+-- Implicit relationships — user-defined logical foreign keys not enforced by DB engine.
+-- Scoped by project_id + connection_name (NOT connection_id) so they survive syncs.
+CREATE TABLE IF NOT EXISTS implicit_relationships (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    connection_name TEXT NOT NULL,
+    from_table      TEXT NOT NULL,
+    from_column     TEXT NOT NULL,
+    to_table        TEXT NOT NULL,
+    to_column       TEXT NOT NULL,
+    label           TEXT NOT NULL DEFAULT '',
+    author          TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_implicit_rel_from
+  ON implicit_relationships(project_id, connection_name, from_table);
+
+CREATE INDEX IF NOT EXISTS idx_implicit_rel_to
+  ON implicit_relationships(project_id, connection_name, to_table);
 `
 
 // GlobalStore implements all global-scoped ports using a single SQLite file.
@@ -577,6 +599,137 @@ func scanAnnotations(rows *sql.Rows) ([]schema.Annotation, error) {
 	return result, rows.Err()
 }
 
+// ── RelationshipStore ─────────────────────────────────────────────────────────
+
+// AddRelationship inserts a new implicit relationship. Author must be non-empty.
+// Duplicate from_table/from_column/to_table/to_column tuples per project+connection
+// are rejected. A UUID is generated if rel.ID is empty.
+func (g *GlobalStore) AddRelationship(ctx context.Context, rel schema.ImplicitRelationship) (schema.ImplicitRelationship, error) {
+	if strings.TrimSpace(rel.Author) == "" {
+		return rel, fmt.Errorf("global: AddRelationship: author is required")
+	}
+	if rel.ID == "" {
+		id, err := newUUID()
+		if err != nil {
+			return rel, fmt.Errorf("global: AddRelationship generate UUID: %w", err)
+		}
+		rel.ID = id
+	}
+
+	// Check for duplicate (same from+to tuple within project+connection).
+	var count int
+	err := g.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM implicit_relationships
+		WHERE project_id = ? AND connection_name = ?
+		  AND from_table = ? AND from_column = ?
+		  AND to_table   = ? AND to_column   = ?`,
+		rel.ProjectID, rel.ConnectionName,
+		rel.FromTable, rel.FromColumn,
+		rel.ToTable, rel.ToColumn,
+	).Scan(&count)
+	if err != nil {
+		return rel, fmt.Errorf("global: AddRelationship duplicate check: %w", err)
+	}
+	if count > 0 {
+		return rel, fmt.Errorf("global: AddRelationship: relationship %s.%s → %s.%s already exists for connection %q",
+			rel.FromTable, rel.FromColumn, rel.ToTable, rel.ToColumn, rel.ConnectionName)
+	}
+
+	now := time.Now().UTC()
+	rel.CreatedAt = now
+
+	_, err = g.db.ExecContext(ctx, `
+		INSERT INTO implicit_relationships
+		    (id, project_id, connection_name, from_table, from_column, to_table, to_column, label, author, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rel.ID, rel.ProjectID, rel.ConnectionName,
+		rel.FromTable, rel.FromColumn,
+		rel.ToTable, rel.ToColumn,
+		rel.Label, rel.Author,
+		rel.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return rel, fmt.Errorf("global: AddRelationship insert: %w", err)
+	}
+	return rel, nil
+}
+
+// DeleteRelationship removes the implicit relationship with the given UUID.
+// Returns an error if the UUID does not exist.
+func (g *GlobalStore) DeleteRelationship(ctx context.Context, id string) error {
+	res, err := g.db.ExecContext(ctx,
+		`DELETE FROM implicit_relationships WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("global: DeleteRelationship: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("global: DeleteRelationship: relationship %q not found", id)
+	}
+	return nil
+}
+
+// ListRelationships returns all implicit relationships for the given project+connection,
+// ordered by created_at.
+func (g *GlobalStore) ListRelationships(ctx context.Context, projectID, connectionName string) ([]schema.ImplicitRelationship, error) {
+	rows, err := g.db.QueryContext(ctx, `
+		SELECT id, project_id, connection_name, from_table, from_column,
+		       to_table, to_column, label, author, created_at
+		FROM implicit_relationships
+		WHERE project_id = ? AND connection_name = ?
+		ORDER BY created_at`,
+		projectID, connectionName)
+	if err != nil {
+		return nil, fmt.Errorf("global: ListRelationships: %w", err)
+	}
+	defer rows.Close()
+	return scanRelationships(rows)
+}
+
+// GetRelationshipsByTable returns all implicit relationships where tableName
+// appears as either from_table OR to_table (bidirectional read).
+func (g *GlobalStore) GetRelationshipsByTable(ctx context.Context, projectID, connectionName, tableName string) ([]schema.ImplicitRelationship, error) {
+	rows, err := g.db.QueryContext(ctx, `
+		SELECT id, project_id, connection_name, from_table, from_column,
+		       to_table, to_column, label, author, created_at
+		FROM implicit_relationships
+		WHERE project_id = ? AND connection_name = ?
+		  AND (from_table = ? OR to_table = ?)
+		ORDER BY created_at`,
+		projectID, connectionName, tableName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("global: GetRelationshipsByTable %q: %w", tableName, err)
+	}
+	defer rows.Close()
+	return scanRelationships(rows)
+}
+
+// ── Relationship helpers ──────────────────────────────────────────────────────
+
+func scanRelationships(rows *sql.Rows) ([]schema.ImplicitRelationship, error) {
+	var result []schema.ImplicitRelationship
+	for rows.Next() {
+		var r schema.ImplicitRelationship
+		var createdAt string
+		if err := rows.Scan(
+			&r.ID, &r.ProjectID, &r.ConnectionName,
+			&r.FromTable, &r.FromColumn,
+			&r.ToTable, &r.ToColumn,
+			&r.Label, &r.Author, &createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("global: scanRelationships: %w", err)
+		}
+		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			r.CreatedAt = t
+		}
+		result = append(result, r)
+	}
+	if result == nil {
+		result = []schema.ImplicitRelationship{}
+	}
+	return result, rows.Err()
+}
+
 // ── SyncChunks ────────────────────────────────────────────────────────────────
 
 // MarkChunkImported records that a chunk has been imported into this store.
@@ -764,12 +917,23 @@ func (c *ConnSchemaStore) GetTable(ctx context.Context, name string) (schema.Tab
 	return t, nil
 }
 
-// SearchTables performs a case-insensitive substring search across table and
-// column names and comment fields for this connection.
-func (c *ConnSchemaStore) SearchTables(ctx context.Context, query string) ([]schema.Table, error) {
+// SearchTables performs a case-insensitive substring search across table names,
+// column names, comment fields, annotation content, and implicit relationship
+// table/column names for this connection.
+//
+// When projectID and connectionName are non-empty, the search also queries:
+//   - annotation content (annotations table)
+//   - implicit relationship from_table, from_column, to_table, to_column
+//     (implicit_relationships table)
+//
+// Results are deduplicated by table name using a map. Passing empty strings
+// for projectID/connectionName skips the annotation/relationship sources
+// (e.g. CLI and TUI paths which do not have project context).
+func (c *ConnSchemaStore) SearchTables(ctx context.Context, query, projectID, connectionName string) ([]schema.Table, error) {
 	like := "%" + query + "%"
 
-	rows, err := c.db.QueryContext(ctx, `
+	// ── 1. Schema-level search (table/column names and comments) ─────────────
+	schemaRows, err := c.db.QueryContext(ctx, `
 		SELECT DISTINCT st.name
 		FROM schema_tables st
 		LEFT JOIN schema_columns sc ON sc.connection_id = st.connection_id AND sc.table_name = st.name
@@ -781,23 +945,101 @@ func (c *ConnSchemaStore) SearchTables(ctx context.Context, query string) ([]sch
 		ORDER BY st.name`,
 		c.connID, like, like, like, like)
 	if err != nil {
-		return nil, fmt.Errorf("conn-schema: SearchTables: %w", err)
+		return nil, fmt.Errorf("conn-schema: SearchTables schema query: %w", err)
 	}
-	defer rows.Close()
+	defer schemaRows.Close()
 
-	result := []schema.Table{}
-	for rows.Next() {
+	// Use an ordered slice + seen map to preserve consistent ordering while deduping.
+	seen := make(map[string]bool)
+	var orderedNames []string
+
+	for schemaRows.Next() {
 		var name string
-		if err := rows.Scan(&name); err != nil {
+		if err := schemaRows.Scan(&name); err != nil {
 			return nil, err
 		}
+		if !seen[name] {
+			seen[name] = true
+			orderedNames = append(orderedNames, name)
+		}
+	}
+	if err := schemaRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// ── 2. Annotation content search ─────────────────────────────────────────
+	if projectID != "" && connectionName != "" {
+		annRows, err := c.db.QueryContext(ctx, `
+			SELECT DISTINCT target_name
+			FROM annotations
+			WHERE project_id = ? AND connection_name = ?
+			  AND target_type = 'table'
+			  AND content LIKE ? COLLATE NOCASE`,
+			projectID, connectionName, like)
+		if err != nil {
+			return nil, fmt.Errorf("conn-schema: SearchTables annotation query: %w", err)
+		}
+		defer annRows.Close()
+
+		for annRows.Next() {
+			var name string
+			if err := annRows.Scan(&name); err != nil {
+				return nil, err
+			}
+			if !seen[name] {
+				seen[name] = true
+				orderedNames = append(orderedNames, name)
+			}
+		}
+		if err := annRows.Err(); err != nil {
+			return nil, err
+		}
+
+		// ── 3. Implicit relationship search ───────────────────────────────────
+		relRows, err := c.db.QueryContext(ctx, `
+			SELECT from_table, to_table
+			FROM implicit_relationships
+			WHERE project_id = ? AND connection_name = ?
+			  AND (from_table  LIKE ? COLLATE NOCASE
+			    OR from_column LIKE ? COLLATE NOCASE
+			    OR to_table    LIKE ? COLLATE NOCASE
+			    OR to_column   LIKE ? COLLATE NOCASE)`,
+			projectID, connectionName, like, like, like, like)
+		if err != nil {
+			return nil, fmt.Errorf("conn-schema: SearchTables relationship query: %w", err)
+		}
+		defer relRows.Close()
+
+		for relRows.Next() {
+			var fromTable, toTable string
+			if err := relRows.Scan(&fromTable, &toTable); err != nil {
+				return nil, err
+			}
+			for _, name := range []string{fromTable, toTable} {
+				if name != "" && !seen[name] {
+					seen[name] = true
+					orderedNames = append(orderedNames, name)
+				}
+			}
+		}
+		if err := relRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	// ── 4. Load full table data for each unique name ──────────────────────────
+	result := make([]schema.Table, 0, len(orderedNames))
+	for _, name := range orderedNames {
 		t, err := c.GetTable(ctx, name)
 		if err != nil {
-			return nil, err
+			// Table may not exist in schema (e.g. relationship references deleted table).
+			// Skip gracefully rather than returning an error.
+			continue
 		}
 		result = append(result, t)
 	}
-	return result, rows.Err()
+
+	return result, nil
 }
 
 // Close is a no-op: ConnSchemaStore does not own the underlying *sql.DB.

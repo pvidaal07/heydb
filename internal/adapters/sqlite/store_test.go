@@ -217,7 +217,7 @@ func TestSearchTables_Match(t *testing.T) {
 		t.Fatalf("SaveSchema: %v", err)
 	}
 
-	results, err := st.SearchTables(ctx, "user")
+	results, err := st.SearchTables(ctx, "user", "", "")
 	if err != nil {
 		t.Fatalf("SearchTables: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestSearchTables_MatchByColumnName(t *testing.T) {
 	}
 
 	// "email" is a column in "users" — should match
-	results, err := st.SearchTables(ctx, "email")
+	results, err := st.SearchTables(ctx, "email", "", "")
 	if err != nil {
 		t.Fatalf("SearchTables: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestSearchTables_NoMatch(t *testing.T) {
 		t.Fatalf("SaveSchema: %v", err)
 	}
 
-	results, err := st.SearchTables(ctx, "zzznomatch")
+	results, err := st.SearchTables(ctx, "zzznomatch", "", "")
 	if err != nil {
 		t.Fatalf("SearchTables: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestSearchTables_CaseInsensitive(t *testing.T) {
 	}
 
 	// "USERS" should match "users" table name (COLLATE NOCASE)
-	results, err := st.SearchTables(ctx, "USERS")
+	results, err := st.SearchTables(ctx, "USERS", "", "")
 	if err != nil {
 		t.Fatalf("SearchTables: %v", err)
 	}

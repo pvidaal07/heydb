@@ -246,7 +246,10 @@ func (s SearchTab) executeSearch() (tea.Model, tea.Cmd) {
 		return s, nil
 	}
 
-	results, err := s.store.SearchTables(context.Background(), query)
+	// Pass empty strings for projectID and connectionName — the TUI search
+	// path does not have project context available. Annotation/relationship
+	// search is only available via the MCP server.
+	results, err := s.store.SearchTables(context.Background(), query, "", "")
 	if err != nil {
 		s.results = nil
 		return s, nil
