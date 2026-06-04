@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 var syncListFlag bool
 var syncDeleteFlag string
+var syncAllFlag bool
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
@@ -35,6 +37,7 @@ Flags:
 func init() {
 	syncCmd.Flags().BoolVar(&syncListFlag, "list", false, "list connections with synced schema")
 	syncCmd.Flags().StringVar(&syncDeleteFlag, "delete", "", "delete schema data for a connection")
+	syncCmd.Flags().BoolVar(&syncAllFlag, "all", false, "sync all configured connections sequentially")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -61,11 +64,20 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("sync: no heydb project found for %q — run `heydb init` first", cwd)
 	}
 
+	if err := checkSyncAllMutualExclusivity(syncAllFlag, syncListFlag, syncDeleteFlag != ""); err != nil {
+		return err
+	}
+
 	if syncListFlag {
 		return listSyncedConnectionsV2(ctx, gs, proj.ID)
 	}
 	if syncDeleteFlag != "" {
 		return deleteSyncedSchemaV2(ctx, gs, proj.ID, syncDeleteFlag)
+	}
+	if syncAllFlag {
+		return runSyncAll(ctx, gs, proj.ID, cwd, func(ctx context.Context, gs *sqlite.GlobalStore, projectID, connName string) error {
+			return runSyncV2Named(ctx, gs, projectID, cwd, connName)
+		})
 	}
 
 	return runSyncV2(ctx, gs, proj.ID, cwd)
@@ -108,6 +120,43 @@ func runSyncV2(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd strin
 	fmt.Printf("  schema_hash: %s\n", result.Hash[:12]+"...")
 	fmt.Printf("  stored in:   %s\n", GlobalDBPath())
 
+	return nil
+}
+
+// runSyncV2Named performs the full sync for a specific named connection (used by --all).
+func runSyncV2Named(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd, connName string) error {
+	conn, err := gs.GetConnection(ctx, projectID, connName)
+	if err != nil {
+		return fmt.Errorf("sync: get connection %q: %w", connName, err)
+	}
+	if conn == nil {
+		return fmt.Errorf("sync: connection %q not found", connName)
+	}
+
+	if Verbose {
+		fmt.Fprintf(os.Stderr, "[debug] connection %q: host=%s port=%d database=%s\n",
+			connName, conn.Host, conn.Port, conn.Database)
+	}
+
+	dsn := conn.DSN()
+	connID := projectID + "/" + connName
+	connSchemaStore := gs.ForConnection(connID)
+
+	introspector := mysqlAdapter.New(dsn)
+	if err := introspector.Connect(ctx); err != nil {
+		return handleIntrospectionError(err)
+	}
+	defer introspector.Close()
+
+	syncer := introspection.NewSyncer(introspector, connSchemaStore, nil, Verbose)
+	result, err := syncer.Run(ctx, conn.Database)
+	if err != nil {
+		return handleIntrospectionError(err)
+	}
+
+	fmt.Printf("Synced %d table(s) from %s (connection: %s)\n", result.TablesCount, result.Database, connName)
+	fmt.Printf("  schema_hash: %s\n", result.Hash[:12]+"...")
+	fmt.Printf("  stored in:   %s\n", GlobalDBPath())
 	return nil
 }
 
@@ -188,6 +237,45 @@ func deleteSyncedSchemaV2(ctx context.Context, gs *sqlite.GlobalStore, projectID
 
 	fmt.Printf("Schema data for connection %q removed from global DB.\n", connName)
 	return nil
+}
+
+// checkSyncAllMutualExclusivity returns an error if --all is combined with --list or --delete.
+func checkSyncAllMutualExclusivity(all, list, hasDelete bool) error {
+	if all && (list || hasDelete) {
+		return fmt.Errorf("sync: --all is mutually exclusive with --list and --delete")
+	}
+	return nil
+}
+
+// perConnSyncFn is a function type used to inject the per-connection sync logic
+// in tests without requiring a real MySQL connection.
+type perConnSyncFn func(ctx context.Context, gs *sqlite.GlobalStore, projectID, connName string) error
+
+// runSyncAll syncs every connection for the project sequentially.
+// It continues on error — all connections are attempted regardless of failures.
+// Returns errors.Join of all per-connection errors; nil if all succeeded.
+func runSyncAll(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd string, syncFn perConnSyncFn) error {
+	conns, err := gs.ListConnections(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("sync --all: list connections: %w", err)
+	}
+	if len(conns) == 0 {
+		fmt.Println("No connections configured. Run `heydb connect` to add one.")
+		return nil
+	}
+
+	var errs []error
+	for _, conn := range conns {
+		connErr := syncFn(ctx, gs, projectID, conn.Name)
+		if connErr != nil {
+			fmt.Printf("  [FAIL] %s: %v\n", conn.Name, connErr)
+			errs = append(errs, fmt.Errorf("%s: %w", conn.Name, connErr))
+		} else {
+			fmt.Printf("  [ OK ] %s\n", conn.Name)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // handleIntrospectionError inspects errors from MySQL and returns actionable messages.
