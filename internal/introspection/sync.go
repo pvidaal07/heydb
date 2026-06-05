@@ -27,6 +27,80 @@ type SchemaWriter interface {
 	WriteSchema(s schema.Schema) error
 }
 
+// DBLite is the minimal interface for per-database introspection inside RunMultiDB.
+// It doesn't include Connect/Close because the parent manages the connection.
+type DBLite interface {
+	ListTables(ctx context.Context) ([]string, error)
+	GetTable(ctx context.Context, name string) (schema.Table, error)
+}
+
+// MultiDBFactory lists databases and creates per-database introspectors.
+type MultiDBFactory interface {
+	ListDatabases(ctx context.Context) ([]string, error)
+	ForDatabase(database string) DBLite
+}
+
+// RunMultiDB syncs every database returned by factory.ListDatabases.
+// For each database it creates a scoped introspector, fetches all tables,
+// and saves one schema per database to the store.
+func RunMultiDB(
+	ctx context.Context,
+	factory MultiDBFactory,
+	store schemaStoreWriter,
+	verbose bool,
+) ([]SyncResult, error) {
+	databases, err := factory.ListDatabases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("multi-db sync: list databases: %w", err)
+	}
+
+	results := make([]SyncResult, 0, len(databases))
+	for _, dbName := range databases {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "[multi-db] syncing %q\n", dbName)
+		}
+
+		intro := factory.ForDatabase(dbName)
+
+		tableNames, err := intro.ListTables(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("multi-db sync: list tables for %q: %w", dbName, err)
+		}
+
+		tables := make([]schema.Table, 0, len(tableNames))
+		for _, name := range tableNames {
+			t, err := intro.GetTable(ctx, name)
+			if err != nil {
+				return nil, fmt.Errorf("multi-db sync: get table %q in %q: %w", name, dbName, err)
+			}
+			tables = append(tables, t)
+		}
+
+		hash := schema.ComputeHash(tables)
+
+		sc := schema.Schema{
+			Database: dbName,
+			Tables:   tables,
+			Hash:     hash,
+			SyncedAt: time.Now().UTC(),
+			Engine:   "mysql",
+			Version:  "1.0",
+		}
+
+		if err := store.SaveSchema(ctx, sc); err != nil {
+			return nil, fmt.Errorf("multi-db sync: save %q: %w", dbName, err)
+		}
+
+		results = append(results, SyncResult{
+			TablesCount: len(tables),
+			Hash:        hash,
+			Database:    dbName,
+		})
+	}
+
+	return results, nil
+}
+
 // Syncer runs the sync pipeline: MySQL → domain objects → SchemaWriter + SQLite.
 type Syncer struct {
 	introspector ports.DBIntrospector

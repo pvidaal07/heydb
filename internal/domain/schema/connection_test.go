@@ -40,3 +40,38 @@ func TestConnectionDSNDefaultPort(t *testing.T) {
 		t.Errorf("DSN() = %q, want %q", got, want)
 	}
 }
+
+func TestConnectionIsAgnostic(t *testing.T) {
+	tests := []struct {
+		name     string
+		database string
+		want     bool
+	}{
+		{"with database", "myapp", false},
+		{"empty string", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := schema.Connection{Database: tt.database}
+			if got := c.IsAgnostic(); got != tt.want {
+				t.Errorf("IsAgnostic() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConnectionDSN_Agnostic(t *testing.T) {
+	c := schema.Connection{
+		Host:     "db.internal",
+		Port:     3306,
+		Database: "",
+		User:     "reader",
+		Password: "pass",
+	}
+
+	got := c.DSN()
+	want := "reader:pass@tcp(db.internal:3306)/?parseTime=true"
+	if got != want {
+		t.Errorf("DSN() agnostic = %q, want %q", got, want)
+	}
+}

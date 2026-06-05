@@ -109,7 +109,24 @@ func runSyncV2(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd strin
 		fmt.Fprintln(os.Stderr, "[debug] connected to MySQL — starting introspection")
 	}
 
-	// Run sync use-case with no markdown writer (schema only, docs are generated separately).
+	// Agnostic connection: introspect all databases the user has access to.
+	if conn.IsAgnostic() {
+		factory := &mysqlMultiDBFactory{intro: introspector}
+		results, err := introspection.RunMultiDB(ctx, factory, connSchemaStore, Verbose)
+		if err != nil {
+			return handleIntrospectionError(err)
+		}
+		totalTables := 0
+		for _, r := range results {
+			totalTables += r.TablesCount
+			fmt.Printf("  %s: %d table(s), hash=%s\n", r.Database, r.TablesCount, r.Hash[:12]+"...")
+		}
+		fmt.Printf("Synced %d database(s), %d table(s) total (connection: %s)\n", len(results), totalTables, name)
+		fmt.Printf("  stored in: %s\n", GlobalDBPath())
+		return nil
+	}
+
+	// Targeted connection: introspect a single database.
 	syncer := introspection.NewSyncer(introspector, connSchemaStore, nil, Verbose)
 	result, err := syncer.Run(ctx, conn.Database)
 	if err != nil {
@@ -148,6 +165,23 @@ func runSyncV2Named(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd,
 	}
 	defer introspector.Close()
 
+	// Agnostic connection: introspect all databases.
+	if conn.IsAgnostic() {
+		factory := &mysqlMultiDBFactory{intro: introspector}
+		results, err := introspection.RunMultiDB(ctx, factory, connSchemaStore, Verbose)
+		if err != nil {
+			return handleIntrospectionError(err)
+		}
+		totalTables := 0
+		for _, r := range results {
+			totalTables += r.TablesCount
+		}
+		fmt.Printf("Synced %d database(s), %d table(s) total (connection: %s)\n", len(results), totalTables, connName)
+		fmt.Printf("  stored in: %s\n", GlobalDBPath())
+		return nil
+	}
+
+	// Targeted connection: single database.
 	syncer := introspection.NewSyncer(introspector, connSchemaStore, nil, Verbose)
 	result, err := syncer.Run(ctx, conn.Database)
 	if err != nil {
@@ -214,7 +248,11 @@ func listSyncedConnectionsV2(ctx context.Context, gs *sqlite.GlobalStore, projec
 		if c.Active {
 			active = " (active)"
 		}
-		fmt.Printf("  %-20s  %s:%d/%s%s\n", c.Name, c.Host, c.Port, c.Database, active)
+		dbLabel := c.Database
+		if c.IsAgnostic() {
+			dbLabel = "(agnostic)"
+		}
+		fmt.Printf("  %-20s  %s:%d/%s%s\n", c.Name, c.Host, c.Port, dbLabel, active)
 	}
 	return nil
 }
@@ -276,6 +314,20 @@ func runSyncAll(ctx context.Context, gs *sqlite.GlobalStore, projectID, cwd stri
 	}
 
 	return errors.Join(errs...)
+}
+
+// mysqlMultiDBFactory adapts *mysqlAdapter.Introspector to the
+// introspection.MultiDBFactory interface for agnostic connections.
+type mysqlMultiDBFactory struct {
+	intro *mysqlAdapter.Introspector
+}
+
+func (f *mysqlMultiDBFactory) ListDatabases(ctx context.Context) ([]string, error) {
+	return f.intro.ListDatabases(ctx)
+}
+
+func (f *mysqlMultiDBFactory) ForDatabase(database string) introspection.DBLite {
+	return f.intro.ForDatabase(database)
 }
 
 // handleIntrospectionError inspects errors from MySQL and returns actionable messages.

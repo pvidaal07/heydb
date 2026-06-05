@@ -1788,3 +1788,169 @@ func tableNames(tables []schema.Table) []string {
 	}
 	return names
 }
+
+// ── Migration runner + V1: db_name column ─────────────────────────────────────
+
+func TestOpenGlobal_FreshDB_HasDBNameColumn(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	// All 4 schema tables must have a db_name column.
+	for _, tbl := range []string{"schema_tables", "schema_columns", "schema_indexes", "schema_foreign_keys"} {
+		var count int
+		err := gs.DB().QueryRowContext(context.Background(),
+			`SELECT COUNT(1) FROM pragma_table_info(?) WHERE name = 'db_name'`, tbl,
+		).Scan(&count)
+		if err != nil {
+			t.Errorf("checking db_name on %q: %v", tbl, err)
+		} else if count != 1 {
+			t.Errorf("table %q missing db_name column", tbl)
+		}
+	}
+}
+
+func TestOpenGlobal_FreshDB_HasMigrationsTable(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	var count int
+	err = gs.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("checking schema_migrations: %v", err)
+	}
+	if count != 1 {
+		t.Error("schema_migrations table not found")
+	}
+}
+
+func TestOpenGlobal_MigrationIsIdempotent(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	// Open twice — migrations should not fail on second run.
+	gs1, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("first OpenGlobal: %v", err)
+	}
+	gs1.Close()
+
+	gs2, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("second OpenGlobal: %v", err)
+	}
+	gs2.Close()
+}
+
+func TestSaveSchema_WithDBName_Isolation(t *testing.T) {
+	dbPath, cleanup := tempDB(t)
+	defer cleanup()
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	proj := schema.Project{ID: "p-multi", Name: "multi", RepoPath: "/tmp/multi"}
+	if err := gs.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	connID := "p-multi/server"
+	store := gs.ForConnection(connID)
+
+	// Save schema for database "shop".
+	scShop := schema.Schema{
+		Database: "shop",
+		Hash:     "hash-shop",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{
+				Name:    "products",
+				Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}},
+			},
+			{
+				Name:    "users",
+				Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "int"}, {Name: "name", OrdinalPos: 2, Type: "varchar(100)"}},
+			},
+		},
+	}
+	if err := store.SaveSchema(ctx, scShop); err != nil {
+		t.Fatalf("SaveSchema(shop): %v", err)
+	}
+
+	// Save schema for database "analytics" — same connection, different db.
+	scAnalytics := schema.Schema{
+		Database: "analytics",
+		Hash:     "hash-analytics",
+		SyncedAt: time.Now().UTC(),
+		Engine:   "mysql",
+		Version:  "1.0",
+		Tables: []schema.Table{
+			{
+				Name:    "events",
+				Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "bigint"}},
+			},
+			{
+				Name:    "users",
+				Columns: []schema.Column{{Name: "id", OrdinalPos: 1, Type: "bigint"}, {Name: "email", OrdinalPos: 2, Type: "varchar(255)"}},
+			},
+		},
+	}
+	if err := store.SaveSchema(ctx, scAnalytics); err != nil {
+		t.Fatalf("SaveSchema(analytics): %v", err)
+	}
+
+	// Load full schema — must have 4 tables (2 from each db), NOT 2.
+	loaded, err := store.LoadSchema(ctx)
+	if err != nil {
+		t.Fatalf("LoadSchema: %v", err)
+	}
+	if len(loaded.Tables) != 4 {
+		t.Errorf("expected 4 tables, got %d: %v", len(loaded.Tables), tableNames(loaded.Tables))
+	}
+
+	// Verify "users" appears twice (shop + analytics) with different column counts.
+	usersCount := 0
+	for _, tbl := range loaded.Tables {
+		if tbl.Name == "users" {
+			usersCount++
+		}
+	}
+	if usersCount != 2 {
+		t.Errorf("expected 2 'users' tables (shop + analytics), got %d", usersCount)
+	}
+
+	// Re-sync shop — analytics must NOT be deleted.
+	scShop.Tables[0].Columns = append(scShop.Tables[0].Columns,
+		schema.Column{Name: "price", OrdinalPos: 2, Type: "decimal(10,2)"})
+	if err := store.SaveSchema(ctx, scShop); err != nil {
+		t.Fatalf("re-SaveSchema(shop): %v", err)
+	}
+
+	reloaded, err := store.LoadSchema(ctx)
+	if err != nil {
+		t.Fatalf("reload LoadSchema: %v", err)
+	}
+	if len(reloaded.Tables) != 4 {
+		t.Errorf("after re-sync shop, expected 4 tables, got %d: %v",
+			len(reloaded.Tables), tableNames(reloaded.Tables))
+	}
+}
