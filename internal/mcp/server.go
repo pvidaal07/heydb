@@ -102,9 +102,12 @@ func (s *Server) registerTools() {
 	s.srv.AddTool(
 		mcpgo.NewTool(
 			"heydb_list_tables",
-			mcpgo.WithDescription("List tables in the documented database schema, with column counts and comments. For large schemas, use the filter parameter to narrow results and reduce response size."),
+			mcpgo.WithDescription("List tables in the documented database schema, with column counts and comments. For large schemas, use the filter parameter to narrow results and reduce response size. For agnostic connections that span multiple databases, use the database parameter to scope results."),
 			mcpgo.WithString("filter",
 				mcpgo.Description("Optional keyword to filter tables by name (case-insensitive substring match). Only tables whose name contains this keyword are returned."),
+			),
+			mcpgo.WithString("database",
+				mcpgo.Description("Optional database name to filter tables. Useful for agnostic connections that span multiple databases."),
 			),
 			mcpgo.WithString("connection",
 				mcpgo.Description("Optional connection name. Defaults to the active connection."),
@@ -117,10 +120,13 @@ func (s *Server) registerTools() {
 	s.srv.AddTool(
 		mcpgo.NewTool(
 			"heydb_get_table",
-			mcpgo.WithDescription("Get full schema detail for a specific table (columns, indexes, foreign keys, annotations)."),
+			mcpgo.WithDescription("Get full schema detail for a specific table (columns, indexes, foreign keys, annotations). For agnostic connections where the same table name exists in multiple databases, use the database parameter to disambiguate."),
 			mcpgo.WithString("table_name",
 				mcpgo.Description("Name of the table to retrieve."),
 				mcpgo.Required(),
+			),
+			mcpgo.WithString("database",
+				mcpgo.Description("Optional database name to disambiguate when the same table exists in multiple databases (agnostic connections)."),
 			),
 			mcpgo.WithString("connection",
 				mcpgo.Description("Optional connection name. Defaults to the active connection."),
@@ -319,6 +325,7 @@ func (s *Server) handleListConnections(_ context.Context, _ mcpgo.CallToolReques
 
 // tableListEntry is the response shape for heydb_list_tables.
 type tableListEntry struct {
+	Database    string `json:"database,omitempty"`
 	Name        string `json:"name"`
 	ColumnCount int    `json:"column_count"`
 	Comment     string `json:"comment,omitempty"`
@@ -338,13 +345,18 @@ func (s *Server) handleListTables(ctx context.Context, req mcpgo.CallToolRequest
 
 	filter, _ := args["filter"].(string)
 	lowerFilter := strings.ToLower(filter)
+	dbFilter, _ := args["database"].(string)
 
 	entries := make([]tableListEntry, 0, len(sc.Tables))
 	for _, t := range sc.Tables {
 		if lowerFilter != "" && !strings.Contains(strings.ToLower(t.Name), lowerFilter) {
 			continue
 		}
+		if dbFilter != "" && t.Database != dbFilter {
+			continue
+		}
 		entries = append(entries, tableListEntry{
+			Database:    t.Database,
 			Name:        t.Name,
 			ColumnCount: len(t.Columns),
 			Comment:     t.Comment,
@@ -393,6 +405,7 @@ type annotationDetail struct {
 
 // tableDetail is the full response shape for heydb_get_table.
 type tableDetail struct {
+	Database    string             `json:"database,omitempty"`
 	Name        string             `json:"name"`
 	Engine      string             `json:"engine,omitempty"`
 	Comment     string             `json:"comment,omitempty"`
@@ -415,18 +428,50 @@ func (s *Server) handleGetTable(ctx context.Context, req mcpgo.CallToolRequest) 
 		return mcpgo.NewToolResultError("table_name argument is required"), nil
 	}
 
-	t, err := entry.Schema.GetTable(ctx, tableName)
-	if err != nil {
-		names, listErr := allTableNames(ctx, entry)
-		if listErr != nil {
+	dbFilter, _ := args["database"].(string)
+
+	var t schema.Table
+	if dbFilter != "" {
+		// Database specified — scan all tables to find exact match.
+		sc, err := entry.Schema.LoadSchema(ctx)
+		if err != nil {
+			return mcpgo.NewToolResultError(fmt.Sprintf("failed to load schema: %v", err)), nil
+		}
+		found := false
+		for _, candidate := range sc.Tables {
+			if candidate.Name == tableName && candidate.Database == dbFilter {
+				t = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			names, listErr := allTableNames(ctx, entry)
+			if listErr != nil {
+				return mcpgo.NewToolResultError(
+					fmt.Sprintf("table %q not found in database %q", tableName, dbFilter),
+				), nil
+			}
 			return mcpgo.NewToolResultError(
-				fmt.Sprintf("table %q not found", tableName),
+				fmt.Sprintf("table %q not found in database %q. Available tables: %s",
+					tableName, dbFilter, strings.Join(names, ", ")),
 			), nil
 		}
-		return mcpgo.NewToolResultError(
-			fmt.Sprintf("table %q not found. Available tables: %s",
-				tableName, strings.Join(names, ", ")),
-		), nil
+	} else {
+		var err error
+		t, err = entry.Schema.GetTable(ctx, tableName)
+		if err != nil {
+			names, listErr := allTableNames(ctx, entry)
+			if listErr != nil {
+				return mcpgo.NewToolResultError(
+					fmt.Sprintf("table %q not found", tableName),
+				), nil
+			}
+			return mcpgo.NewToolResultError(
+				fmt.Sprintf("table %q not found. Available tables: %s",
+					tableName, strings.Join(names, ", ")),
+			), nil
+		}
 	}
 
 	detail := tableToDetail(t)
@@ -1059,6 +1104,7 @@ func tableToDetail(t schema.Table) tableDetail {
 	}
 
 	return tableDetail{
+		Database:    t.Database,
 		Name:        t.Name,
 		Engine:      t.Engine,
 		Comment:     t.Comment,

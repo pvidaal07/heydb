@@ -166,10 +166,10 @@ func (m Model) fanOut(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// chromeLines is the number of lines consumed by the root model's chrome
-// (frame border, padding, logo, tagline, tab bar, status bar, help line,
-// and the blank lines between them). Tab content gets the remainder.
-const chromeLines = 30
+// chromeLines is the number of lines consumed by the root model's chrome:
+// frame border (2) + padding (2) + logo (2) + tagline (1) + blanks (3) +
+// tab bar (1) + status bar (1) + help line (1) + blanks after content (2) = 15.
+const chromeLines = 15
 
 // View renders the full TUI: logo, tab bar, active tab content, and status bar.
 func (m Model) View() string {
@@ -202,8 +202,15 @@ func (m Model) View() string {
 	b.WriteString(m.renderStatusBar())
 	b.WriteString("\n")
 
-	// Help line.
-	b.WriteString(HelpStyle.Render("Tab/Shift+Tab: switch tabs • j/k: navigate • enter: select • q: quit"))
+	// Help line: global shortcuts + active tab shortcuts.
+	helpParts := []string{"Tab/Shift+Tab: switch tabs"}
+	if len(m.tabs) > 0 {
+		if extra := m.tabs[m.activeTab].ShortHelp(); extra != "" {
+			helpParts = append(helpParts, extra)
+		}
+	}
+	helpParts = append(helpParts, "q: quit")
+	b.WriteString(HelpStyle.Render(strings.Join(helpParts, " • ")))
 
 	return FrameStyle.Width(m.width - 2).Render(b.String())
 }

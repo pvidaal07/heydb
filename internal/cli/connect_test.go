@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
@@ -108,6 +110,90 @@ func TestConnect_DeleteRemovesConnection(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("expected nil after delete, got %+v", got)
+	}
+}
+
+// TestConnect_AgnosticConnection_EmptyDatabase verifies that a connection
+// with empty Database is saved and loaded correctly (agnostic mode).
+func TestConnect_AgnosticConnection_EmptyDatabase(t *testing.T) {
+	gs, cleanup := setupConnectTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	projectID := "proj-connect-agnostic"
+
+	conn := schema.Connection{
+		Name:     "server",
+		Host:     "127.0.0.1",
+		Port:     3306,
+		Database: "", // agnostic
+		User:     "admin",
+		Password: "secret",
+	}
+
+	if err := gs.SaveConnection(ctx, projectID, conn); err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+
+	got, err := gs.GetConnection(ctx, projectID, "server")
+	if err != nil {
+		t.Fatalf("GetConnection: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected connection to be saved, got nil")
+	}
+	if got.Database != "" {
+		t.Errorf("Database: got %q, want empty string", got.Database)
+	}
+	if !got.IsAgnostic() {
+		t.Error("expected IsAgnostic() = true for empty database")
+	}
+}
+
+// TestListConnectionsV2_AgnosticShowsLabel verifies that listConnectionsV2
+// displays "(agnostic)" for connections with empty Database.
+func TestListConnectionsV2_AgnosticShowsLabel(t *testing.T) {
+	gs, cleanup := setupConnectTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	projectID := "proj-connect-agnostic-list"
+
+	proj := schema.Project{ID: projectID, Name: "testapp", RepoPath: t.TempDir()}
+	if err := gs.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	conns := []schema.Connection{
+		{Name: "targeted", Host: "h", Port: 3306, Database: "myapp", User: "u", Password: "p"},
+		{Name: "agnostic", Host: "h", Port: 3306, Database: "", User: "u", Password: "p"},
+	}
+	for _, c := range conns {
+		if err := gs.SaveConnection(ctx, projectID, c); err != nil {
+			t.Fatalf("SaveConnection(%q): %v", c.Name, err)
+		}
+	}
+
+	// Capture stdout.
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	if err := listConnectionsV2(ctx, gs, projectID); err != nil {
+		t.Fatalf("listConnectionsV2: %v", err)
+	}
+
+	w.Close()
+	os.Stdout = old
+
+	out, _ := io.ReadAll(r)
+	output := string(out)
+
+	if !strings.Contains(output, "agnostic") {
+		t.Errorf("expected output to contain 'agnostic', got:\n%s", output)
+	}
+	if !strings.Contains(output, "myapp") {
+		t.Errorf("expected output to contain 'myapp', got:\n%s", output)
 	}
 }
 

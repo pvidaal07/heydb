@@ -15,11 +15,21 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
+// systemDatabases are excluded from ListDatabases results.
+var systemDatabases = map[string]bool{
+	"information_schema": true,
+	"mysql":              true,
+	"performance_schema": true,
+	"sys":                true,
+}
+
 // Introspector implements ports.DBIntrospector for MySQL 5.7+/8.0.
+// When database is set, queries use TABLE_SCHEMA = ? instead of DATABASE().
 // Zero-value is not usable; construct via New.
 type Introspector struct {
-	dsn string
-	db  *sql.DB
+	dsn      string
+	database string // explicit database; empty = use DATABASE()
+	db       *sql.DB
 }
 
 // New returns a new Introspector configured to connect to the given DSN.
@@ -28,6 +38,45 @@ type Introspector struct {
 //	user:pass@tcp(host:port)/dbname?parseTime=true
 func New(dsn string) *Introspector {
 	return &Introspector{dsn: dsn}
+}
+
+// ForDatabase returns a new Introspector that shares this one's connection
+// pool but targets a specific database by name. Use this for agnostic
+// connections that need to introspect multiple databases.
+func (i *Introspector) ForDatabase(database string) *Introspector {
+	return &Introspector{dsn: i.dsn, database: database, db: i.db}
+}
+
+// ListDatabases returns all user-accessible databases, excluding system databases.
+// Implements ports.MultiDBIntrospector.
+func (i *Introspector) ListDatabases(ctx context.Context) ([]string, error) {
+	rows, err := i.db.QueryContext(ctx, `SHOW DATABASES`)
+	if err != nil {
+		return nil, fmt.Errorf("mysql: ListDatabases: %w", err)
+	}
+	defer rows.Close()
+
+	var result []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("mysql: ListDatabases scan: %w", err)
+		}
+		if !systemDatabases[name] {
+			result = append(result, name)
+		}
+	}
+	return result, rows.Err()
+}
+
+// schemaFilter returns the SQL fragment and optional arg for TABLE_SCHEMA filtering.
+// When database is set: returns "?" and the database name as arg.
+// When empty: returns "DATABASE()" and nil (uses the DSN's database).
+func (i *Introspector) schemaFilter() (string, []interface{}) {
+	if i.database != "" {
+		return "?", []interface{}{i.database}
+	}
+	return "DATABASE()", nil
 }
 
 // Connect opens and pings the MySQL connection.
@@ -47,12 +96,14 @@ func (i *Introspector) Connect(ctx context.Context) error {
 // ListTables returns the names of all BASE TABLE objects in the target
 // schema, ordered alphabetically. Views are excluded.
 func (i *Introspector) ListTables(ctx context.Context) ([]string, error) {
-	rows, err := i.db.QueryContext(ctx, `
+	expr, args := i.schemaFilter()
+	query := fmt.Sprintf(`
 		SELECT TABLE_NAME
 		FROM   INFORMATION_SCHEMA.TABLES
-		WHERE  TABLE_SCHEMA = DATABASE()
+		WHERE  TABLE_SCHEMA = %s
 		  AND  TABLE_TYPE   = 'BASE TABLE'
-		ORDER  BY TABLE_NAME`)
+		ORDER  BY TABLE_NAME`, expr)
+	rows, err := i.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("mysql: ListTables: %w", err)
 	}
@@ -72,19 +123,20 @@ func (i *Introspector) ListTables(ctx context.Context) ([]string, error) {
 // GetTable returns the full schema.Table definition for the named table.
 func (i *Introspector) GetTable(ctx context.Context, name string) (schema.Table, error) {
 	t := schema.Table{Name: name}
+	expr, schemaArgs := i.schemaFilter()
 
 	// ── 1. Table-level metadata (engine, comment) ──────────────────────────
-	row := i.db.QueryRowContext(ctx, `
+	row := i.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(ENGINE, ''), COALESCE(TABLE_COMMENT, '')
 		FROM   INFORMATION_SCHEMA.TABLES
-		WHERE  TABLE_SCHEMA = DATABASE()
-		  AND  TABLE_NAME   = ?`, name)
+		WHERE  TABLE_SCHEMA = %s
+		  AND  TABLE_NAME   = ?`, expr), append(schemaArgs, name)...)
 	if err := row.Scan(&t.Engine, &t.Comment); err != nil {
 		return t, fmt.Errorf("mysql: GetTable %q meta: %w", name, err)
 	}
 
 	// ── 2. Columns ──────────────────────────────────────────────────────────
-	colRows, err := i.db.QueryContext(ctx, `
+	colRows, err := i.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COLUMN_NAME,
 		       ORDINAL_POSITION,
 		       COLUMN_TYPE,
@@ -94,9 +146,9 @@ func (i *Introspector) GetTable(ctx context.Context, name string) (schema.Table,
 		       COALESCE(EXTRA, ''),
 		       COALESCE(COLUMN_COMMENT, '')
 		FROM   INFORMATION_SCHEMA.COLUMNS
-		WHERE  TABLE_SCHEMA = DATABASE()
+		WHERE  TABLE_SCHEMA = %s
 		  AND  TABLE_NAME   = ?
-		ORDER  BY ORDINAL_POSITION`, name)
+		ORDER  BY ORDINAL_POSITION`, expr), append(schemaArgs, name)...)
 	if err != nil {
 		return t, fmt.Errorf("mysql: GetTable %q columns: %w", name, err)
 	}
@@ -130,13 +182,13 @@ func (i *Introspector) GetTable(ctx context.Context, name string) (schema.Table,
 	}
 
 	// ── 3. Primary key (from STATISTICS where KEY_NAME = 'PRIMARY') ────────
-	pkRows, err := i.db.QueryContext(ctx, `
+	pkRows, err := i.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COLUMN_NAME
 		FROM   INFORMATION_SCHEMA.STATISTICS
-		WHERE  TABLE_SCHEMA = DATABASE()
+		WHERE  TABLE_SCHEMA = %s
 		  AND  TABLE_NAME   = ?
 		  AND  INDEX_NAME   = 'PRIMARY'
-		ORDER  BY SEQ_IN_INDEX`, name)
+		ORDER  BY SEQ_IN_INDEX`, expr), append(schemaArgs, name)...)
 	if err != nil {
 		return t, fmt.Errorf("mysql: GetTable %q primary key: %w", name, err)
 	}
@@ -154,16 +206,16 @@ func (i *Introspector) GetTable(ctx context.Context, name string) (schema.Table,
 	}
 
 	// ── 4. Non-primary indexes ───────────────────────────────────────────────
-	idxRows, err := i.db.QueryContext(ctx, `
+	idxRows, err := i.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT INDEX_NAME,
 		       COLUMN_NAME,
 		       CASE NON_UNIQUE WHEN 0 THEN 1 ELSE 0 END AS is_unique,
 		       COALESCE(INDEX_TYPE, 'BTREE')
 		FROM   INFORMATION_SCHEMA.STATISTICS
-		WHERE  TABLE_SCHEMA = DATABASE()
+		WHERE  TABLE_SCHEMA = %s
 		  AND  TABLE_NAME   = ?
 		  AND  INDEX_NAME  != 'PRIMARY'
-		ORDER  BY INDEX_NAME, SEQ_IN_INDEX`, name)
+		ORDER  BY INDEX_NAME, SEQ_IN_INDEX`, expr), append(schemaArgs, name)...)
 	if err != nil {
 		return t, fmt.Errorf("mysql: GetTable %q indexes: %w", name, err)
 	}
@@ -198,16 +250,16 @@ func (i *Introspector) GetTable(ctx context.Context, name string) (schema.Table,
 	}
 
 	// ── 5. Foreign keys ─────────────────────────────────────────────────────
-	fkRows, err := i.db.QueryContext(ctx, `
+	fkRows, err := i.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT CONSTRAINT_NAME,
 		       COLUMN_NAME,
 		       REFERENCED_TABLE_NAME,
 		       REFERENCED_COLUMN_NAME
 		FROM   INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-		WHERE  TABLE_SCHEMA            = DATABASE()
+		WHERE  TABLE_SCHEMA            = %s
 		  AND  TABLE_NAME              = ?
 		  AND  REFERENCED_TABLE_NAME   IS NOT NULL
-		ORDER  BY CONSTRAINT_NAME, ORDINAL_POSITION`, name)
+		ORDER  BY CONSTRAINT_NAME, ORDINAL_POSITION`, expr), append(schemaArgs, name)...)
 	if err != nil {
 		return t, fmt.Errorf("mysql: GetTable %q foreign keys: %w", name, err)
 	}

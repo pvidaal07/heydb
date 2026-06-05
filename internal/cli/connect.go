@@ -102,7 +102,11 @@ func listConnectionsV2(ctx context.Context, gs *sqlite.GlobalStore, projectID st
 		}
 		fmt.Printf("  %s%s\n", conn.Name, active)
 		fmt.Printf("    host:     %s:%d\n", conn.Host, conn.Port)
-		fmt.Printf("    database: %s\n", conn.Database)
+		dbLabel := conn.Database
+		if conn.IsAgnostic() {
+			dbLabel = "(agnostic — all databases)"
+		}
+		fmt.Printf("    database: %s\n", dbLabel)
 		fmt.Printf("    username: %s\n", conn.User)
 		fmt.Printf("    password: ****\n")
 		fmt.Println()
@@ -199,8 +203,15 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 
 			huh.NewInput().
 				Title("Database").
-				Placeholder("myapp").
-				Validate(validation.ValidateMySQLIdentifier).
+				Description("Leave empty to introspect all databases the user can access (agnostic mode)").
+				Placeholder("myapp (or empty for agnostic)").
+				Validate(func(s string) error {
+					trimmed := strings.TrimSpace(s)
+					if trimmed == "" {
+						return nil // agnostic mode
+					}
+					return validation.ValidateMySQLIdentifier(trimmed)
+				}).
 				Value(&database),
 
 			huh.NewInput().
@@ -231,7 +242,11 @@ func addConnectionV2(ctx context.Context, gs *sqlite.GlobalStore, projectID stri
 	}
 
 	// Verify connectivity.
-	fmt.Printf("Verifying connection to %s:%d/%s ... ", host, port, database)
+	if database == "" {
+		fmt.Printf("Verifying connection to %s:%d (agnostic) ... ", host, port)
+	} else {
+		fmt.Printf("Verifying connection to %s:%d/%s ... ", host, port, database)
+	}
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true", username, password, host, port, database)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

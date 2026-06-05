@@ -33,6 +33,7 @@ Setup:
 
 Schema:
   heydb sync                    Introspect the active DB and write schema files
+  heydb sync --all              Sync all configured connections sequentially
   heydb sync --list             Show which connections have been synced
   heydb sync --delete <name>    Remove schema files for a connection
   heydb review                  Check if the live schema has drifted
@@ -42,6 +43,18 @@ Query:
   heydb tables                  List all tables with column counts
   heydb describe <table>        Show columns, indexes, and foreign keys
   heydb search <keyword>        Search tables and columns by name
+
+Annotations:
+  heydb annotate <table> <text>                Annotate a table
+  heydb annotate-column <table> <col> <text>   Annotate a specific column
+
+Relationships:
+  heydb relationship add <from.col> <to.col>   Document an implicit FK
+  heydb relationship delete <uuid>             Delete a relationship
+  heydb relationship list                      List all relationships
+
+Inspect:
+  heydb status                  Show project info, connections, and annotation counts
 
 MCP:
   heydb serve                   Start the MCP stdio server for AI agents
