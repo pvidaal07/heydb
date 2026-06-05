@@ -48,100 +48,133 @@ var globalMigrations = []func(*sql.Tx) error{
 // migrationV1AddDBNameColumn adds db_name to schema_tables, schema_columns,
 // schema_indexes, and schema_foreign_keys. Recreates tables because SQLite
 // doesn't support ADD COLUMN with new constraints or DROP CONSTRAINT.
+//
+// This migration is idempotent: it checks each table individually and skips
+// tables that already have the db_name column. This protects against partial
+// application (e.g. if DDL within a transaction doesn't behave atomically
+// on certain SQLite drivers).
 func migrationV1AddDBNameColumn(tx *sql.Tx) error {
-	// schema_tables: add db_name, change UNIQUE to (connection_id, db_name, name).
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS schema_tables_new (
-		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		    connection_id TEXT NOT NULL,
-		    db_name       TEXT NOT NULL DEFAULT '',
-		    name          TEXT NOT NULL,
-		    engine        TEXT NOT NULL DEFAULT '',
-		    comment       TEXT NOT NULL DEFAULT '',
-		    UNIQUE(connection_id, db_name, name)
-		)`,
-		`INSERT OR IGNORE INTO schema_tables_new (id, connection_id, db_name, name, engine, comment)
-		 SELECT id, connection_id,
-		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = schema_tables.connection_id), ''),
-		        name, engine, comment
-		 FROM schema_tables`,
-		`DROP TABLE IF EXISTS schema_tables`,
-		`ALTER TABLE schema_tables_new RENAME TO schema_tables`,
-
-		// schema_columns: add db_name, remove FK constraint.
-		`CREATE TABLE IF NOT EXISTS schema_columns_new (
-		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		    connection_id TEXT NOT NULL,
-		    db_name       TEXT NOT NULL DEFAULT '',
-		    table_name    TEXT NOT NULL,
-		    name          TEXT NOT NULL,
-		    ordinal_pos   INTEGER NOT NULL DEFAULT 0,
-		    type          TEXT NOT NULL DEFAULT '',
-		    nullable      INTEGER NOT NULL DEFAULT 0,
-		    col_default   TEXT,
-		    key_type      TEXT NOT NULL DEFAULT '',
-		    extra         TEXT NOT NULL DEFAULT '',
-		    comment       TEXT NOT NULL DEFAULT ''
-		)`,
-		`INSERT INTO schema_columns_new (id, connection_id, db_name, table_name, name, ordinal_pos, type, nullable, col_default, key_type, extra, comment)
-		 SELECT sc.id, sc.connection_id,
-		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sc.connection_id), ''),
-		        sc.table_name, sc.name, sc.ordinal_pos, sc.type, sc.nullable, sc.col_default, sc.key_type, sc.extra, sc.comment
-		 FROM schema_columns sc`,
-		`DROP TABLE IF EXISTS schema_columns`,
-		`ALTER TABLE schema_columns_new RENAME TO schema_columns`,
-
-		// schema_indexes: add db_name, remove FK constraint.
-		`CREATE TABLE IF NOT EXISTS schema_indexes_new (
-		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		    connection_id TEXT NOT NULL,
-		    db_name       TEXT NOT NULL DEFAULT '',
-		    table_name    TEXT NOT NULL,
-		    name          TEXT NOT NULL,
-		    columns       TEXT NOT NULL DEFAULT '',
-		    is_unique     INTEGER NOT NULL DEFAULT 0,
-		    idx_type      TEXT NOT NULL DEFAULT 'BTREE'
-		)`,
-		`INSERT INTO schema_indexes_new (id, connection_id, db_name, table_name, name, columns, is_unique, idx_type)
-		 SELECT si.id, si.connection_id,
-		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = si.connection_id), ''),
-		        si.table_name, si.name, si.columns, si.is_unique, si.idx_type
-		 FROM schema_indexes si`,
-		`DROP TABLE IF EXISTS schema_indexes`,
-		`ALTER TABLE schema_indexes_new RENAME TO schema_indexes`,
-
-		// schema_foreign_keys: add db_name, remove FK constraint.
-		`CREATE TABLE IF NOT EXISTS schema_foreign_keys_new (
-		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		    connection_id TEXT NOT NULL,
-		    db_name       TEXT NOT NULL DEFAULT '',
-		    table_name    TEXT NOT NULL,
-		    name          TEXT NOT NULL,
-		    column_name   TEXT NOT NULL DEFAULT '',
-		    ref_table     TEXT NOT NULL DEFAULT '',
-		    ref_column    TEXT NOT NULL DEFAULT ''
-		)`,
-		`INSERT INTO schema_foreign_keys_new (id, connection_id, db_name, table_name, name, column_name, ref_table, ref_column)
-		 SELECT sf.id, sf.connection_id,
-		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sf.connection_id), ''),
-		        sf.table_name, sf.name, sf.column_name, sf.ref_table, sf.ref_column
-		 FROM schema_foreign_keys sf`,
-		`DROP TABLE IF EXISTS schema_foreign_keys`,
-		`ALTER TABLE schema_foreign_keys_new RENAME TO schema_foreign_keys`,
+	type tableMigration struct {
+		name  string
+		stmts []string
 	}
 
-	for _, stmt := range stmts {
-		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("migration v1: %w\nSQL: %s", err, stmt)
+	migrations := []tableMigration{
+		{"schema_tables", []string{
+			`CREATE TABLE IF NOT EXISTS schema_tables_new (
+			    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			    connection_id TEXT NOT NULL,
+			    db_name       TEXT NOT NULL DEFAULT '',
+			    name          TEXT NOT NULL,
+			    engine        TEXT NOT NULL DEFAULT '',
+			    comment       TEXT NOT NULL DEFAULT '',
+			    UNIQUE(connection_id, db_name, name)
+			)`,
+			`INSERT OR IGNORE INTO schema_tables_new (id, connection_id, db_name, name, engine, comment)
+			 SELECT id, connection_id,
+			        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = schema_tables.connection_id), ''),
+			        name, engine, comment
+			 FROM schema_tables`,
+			`DROP TABLE IF EXISTS schema_tables`,
+			`ALTER TABLE schema_tables_new RENAME TO schema_tables`,
+		}},
+		{"schema_columns", []string{
+			`CREATE TABLE IF NOT EXISTS schema_columns_new (
+			    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			    connection_id TEXT NOT NULL,
+			    db_name       TEXT NOT NULL DEFAULT '',
+			    table_name    TEXT NOT NULL,
+			    name          TEXT NOT NULL,
+			    ordinal_pos   INTEGER NOT NULL DEFAULT 0,
+			    type          TEXT NOT NULL DEFAULT '',
+			    nullable      INTEGER NOT NULL DEFAULT 0,
+			    col_default   TEXT,
+			    key_type      TEXT NOT NULL DEFAULT '',
+			    extra         TEXT NOT NULL DEFAULT '',
+			    comment       TEXT NOT NULL DEFAULT ''
+			)`,
+			`INSERT INTO schema_columns_new (id, connection_id, db_name, table_name, name, ordinal_pos, type, nullable, col_default, key_type, extra, comment)
+			 SELECT sc.id, sc.connection_id,
+			        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sc.connection_id), ''),
+			        sc.table_name, sc.name, sc.ordinal_pos, sc.type, sc.nullable, sc.col_default, sc.key_type, sc.extra, sc.comment
+			 FROM schema_columns sc`,
+			`DROP TABLE IF EXISTS schema_columns`,
+			`ALTER TABLE schema_columns_new RENAME TO schema_columns`,
+		}},
+		{"schema_indexes", []string{
+			`CREATE TABLE IF NOT EXISTS schema_indexes_new (
+			    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			    connection_id TEXT NOT NULL,
+			    db_name       TEXT NOT NULL DEFAULT '',
+			    table_name    TEXT NOT NULL,
+			    name          TEXT NOT NULL,
+			    columns       TEXT NOT NULL DEFAULT '',
+			    is_unique     INTEGER NOT NULL DEFAULT 0,
+			    idx_type      TEXT NOT NULL DEFAULT 'BTREE'
+			)`,
+			`INSERT INTO schema_indexes_new (id, connection_id, db_name, table_name, name, columns, is_unique, idx_type)
+			 SELECT si.id, si.connection_id,
+			        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = si.connection_id), ''),
+			        si.table_name, si.name, si.columns, si.is_unique, si.idx_type
+			 FROM schema_indexes si`,
+			`DROP TABLE IF EXISTS schema_indexes`,
+			`ALTER TABLE schema_indexes_new RENAME TO schema_indexes`,
+		}},
+		{"schema_foreign_keys", []string{
+			`CREATE TABLE IF NOT EXISTS schema_foreign_keys_new (
+			    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			    connection_id TEXT NOT NULL,
+			    db_name       TEXT NOT NULL DEFAULT '',
+			    table_name    TEXT NOT NULL,
+			    name          TEXT NOT NULL,
+			    column_name   TEXT NOT NULL DEFAULT '',
+			    ref_table     TEXT NOT NULL DEFAULT '',
+			    ref_column    TEXT NOT NULL DEFAULT ''
+			)`,
+			`INSERT INTO schema_foreign_keys_new (id, connection_id, db_name, table_name, name, column_name, ref_table, ref_column)
+			 SELECT sf.id, sf.connection_id,
+			        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sf.connection_id), ''),
+			        sf.table_name, sf.name, sf.column_name, sf.ref_table, sf.ref_column
+			 FROM schema_foreign_keys sf`,
+			`DROP TABLE IF EXISTS schema_foreign_keys`,
+			`ALTER TABLE schema_foreign_keys_new RENAME TO schema_foreign_keys`,
+		}},
+	}
+
+	for _, m := range migrations {
+		if hasColumn(tx, m.name, "db_name") {
+			continue
+		}
+		for _, stmt := range m.stmts {
+			if _, err := tx.Exec(stmt); err != nil {
+				return fmt.Errorf("migration v1 (%s): %w\nSQL: %s", m.name, err, stmt)
+			}
 		}
 	}
 	return nil
 }
 
+// hasColumn returns true if the given table has a column with the given name.
+func hasColumn(tx *sql.Tx, table, column string) bool {
+	var count int
+	err := tx.QueryRow(
+		`SELECT COUNT(1) FROM pragma_table_info(?) WHERE name = ?`, table, column,
+	).Scan(&count)
+	return err == nil && count > 0
+}
+
 // runMigrations applies pending migrations. Each runs in its own transaction.
+// Before running, it verifies that previously-applied migrations actually took
+// effect — if not (partial application due to DDL/driver issues), it resets
+// the version record so the migration re-runs. Migrations MUST be idempotent.
 func runMigrations(db *sql.DB) error {
 	if _, err := db.Exec(schemaMigrationsDDL); err != nil {
 		return fmt.Errorf("migrations: create schema_migrations: %w", err)
+	}
+
+	// Detect and repair partial application before reading the current version.
+	if err := repairPartialMigrations(db); err != nil {
+		return fmt.Errorf("migrations: repair: %w", err)
 	}
 
 	var current int
@@ -168,6 +201,41 @@ func runMigrations(db *sql.DB) error {
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("migrations: commit v%d: %w", version, err)
+		}
+	}
+	return nil
+}
+
+// repairPartialMigrations checks whether recorded migrations actually took
+// effect. If a migration was recorded but its schema changes are missing
+// (e.g. due to non-atomic DDL in the SQLite driver), the version record is
+// deleted so the migration re-runs.
+func repairPartialMigrations(db *sql.DB) error {
+	// V1: db_name must exist in all 4 schema tables.
+	var v1Applied int
+	if err := db.QueryRow(
+		`SELECT COUNT(1) FROM schema_migrations WHERE version = 1`,
+	).Scan(&v1Applied); err != nil {
+		return err
+	}
+	if v1Applied == 0 {
+		return nil
+	}
+
+	tables := []string{"schema_tables", "schema_columns", "schema_indexes", "schema_foreign_keys"}
+	for _, tbl := range tables {
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(1) FROM pragma_table_info(?) WHERE name = 'db_name'`, tbl,
+		).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			// V1 didn't fully apply — remove the version record so it re-runs.
+			if _, err := db.Exec(`DELETE FROM schema_migrations WHERE version = 1`); err != nil {
+				return err
+			}
+			return nil
 		}
 	}
 	return nil
