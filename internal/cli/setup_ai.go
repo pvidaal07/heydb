@@ -59,8 +59,8 @@ available connections.
 | Tool | Purpose | When to use |
 |------|---------|-------------|
 | ` + "`" + `heydb_list_connections` + "`" + ` | List all configured connections (name, active, synced) | Before any multi-connection workflow |
-| ` + "`" + `heydb_list_tables` + "`" + ` | List all tables with column counts and comments | Getting an overview of the schema |
-| ` + "`" + `heydb_get_table` + "`" + ` | Full detail: columns, types, indexes, FKs (including implicit), annotations[] | Before writing queries involving a table |
+| ` + "`" + `heydb_list_tables` + "`" + ` | List tables with column counts, comments, and database. Optional ` + "`" + `database` + "`" + ` and ` + "`" + `filter` + "`" + ` params | Getting an overview of the schema |
+| ` + "`" + `heydb_get_table` + "`" + ` | Full detail: columns, types, indexes, FKs (including implicit), annotations[]. Optional ` + "`" + `database` + "`" + ` param | Before writing queries involving a table |
 | ` + "`" + `heydb_search` + "`" + ` | Search across table/column names, annotation content, and implicit relationships | Finding where a concept lives in the schema |
 | ` + "`" + `heydb_annotate` + "`" + ` | Add an annotation to a table with business context | Documenting what a table represents |
 | ` + "`" + `heydb_annotate_column` + "`" + ` | Add an annotation to a specific column | Documenting field meaning, valid values, gotchas |
@@ -70,6 +70,30 @@ available connections.
 | ` + "`" + `heydb_add_relationship` + "`" + ` | Document an implicit FK relationship between two tables | When tables are logically related but have no DB-enforced FK |
 | ` + "`" + `heydb_delete_relationship` + "`" + ` | Delete an implicit relationship by UUID | Removing outdated or incorrect relationships |
 | ` + "`" + `heydb_list_relationships` + "`" + ` | List all implicit relationships for the connection | Discovering documented implicit joins |
+
+### Proactive Annotation Protocol (MANDATORY)
+
+This protocol is ALWAYS ACTIVE — like persistent memory, but for database knowledge.
+
+**PROACTIVE SAVE TRIGGERS — annotate via MCP WITHOUT being asked when you:**
+- Discover business meaning of a table or column during conversation
+- Learn what valid values a column accepts (e.g. "status can be: draft, active, archived")
+- Identify an implicit relationship between tables not enforced by a FK constraint
+- Notice data quality issues, access patterns, or edge cases
+- Hear the user explain why a table exists or how it is used
+- Find naming conventions or domain-specific terminology
+
+**How to annotate proactively:**
+- Table context: ` + "`" + `heydb_annotate` + "`" + ` with table_name and what you learned
+- Column specifics: ` + "`" + `heydb_annotate_column` + "`" + ` with table_name, column_name, and the insight
+- Implicit join discovered: ` + "`" + `heydb_add_relationship` + "`" + ` with from/to table and column
+- Database-wide context: ` + "`" + `heydb_annotate_db` + "`" + ` with the system-level insight
+
+**Self-check after EVERY database-related exchange**: "Did I just learn something
+about the schema, business rules, or data meaning? If yes, annotate NOW."
+
+Do NOT wait for the user to ask. Do NOT batch annotations for later.
+Annotate immediately when you learn something about the database.
 
 ### Annotations Are Accumulative
 
@@ -87,12 +111,27 @@ To share annotations with your team: run ` + "`" + `heydb push` + "`" + ` to exp
 git-committable chunk, commit ` + "`" + `.heydb/chunks/` + "`" + ` and ` + "`" + `.heydb/manifest.json` + "`" + `,
 then teammates run ` + "`" + `heydb pull` + "`" + ` after ` + "`" + `git pull` + "`" + ` to import.
 
+### Agnostic Connections
+
+Connections can be "agnostic" — no specific database. These connections
+introspect ALL databases the MySQL user can access. When working with
+agnostic connections:
+
+- ` + "`" + `heydb_list_tables` + "`" + ` returns tables from ALL databases, each with a
+  ` + "`" + `database` + "`" + ` field. Use the ` + "`" + `database` + "`" + ` parameter to filter by specific DB.
+- ` + "`" + `heydb_get_table` + "`" + ` accepts an optional ` + "`" + `database` + "`" + ` parameter to disambiguate
+  when the same table name exists in multiple databases.
+- Always check the ` + "`" + `database` + "`" + ` field in responses to know which DB a table
+  belongs to.
+
 ### Multi-Connection Workflows
 
 heydb serves all configured connections simultaneously. Common patterns:
 
 - **Cross-database context**: Pass ` + "`" + `connection` + "`" + ` to query different databases
   within the same session
+- **Agnostic server**: A single connection introspects all databases on the
+  server — use the ` + "`" + `database` + "`" + ` parameter to scope queries
 - **Dev vs production**: Compare schemas across environments
 - **Related systems**: Query billing + CRM + accounting schemas together
 
