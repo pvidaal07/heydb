@@ -169,7 +169,11 @@ func (c *ConnectionsTab) renderList() string {
 		name := c.names[i]
 		isActive := name == c.activeConn
 		conn := c.findConn(name)
-		desc := fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, conn.Database)
+		dbLabel := conn.Database
+		if conn.IsAgnostic() {
+			dbLabel = "(agnostic)"
+		}
+		desc := fmt.Sprintf("%s:%d/%s", conn.Host, conn.Port, dbLabel)
 
 		label := name
 		if isActive {
@@ -205,7 +209,11 @@ func (c *ConnectionsTab) renderDetail() string {
 	b.WriteString(tui.TitleStyle.Render(name))
 	b.WriteString("\n\n")
 	b.WriteString(c.detailRow("Host", fmt.Sprintf("%s:%d", conn.Host, conn.Port)))
-	b.WriteString(c.detailRow("Database", conn.Database))
+	dbLabel := conn.Database
+	if conn.IsAgnostic() {
+		dbLabel = "(agnostic — all databases)"
+	}
+	b.WriteString(c.detailRow("Database", dbLabel))
 	b.WriteString(c.detailRow("Username", conn.User))
 	b.WriteString(c.detailRow("Password", "****"))
 
@@ -378,8 +386,15 @@ func (c *ConnectionsTab) buildForm(isEdit bool) *huh.Form {
 				Value(&c.fport),
 			huh.NewInput().
 				Title("Database").
-				Placeholder("myapp").
-				Validate(validation.ValidateMySQLIdentifier).
+				Description("Leave empty for agnostic mode (all databases)").
+				Placeholder("myapp (or empty for agnostic)").
+				Validate(func(s string) error {
+					trimmed := strings.TrimSpace(s)
+					if trimmed == "" {
+						return nil // agnostic mode
+					}
+					return validation.ValidateMySQLIdentifier(trimmed)
+				}).
 				Value(&c.fdatabase),
 			huh.NewInput().
 				Title("Username").
