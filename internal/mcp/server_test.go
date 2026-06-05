@@ -1056,3 +1056,128 @@ func TestSearch_MatchSource_Relationship(t *testing.T) {
 		t.Errorf("'licencias' not found in search results: %s", text)
 	}
 }
+
+// ── TestServer_AgnosticConnection_DatabaseField ────────────────────────────────
+
+// newAgnosticTestServer builds a Server where the "alldb" connection has tables
+// from multiple databases (simulating an agnostic connection after RunMultiDB).
+func newAgnosticTestServer(t *testing.T) *mcp.Server {
+	t.Helper()
+	alldb := &mcp.ConnEntry{
+		Schema: &mockSchemaStore{tables: []schema.Table{
+			{Database: "shop", Name: "products", Columns: []schema.Column{{Name: "id"}, {Name: "name"}}},
+			{Database: "shop", Name: "orders", Columns: []schema.Column{{Name: "id"}, {Name: "total"}}},
+			{Database: "analytics", Name: "events", Columns: []schema.Column{{Name: "id"}, {Name: "type"}}},
+			{Database: "analytics", Name: "products", Columns: []schema.Column{{Name: "id"}, {Name: "views"}}},
+		}},
+		Annotations:   &mockAnnotationStore{},
+		Relationships: &mockRelationshipStore{},
+	}
+
+	reg := mcp.NewRegistry(
+		map[string]*mcp.ConnEntry{"alldb": alldb},
+		[]string{"alldb"},
+		"alldb",
+	)
+	return mcp.NewWithMeta(reg, testProjectID, "test-author")
+}
+
+func TestListTables_AgnosticConnection_IncludesDatabase(t *testing.T) {
+	srv := newAgnosticTestServer(t)
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 tables; got %d", len(entries))
+	}
+
+	// Every entry should have a "database" field.
+	for _, e := range entries {
+		db, _ := e["database"].(string)
+		if db == "" {
+			t.Errorf("expected non-empty 'database' field for table %v; got: %v", e["name"], e)
+		}
+	}
+}
+
+func TestListTables_AgnosticConnection_FilterByDatabase(t *testing.T) {
+	srv := newAgnosticTestServer(t)
+	result := callTool(t, srv, "heydb_list_tables", map[string]any{
+		"database": "shop",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_list_tables returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Errorf("expected 2 tables from 'shop'; got %d", len(entries))
+	}
+	for _, e := range entries {
+		if db, _ := e["database"].(string); db != "shop" {
+			t.Errorf("expected database='shop', got %q for table %v", db, e["name"])
+		}
+	}
+}
+
+func TestGetTable_AgnosticConnection_IncludesDatabase(t *testing.T) {
+	srv := newAgnosticTestServer(t)
+	result := callTool(t, srv, "heydb_get_table", map[string]any{
+		"table_name": "events",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_get_table returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(text), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if db, _ := detail["database"].(string); db != "analytics" {
+		t.Errorf("expected database='analytics'; got %q", db)
+	}
+}
+
+func TestGetTable_AgnosticConnection_DatabaseParam_Disambiguates(t *testing.T) {
+	srv := newAgnosticTestServer(t)
+
+	// "products" exists in both shop and analytics. Without database param,
+	// it returns the first match. With database="analytics", it should return
+	// the analytics version.
+	result := callTool(t, srv, "heydb_get_table", map[string]any{
+		"table_name": "products",
+		"database":   "analytics",
+	})
+
+	if result.IsError {
+		t.Fatalf("heydb_get_table returned error: %s", firstText(t, result))
+	}
+
+	text := firstText(t, result)
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(text), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if db, _ := detail["database"].(string); db != "analytics" {
+		t.Errorf("expected database='analytics'; got %q", db)
+	}
+}

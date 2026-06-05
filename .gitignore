@@ -18,3 +18,7 @@ Thumbs.db
 # Internal docs
 heydb.md
 openspec/
+
+.atl/
+
+.windsurf/

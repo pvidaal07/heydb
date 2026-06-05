@@ -20,6 +20,7 @@ type Schema struct {
 
 // Table represents a single database table.
 type Table struct {
+	Database    string       `json:"database,omitempty"` // source database (set for agnostic connections)
 	Name        string       `json:"name"`
 	Engine      string       `json:"engine"` // e.g. "InnoDB"
 	Comment     string       `json:"comment"`

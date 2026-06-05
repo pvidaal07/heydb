@@ -30,6 +30,149 @@ var (
 	_ ports.RelationshipStore = (*GlobalStore)(nil)
 )
 
+// schemaMigrationsDDL creates the version-tracking table.
+// Separate from globalDDL so it can be created before migrations run.
+const schemaMigrationsDDL = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+`
+
+// globalMigrations is the ordered list of schema migrations.
+// Index+1 = version number (migration[0] = version 1).
+var globalMigrations = []func(*sql.Tx) error{
+	migrationV1AddDBNameColumn,
+}
+
+// migrationV1AddDBNameColumn adds db_name to schema_tables, schema_columns,
+// schema_indexes, and schema_foreign_keys. Recreates tables because SQLite
+// doesn't support ADD COLUMN with new constraints or DROP CONSTRAINT.
+func migrationV1AddDBNameColumn(tx *sql.Tx) error {
+	// schema_tables: add db_name, change UNIQUE to (connection_id, db_name, name).
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS schema_tables_new (
+		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		    connection_id TEXT NOT NULL,
+		    db_name       TEXT NOT NULL DEFAULT '',
+		    name          TEXT NOT NULL,
+		    engine        TEXT NOT NULL DEFAULT '',
+		    comment       TEXT NOT NULL DEFAULT '',
+		    UNIQUE(connection_id, db_name, name)
+		)`,
+		`INSERT OR IGNORE INTO schema_tables_new (id, connection_id, db_name, name, engine, comment)
+		 SELECT id, connection_id,
+		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = schema_tables.connection_id), ''),
+		        name, engine, comment
+		 FROM schema_tables`,
+		`DROP TABLE IF EXISTS schema_tables`,
+		`ALTER TABLE schema_tables_new RENAME TO schema_tables`,
+
+		// schema_columns: add db_name, remove FK constraint.
+		`CREATE TABLE IF NOT EXISTS schema_columns_new (
+		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		    connection_id TEXT NOT NULL,
+		    db_name       TEXT NOT NULL DEFAULT '',
+		    table_name    TEXT NOT NULL,
+		    name          TEXT NOT NULL,
+		    ordinal_pos   INTEGER NOT NULL DEFAULT 0,
+		    type          TEXT NOT NULL DEFAULT '',
+		    nullable      INTEGER NOT NULL DEFAULT 0,
+		    col_default   TEXT,
+		    key_type      TEXT NOT NULL DEFAULT '',
+		    extra         TEXT NOT NULL DEFAULT '',
+		    comment       TEXT NOT NULL DEFAULT ''
+		)`,
+		`INSERT INTO schema_columns_new (id, connection_id, db_name, table_name, name, ordinal_pos, type, nullable, col_default, key_type, extra, comment)
+		 SELECT sc.id, sc.connection_id,
+		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sc.connection_id), ''),
+		        sc.table_name, sc.name, sc.ordinal_pos, sc.type, sc.nullable, sc.col_default, sc.key_type, sc.extra, sc.comment
+		 FROM schema_columns sc`,
+		`DROP TABLE IF EXISTS schema_columns`,
+		`ALTER TABLE schema_columns_new RENAME TO schema_columns`,
+
+		// schema_indexes: add db_name, remove FK constraint.
+		`CREATE TABLE IF NOT EXISTS schema_indexes_new (
+		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		    connection_id TEXT NOT NULL,
+		    db_name       TEXT NOT NULL DEFAULT '',
+		    table_name    TEXT NOT NULL,
+		    name          TEXT NOT NULL,
+		    columns       TEXT NOT NULL DEFAULT '',
+		    is_unique     INTEGER NOT NULL DEFAULT 0,
+		    idx_type      TEXT NOT NULL DEFAULT 'BTREE'
+		)`,
+		`INSERT INTO schema_indexes_new (id, connection_id, db_name, table_name, name, columns, is_unique, idx_type)
+		 SELECT si.id, si.connection_id,
+		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = si.connection_id), ''),
+		        si.table_name, si.name, si.columns, si.is_unique, si.idx_type
+		 FROM schema_indexes si`,
+		`DROP TABLE IF EXISTS schema_indexes`,
+		`ALTER TABLE schema_indexes_new RENAME TO schema_indexes`,
+
+		// schema_foreign_keys: add db_name, remove FK constraint.
+		`CREATE TABLE IF NOT EXISTS schema_foreign_keys_new (
+		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		    connection_id TEXT NOT NULL,
+		    db_name       TEXT NOT NULL DEFAULT '',
+		    table_name    TEXT NOT NULL,
+		    name          TEXT NOT NULL,
+		    column_name   TEXT NOT NULL DEFAULT '',
+		    ref_table     TEXT NOT NULL DEFAULT '',
+		    ref_column    TEXT NOT NULL DEFAULT ''
+		)`,
+		`INSERT INTO schema_foreign_keys_new (id, connection_id, db_name, table_name, name, column_name, ref_table, ref_column)
+		 SELECT sf.id, sf.connection_id,
+		        COALESCE((SELECT sm.database FROM schema_meta sm WHERE sm.connection_id = sf.connection_id), ''),
+		        sf.table_name, sf.name, sf.column_name, sf.ref_table, sf.ref_column
+		 FROM schema_foreign_keys sf`,
+		`DROP TABLE IF EXISTS schema_foreign_keys`,
+		`ALTER TABLE schema_foreign_keys_new RENAME TO schema_foreign_keys`,
+	}
+
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migration v1: %w\nSQL: %s", err, stmt)
+		}
+	}
+	return nil
+}
+
+// runMigrations applies pending migrations. Each runs in its own transaction.
+func runMigrations(db *sql.DB) error {
+	if _, err := db.Exec(schemaMigrationsDDL); err != nil {
+		return fmt.Errorf("migrations: create schema_migrations: %w", err)
+	}
+
+	var current int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
+		return fmt.Errorf("migrations: read version: %w", err)
+	}
+
+	for i, fn := range globalMigrations {
+		version := i + 1
+		if version <= current {
+			continue
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("migrations: begin v%d: %w", version, err)
+		}
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrations: v%d: %w", version, err)
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, version); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrations: record v%d: %w", version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("migrations: commit v%d: %w", version, err)
+		}
+	}
+	return nil
+}
+
 // globalDDL contains CREATE TABLE IF NOT EXISTS statements for all global tables.
 // Each table is safe to run multiple times (idempotent via IF NOT EXISTS).
 const globalDDL = `
@@ -92,15 +235,17 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 CREATE TABLE IF NOT EXISTS schema_tables (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     connection_id TEXT NOT NULL,
+    db_name       TEXT NOT NULL DEFAULT '',
     name          TEXT NOT NULL,
     engine        TEXT NOT NULL DEFAULT '',
     comment       TEXT NOT NULL DEFAULT '',
-    UNIQUE(connection_id, name)
+    UNIQUE(connection_id, db_name, name)
 );
 
 CREATE TABLE IF NOT EXISTS schema_columns (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     connection_id TEXT NOT NULL,
+    db_name       TEXT NOT NULL DEFAULT '',
     table_name    TEXT NOT NULL,
     name          TEXT NOT NULL,
     ordinal_pos   INTEGER NOT NULL DEFAULT 0,
@@ -109,30 +254,29 @@ CREATE TABLE IF NOT EXISTS schema_columns (
     col_default   TEXT,
     key_type      TEXT NOT NULL DEFAULT '',
     extra         TEXT NOT NULL DEFAULT '',
-    comment       TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (connection_id, table_name) REFERENCES schema_tables(connection_id, name) ON DELETE CASCADE
+    comment       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS schema_indexes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     connection_id TEXT NOT NULL,
+    db_name       TEXT NOT NULL DEFAULT '',
     table_name    TEXT NOT NULL,
     name          TEXT NOT NULL,
     columns       TEXT NOT NULL DEFAULT '',
     is_unique     INTEGER NOT NULL DEFAULT 0,
-    idx_type      TEXT NOT NULL DEFAULT 'BTREE',
-    FOREIGN KEY (connection_id, table_name) REFERENCES schema_tables(connection_id, name) ON DELETE CASCADE
+    idx_type      TEXT NOT NULL DEFAULT 'BTREE'
 );
 
 CREATE TABLE IF NOT EXISTS schema_foreign_keys (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     connection_id TEXT NOT NULL,
+    db_name       TEXT NOT NULL DEFAULT '',
     table_name    TEXT NOT NULL,
     name          TEXT NOT NULL,
     column_name   TEXT NOT NULL DEFAULT '',
     ref_table     TEXT NOT NULL DEFAULT '',
-    ref_column    TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (connection_id, table_name) REFERENCES schema_tables(connection_id, name) ON DELETE CASCADE
+    ref_column    TEXT NOT NULL DEFAULT ''
 );
 
 -- Implicit relationships — user-defined logical foreign keys not enforced by DB engine.
@@ -187,6 +331,12 @@ func OpenGlobal(path string) (*GlobalStore, error) {
 	if _, err := db.Exec(globalDDL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("global: DDL bootstrap: %w", err)
+	}
+
+	// Run schema migrations (idempotent — skips already-applied versions).
+	if err := runMigrations(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("global: migrations: %w", err)
 	}
 
 	// Derive encryption key: heydbDir is the directory that contains the DB file.
@@ -919,9 +1069,24 @@ func (c *ConnSchemaStore) SaveSchema(ctx context.Context, sc schema.Schema) erro
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Delete existing data for this connection (cascade handles child rows).
+	// Delete existing data for this connection + database.
+	// When sc.Database is set, only rows for that db_name are replaced —
+	// this allows multiple databases to coexist under the same connection.
+	dbName := sc.Database
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM schema_tables WHERE connection_id = ?`, c.connID); err != nil {
+		`DELETE FROM schema_foreign_keys WHERE connection_id = ? AND db_name = ?`, c.connID, dbName); err != nil {
+		return fmt.Errorf("conn-schema: delete schema_foreign_keys: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM schema_indexes WHERE connection_id = ? AND db_name = ?`, c.connID, dbName); err != nil {
+		return fmt.Errorf("conn-schema: delete schema_indexes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM schema_columns WHERE connection_id = ? AND db_name = ?`, c.connID, dbName); err != nil {
+		return fmt.Errorf("conn-schema: delete schema_columns: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM schema_tables WHERE connection_id = ? AND db_name = ?`, c.connID, dbName); err != nil {
 		return fmt.Errorf("conn-schema: delete schema_tables: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -942,7 +1107,7 @@ func (c *ConnSchemaStore) SaveSchema(ctx context.Context, sc schema.Schema) erro
 	}
 
 	for _, t := range sc.Tables {
-		if err := insertGlobalTable(ctx, tx, c.connID, t); err != nil {
+		if err := insertGlobalTable(ctx, tx, c.connID, dbName, t); err != nil {
 			return err
 		}
 	}
@@ -966,22 +1131,23 @@ func (c *ConnSchemaStore) LoadSchema(ctx context.Context) (schema.Schema, error)
 	}
 
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT name, engine, comment FROM schema_tables
-		WHERE connection_id = ? ORDER BY name`, c.connID)
+		SELECT db_name, name, engine, comment FROM schema_tables
+		WHERE connection_id = ? ORDER BY db_name, name`, c.connID)
 	if err != nil {
 		return sc, fmt.Errorf("conn-schema: LoadSchema tables: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var name, eng, comment string
-		if err := rows.Scan(&name, &eng, &comment); err != nil {
+		var dbName, name, eng, comment string
+		if err := rows.Scan(&dbName, &name, &eng, &comment); err != nil {
 			return sc, err
 		}
-		t, err := c.loadTableByName(ctx, name)
+		t, err := c.loadTableByName(ctx, dbName, name)
 		if err != nil {
 			return sc, err
 		}
+		t.Database = dbName
 		t.Engine = eng
 		t.Comment = comment
 		sc.Tables = append(sc.Tables, t)
@@ -990,26 +1156,20 @@ func (c *ConnSchemaStore) LoadSchema(ctx context.Context) (schema.Schema, error)
 }
 
 // GetTable returns a single table by exact name for this connection.
+// If the same table name exists in multiple databases, the first match is returned.
 func (c *ConnSchemaStore) GetTable(ctx context.Context, name string) (schema.Table, error) {
-	var exists int
+	var dbName, eng, comment string
 	if err := c.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM schema_tables WHERE connection_id = ? AND name = ?`,
-		c.connID, name).Scan(&exists); err != nil {
-		return schema.Table{}, fmt.Errorf("conn-schema: GetTable check: %w", err)
-	}
-	if exists == 0 {
+		`SELECT db_name, engine, comment FROM schema_tables WHERE connection_id = ? AND name = ? LIMIT 1`,
+		c.connID, name).Scan(&dbName, &eng, &comment); err != nil {
 		return schema.Table{}, fmt.Errorf("conn-schema: table %q not found", name)
 	}
 
-	t, err := c.loadTableByName(ctx, name)
+	t, err := c.loadTableByName(ctx, dbName, name)
 	if err != nil {
 		return schema.Table{}, err
 	}
-
-	var eng, comment string
-	_ = c.db.QueryRowContext(ctx,
-		`SELECT engine, comment FROM schema_tables WHERE connection_id = ? AND name = ?`,
-		c.connID, name).Scan(&eng, &comment)
+	t.Database = dbName
 	t.Engine = eng
 	t.Comment = comment
 	return t, nil
@@ -1032,15 +1192,15 @@ func (c *ConnSchemaStore) SearchTables(ctx context.Context, query, projectID, co
 
 	// ── 1. Schema-level search (table/column names and comments) ─────────────
 	schemaRows, err := c.db.QueryContext(ctx, `
-		SELECT DISTINCT st.name
+		SELECT DISTINCT st.db_name, st.name
 		FROM schema_tables st
-		LEFT JOIN schema_columns sc ON sc.connection_id = st.connection_id AND sc.table_name = st.name
+		LEFT JOIN schema_columns sc ON sc.connection_id = st.connection_id AND sc.db_name = st.db_name AND sc.table_name = st.name
 		WHERE st.connection_id = ?
 		  AND (st.name    LIKE ? COLLATE NOCASE
 		    OR st.comment LIKE ? COLLATE NOCASE
 		    OR sc.name    LIKE ? COLLATE NOCASE
 		    OR sc.comment LIKE ? COLLATE NOCASE)
-		ORDER BY st.name`,
+		ORDER BY st.db_name, st.name`,
 		c.connID, like, like, like, like)
 	if err != nil {
 		return nil, fmt.Errorf("conn-schema: SearchTables schema query: %w", err)
@@ -1052,8 +1212,8 @@ func (c *ConnSchemaStore) SearchTables(ctx context.Context, query, projectID, co
 	var orderedNames []string
 
 	for schemaRows.Next() {
-		var name string
-		if err := schemaRows.Scan(&name); err != nil {
+		var dbName, name string
+		if err := schemaRows.Scan(&dbName, &name); err != nil {
 			return nil, err
 		}
 		if !seen[name] {
@@ -1146,19 +1306,19 @@ func (c *ConnSchemaStore) Close() error { return nil }
 
 // ── ConnSchemaStore helpers ───────────────────────────────────────────────────
 
-func insertGlobalTable(ctx context.Context, tx *sql.Tx, connID string, t schema.Table) error {
+func insertGlobalTable(ctx context.Context, tx *sql.Tx, connID, dbName string, t schema.Table) error {
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO schema_tables (connection_id, name, engine, comment) VALUES (?, ?, ?, ?)`,
-		connID, t.Name, t.Engine, t.Comment); err != nil {
+		`INSERT INTO schema_tables (connection_id, db_name, name, engine, comment) VALUES (?, ?, ?, ?, ?)`,
+		connID, dbName, t.Name, t.Engine, t.Comment); err != nil {
 		return fmt.Errorf("conn-schema: insert schema_tables %q: %w", t.Name, err)
 	}
 
 	for _, col := range t.Columns {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO schema_columns
-			    (connection_id, table_name, name, ordinal_pos, type, nullable, col_default, key_type, extra, comment)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			connID, t.Name, col.Name, col.OrdinalPos, col.Type,
+			    (connection_id, db_name, table_name, name, ordinal_pos, type, nullable, col_default, key_type, extra, comment)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			connID, dbName, t.Name, col.Name, col.OrdinalPos, col.Type,
 			boolToInt(col.Nullable), col.Default, col.Key, col.Extra, col.Comment); err != nil {
 			return fmt.Errorf("conn-schema: insert schema_columns %q.%q: %w", t.Name, col.Name, err)
 		}
@@ -1167,18 +1327,18 @@ func insertGlobalTable(ctx context.Context, tx *sql.Tx, connID string, t schema.
 	for _, idx := range t.Indexes {
 		colsStr := strings.Join(idx.Columns, ",")
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO schema_indexes (connection_id, table_name, name, columns, is_unique, idx_type)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			connID, t.Name, idx.Name, colsStr, boolToInt(idx.Unique), idx.Type); err != nil {
+			INSERT INTO schema_indexes (connection_id, db_name, table_name, name, columns, is_unique, idx_type)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			connID, dbName, t.Name, idx.Name, colsStr, boolToInt(idx.Unique), idx.Type); err != nil {
 			return fmt.Errorf("conn-schema: insert schema_indexes %q.%q: %w", t.Name, idx.Name, err)
 		}
 	}
 
 	for _, fk := range t.ForeignKeys {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO schema_foreign_keys (connection_id, table_name, name, column_name, ref_table, ref_column)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			connID, t.Name, fk.Name, fk.Column, fk.ReferencedTable, fk.ReferencedColumn); err != nil {
+			INSERT INTO schema_foreign_keys (connection_id, db_name, table_name, name, column_name, ref_table, ref_column)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			connID, dbName, t.Name, fk.Name, fk.Column, fk.ReferencedTable, fk.ReferencedColumn); err != nil {
 			return fmt.Errorf("conn-schema: insert schema_foreign_keys %q.%q: %w", t.Name, fk.Name, err)
 		}
 	}
@@ -1186,15 +1346,15 @@ func insertGlobalTable(ctx context.Context, tx *sql.Tx, connID string, t schema.
 	return nil
 }
 
-func (c *ConnSchemaStore) loadTableByName(ctx context.Context, name string) (schema.Table, error) {
+func (c *ConnSchemaStore) loadTableByName(ctx context.Context, dbName, name string) (schema.Table, error) {
 	t := schema.Table{Name: name}
 
 	// Columns.
 	colRows, err := c.db.QueryContext(ctx, `
 		SELECT name, ordinal_pos, type, nullable, col_default, key_type, extra, comment
 		FROM   schema_columns
-		WHERE  connection_id = ? AND table_name = ?
-		ORDER  BY ordinal_pos`, c.connID, name)
+		WHERE  connection_id = ? AND db_name = ? AND table_name = ?
+		ORDER  BY ordinal_pos`, c.connID, dbName, name)
 	if err != nil {
 		return t, fmt.Errorf("conn-schema: load columns for %q: %w", name, err)
 	}
@@ -1228,8 +1388,8 @@ func (c *ConnSchemaStore) loadTableByName(ctx context.Context, name string) (sch
 	idxRows, err := c.db.QueryContext(ctx, `
 		SELECT name, columns, is_unique, idx_type
 		FROM   schema_indexes
-		WHERE  connection_id = ? AND table_name = ?
-		ORDER  BY name`, c.connID, name)
+		WHERE  connection_id = ? AND db_name = ? AND table_name = ?
+		ORDER  BY name`, c.connID, dbName, name)
 	if err != nil {
 		return t, fmt.Errorf("conn-schema: load indexes for %q: %w", name, err)
 	}
@@ -1256,8 +1416,8 @@ func (c *ConnSchemaStore) loadTableByName(ctx context.Context, name string) (sch
 	fkRows, err := c.db.QueryContext(ctx, `
 		SELECT name, column_name, ref_table, ref_column
 		FROM   schema_foreign_keys
-		WHERE  connection_id = ? AND table_name = ?
-		ORDER  BY name`, c.connID, name)
+		WHERE  connection_id = ? AND db_name = ? AND table_name = ?
+		ORDER  BY name`, c.connID, dbName, name)
 	if err != nil {
 		return t, fmt.Errorf("conn-schema: load fks for %q: %w", name, err)
 	}

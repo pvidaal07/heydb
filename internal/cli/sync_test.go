@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/pvidaal07/heydb/internal/adapters/sqlite"
 	"github.com/pvidaal07/heydb/internal/domain/schema"
+	"github.com/pvidaal07/heydb/internal/introspection"
 )
 
 // TestRunSyncListV2_Empty verifies that listSyncedConnectionsV2 prints a
@@ -277,6 +279,63 @@ func TestRunSyncAll_AllFail(t *testing.T) {
 	if !strings.Contains(msg, "conn1") && !strings.Contains(msg, "connection refused") {
 		t.Errorf("error message should mention failed connections: %v", msg)
 	}
+}
+
+// TestListSyncedConnectionsV2_AgnosticConnection verifies that connections with
+// empty Database display "(agnostic)" instead of the database name.
+func TestListSyncedConnectionsV2_AgnosticConnection(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/heydb.db"
+
+	gs, err := sqlite.OpenGlobal(dbPath)
+	if err != nil {
+		t.Fatalf("OpenGlobal: %v", err)
+	}
+	defer gs.Close()
+
+	ctx := context.Background()
+	proj := schema.Project{ID: "proj-sync-agnostic", Name: "testapp", RepoPath: dir}
+	if err := gs.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	conns := []schema.Connection{
+		{Name: "targeted", Host: "127.0.0.1", Port: 3306, Database: "myapp", User: "u", Password: "p", Active: true},
+		{Name: "agnostic", Host: "127.0.0.1", Port: 3306, Database: "", User: "u", Password: "p"},
+	}
+	for _, c := range conns {
+		if err := gs.SaveConnection(ctx, proj.ID, c); err != nil {
+			t.Fatalf("SaveConnection(%q): %v", c.Name, err)
+		}
+	}
+
+	// Capture stdout to verify output format.
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	if err := listSyncedConnectionsV2(ctx, gs, proj.ID); err != nil {
+		t.Fatalf("listSyncedConnectionsV2: %v", err)
+	}
+
+	w.Close()
+	os.Stdout = old
+
+	out, _ := io.ReadAll(r)
+	output := string(out)
+
+	if !strings.Contains(output, "(agnostic)") {
+		t.Errorf("expected output to contain '(agnostic)', got:\n%s", output)
+	}
+	if !strings.Contains(output, "myapp") {
+		t.Errorf("expected output to contain database name 'myapp', got:\n%s", output)
+	}
+}
+
+// TestMysqlMultiDBFactory_ImplementsInterface is a compile-time check that
+// mysqlMultiDBFactory satisfies introspection.MultiDBFactory.
+func TestMysqlMultiDBFactory_ImplementsInterface(t *testing.T) {
+	var _ introspection.MultiDBFactory = &mysqlMultiDBFactory{}
 }
 
 // TestRunSync_AllMutualExclusivity verifies that --all and --list cannot be combined.

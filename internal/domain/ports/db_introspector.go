@@ -6,6 +6,18 @@ import (
 	"github.com/pvidaal07/heydb/internal/domain/schema"
 )
 
+// MultiDBIntrospector is an optional interface that adapters MAY implement when
+// the database engine supports listing all databases on the server.
+// Use a type assertion to check:
+//
+//	if mdi, ok := introspector.(ports.MultiDBIntrospector); ok {
+//	    dbs, err := mdi.ListDatabases(ctx)
+//	}
+type MultiDBIntrospector interface {
+	// ListDatabases returns user-accessible databases, excluding system databases.
+	ListDatabases(ctx context.Context) ([]string, error)
+}
+
 // DBIntrospector is the port that any database introspection adapter must implement.
 // Implementations are responsible for their own connection lifecycle.
 //
