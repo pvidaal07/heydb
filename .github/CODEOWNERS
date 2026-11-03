@@ -1,8 +1,8 @@
 # Default — all changes require review
 * @pvidaal07
 
-# Workflow and release config — extra scrutiny
+# Workflow, release and dependency config — extra scrutiny
 .github/ @pvidaal07
-.goreleaser.yml @pvidaal07
-go.mod @pvidaal07
-go.sum @pvidaal07
+package.json @pvidaal07
+pnpm-lock.yaml @pvidaal07
+pnpm-workspace.yaml @pvidaal07

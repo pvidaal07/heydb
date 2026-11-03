@@ -1,0 +1,4 @@
+# Transitive dependencies of the Pi SDK (dev only); heydb does not need their install scripts.
+allowBuilds:
+  "@google/genai": false
+  protobufjs: false

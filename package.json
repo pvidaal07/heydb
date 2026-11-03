@@ -1,0 +1,50 @@
+{
+	"name": "heydb",
+	"version": "2.0.0-alpha.0",
+	"private": true,
+	"description": "Database schema context for AI agents: introspect MySQL, MariaDB and PostgreSQL, keep a local snapshot, and share annotated knowledge through git.",
+	"license": "MIT",
+	"author": "pvidaal07",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/pvidaal07/heydb.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"database",
+		"schema",
+		"mysql",
+		"mariadb",
+		"postgresql"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"packageManager": "pnpm@11.0.9",
+	"pi": {
+		"extensions": [
+			"./extensions/heydb.ts"
+		]
+	},
+	"files": [
+		"extensions",
+		"lib",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"test": "node --experimental-strip-types --test \"tests/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit",
+		"check": "tsc --noEmit && node --experimental-strip-types --test \"tests/**/*.test.ts\""
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^1.5.0",
+		"@types/node": "^22.19.0",
+		"typescript": "^5.9.3"
+	}
+}

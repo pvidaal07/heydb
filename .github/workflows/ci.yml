@@ -6,21 +6,33 @@ on:
   pull_request:
     branches: [main, stg]
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  check:
+    name: check (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["24"]
+        include:
+          - os: ubuntu-latest
+            node: "22.19.0"
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-node@v6
         with:
-          go-version-file: go.mod
+          node-version: ${{ matrix.node }}
 
-      - name: Build
-        run: go build ./cmd/heydb/
+      - name: Enable pnpm via corepack
+        run: corepack enable
 
-      - name: Vet
-        run: go vet ./...
+      - name: Install
+        run: pnpm install --frozen-lockfile
 
-      - name: Test
-        run: go test ./... -v
+      - name: Typecheck and test
+        run: pnpm check
