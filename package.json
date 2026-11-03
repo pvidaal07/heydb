@@ -35,9 +35,9 @@
 		"LICENSE"
 	],
 	"scripts": {
-		"test": "node --experimental-strip-types --test \"tests/**/*.test.ts\"",
+		"test": "node --test \"tests/**/*.test.ts\"",
 		"typecheck": "tsc --noEmit",
-		"check": "tsc --noEmit && node --experimental-strip-types --test \"tests/**/*.test.ts\""
+		"check": "tsc --noEmit && node --run test"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"

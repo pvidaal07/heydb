@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
-// ADR-0003: the core in lib/ never depends on Pi, so it can also power a CLI or an MCP server.
-test("lib/ never imports @earendil-works/*", () => {
+// The core in lib/ must never depend on Pi: the same code has to power the Pi
+// extension, a CLI and an MCP server. Only extensions/ may talk to Pi.
+// Any mention of a Pi package specifier counts: static, side-effect, type-only
+// and dynamic imports all start with a quoted "@earendil-works/" string.
+test("lib/ never references @earendil-works/* packages", () => {
 	const dir = new URL("../lib/", import.meta.url);
 	for (const file of readdirSync(dir, { recursive: true }) as string[]) {
 		if (!file.endsWith(".ts")) continue;
 		const source = readFileSync(new URL(file, dir), "utf8");
-		assert.doesNotMatch(source, /from\s+["']@earendil-works\//, `lib/${file} imports Pi`);
+		assert.doesNotMatch(source, /["'`]@earendil-works\//, `lib/${file} references a Pi package`);
 	}
 });
