@@ -106,15 +106,51 @@ describe("addConnection", () => {
 		);
 	});
 
-	test("says that PostgreSQL is not supported yet", () => {
-		assert.throws(() => addConnection(emptyConfig(), "local", entry({ engine: "postgresql" as "mysql" })), {
-			message: 'connections.local.engine "postgresql" is not supported yet (PostgreSQL support is planned); use "mysql" or "mariadb"',
-		});
+	test("accepts PostgreSQL with exactly one database and an optional list of schemas", () => {
+		const pg = entry({ engine: "postgresql", port: 5432, databases: ["legacy"], schemas: ["public", "billing"] });
+		assert.deepEqual(addConnection(emptyConfig(), "pg", pg).connections.pg, pg);
+		// Without "schemas" every non-system schema is captured, written as an explicit null.
+		const all = addConnection(emptyConfig(), "pg", entry({ engine: "postgresql", databases: ["legacy"] }));
+		assert.deepEqual(all.connections.pg, entry({ engine: "postgresql", databases: ["legacy"], schemas: null }));
+	});
+
+	test("a PostgreSQL connection names exactly one database, and says why", () => {
+		const message =
+			"connections.pg.databases must list exactly one database for postgresql: a PostgreSQL connection only reaches " +
+			'the database it connects to, so add one connection per database (and use "schemas" to choose schemas inside it)';
+		for (const databases of [null, ["legacy", "other"]]) {
+			assert.throws(() => addConnection(emptyConfig(), "pg", entry({ engine: "postgresql", databases })), { message });
+		}
+	});
+
+	test("schemas are checked like databases, and only PostgreSQL may have them", () => {
+		const pg = (schemas: unknown) => entry({ engine: "postgresql", databases: ["legacy"], schemas: schemas as string[] });
+		const cases: [ConnectionConfig, string][] = [
+			[pg([]), "connections.local.schemas must be null (every non-system schema) or a non-empty list of names"],
+			[pg("public"), "connections.local.schemas must be null (every non-system schema) or a non-empty list of names"],
+			[pg(["public", ""]), "connections.local.schemas[1] must be a non-empty string"],
+			[pg(["public", "public"]), 'connections.local.schemas repeats "public"'],
+			[
+				entry({ schemas: null }),
+				'connections.local.schemas is only allowed for postgresql: in MySQL and MariaDB every database is its own schema, so choose them with "databases"',
+			],
+		];
+		for (const [connection, message] of cases) {
+			assert.throws(() => addConnection(emptyConfig(), "local", connection), { message });
+		}
+	});
+
+	test("MySQL and MariaDB entries keep their shape: no schemas field is added", () => {
+		for (const engine of ["mysql", "mariadb"] as const) {
+			const added = addConnection(emptyConfig(), "local", entry({ engine, databases: ["shop", "crm"] })).connections.local;
+			assert.deepEqual(added, entry({ engine, databases: ["shop", "crm"] }));
+			assert.equal(added !== undefined && "schemas" in added, false);
+		}
 	});
 
 	test("checks every field", () => {
 		const cases: [Partial<Record<keyof ConnectionConfig, unknown>>, string][] = [
-			[{ engine: "oracle" }, 'connections.local.engine must be "mysql" or "mariadb"'],
+			[{ engine: "oracle" }, 'connections.local.engine must be "mysql", "mariadb" or "postgresql"'],
 			[{ host: "" }, "connections.local.host must be a non-empty string"],
 			[{ port: 0 }, "connections.local.port must be an integer from 1 to 65535"],
 			[{ port: 3306.5 }, "connections.local.port must be an integer from 1 to 65535"],

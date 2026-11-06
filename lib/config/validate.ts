@@ -14,9 +14,9 @@ import type { Config, ConnectionConfig, ConnectionEngine } from "./types.ts";
 // No message ever repeats the value of a password field, or of an unknown
 // field: either may be the real password.
 
-const ENGINES: readonly ConnectionEngine[] = ["mysql", "mariadb"];
+const ENGINES: readonly ConnectionEngine[] = ["mysql", "mariadb", "postgresql"];
 const ROOT_FIELDS = ["formatVersion", "defaultConnection", "connections"];
-const CONNECTION_FIELDS = ["engine", "host", "port", "user", "password", "databases"];
+const CONNECTION_FIELDS = ["engine", "host", "port", "user", "password", "databases", "schemas"];
 
 export function validateConfig(data: unknown): Config {
 	const root = object(data, "config");
@@ -48,22 +48,36 @@ export function validateConnection(data: unknown, name: string): ConnectionConfi
 	const path = `connections.${name}`;
 	const entry = object(data, path);
 	onlyKnownFields(entry, CONNECTION_FIELDS, path);
-	return {
+	const connection = {
 		engine: engine(read(entry, "engine", path), `${path}.engine`),
 		host: text(read(entry, "host", path), `${path}.host`),
 		port: port(read(entry, "port", path), `${path}.port`),
 		user: text(read(entry, "user", path), `${path}.user`),
 		password: password(read(entry, "password", path), `${path}.password`, name),
-		databases: databases(read(entry, "databases", path), `${path}.databases`),
+		databases: names(read(entry, "databases", path), `${path}.databases`, "every database"),
 	};
+	if (connection.engine !== "postgresql") {
+		// An undefined value counts as absent: it is what spreading a partial update leaves behind.
+		if (entry.schemas !== undefined) {
+			throw new Error(
+				`${path}.schemas is only allowed for postgresql: in MySQL and MariaDB every database is its own schema, so choose them with "databases"`,
+			);
+		}
+		return connection;
+	}
+	if (connection.databases?.length !== 1) {
+		throw new Error(
+			`${path}.databases must list exactly one database for postgresql: a PostgreSQL connection only reaches ` +
+				'the database it connects to, so add one connection per database (and use "schemas" to choose schemas inside it)',
+		);
+	}
+	// Written as an explicit null when absent, like every other "all" in this file.
+	return { ...connection, schemas: names(entry.schemas ?? null, `${path}.schemas`, "every non-system schema") };
 }
 
 function engine(value: unknown, path: string): ConnectionEngine {
-	if (value === "postgresql") {
-		throw new Error(`${path} "postgresql" is not supported yet (PostgreSQL support is planned); use "mysql" or "mariadb"`);
-	}
 	const found = ENGINES.find((item) => item === value);
-	if (found === undefined) throw new Error(`${path} must be "mysql" or "mariadb"`);
+	if (found === undefined) throw new Error(`${path} must be "mysql", "mariadb" or "postgresql"`);
 	return found;
 }
 
@@ -92,10 +106,11 @@ function password(value: unknown, path: string, name: string): string {
 	);
 }
 
-function databases(value: unknown, path: string): readonly string[] | null {
+/** A list of unique names, or null for "all"; `all` says what null means in the message. */
+function names(value: unknown, path: string, all: string): readonly string[] | null {
 	if (value === null) return null;
 	if (!Array.isArray(value) || value.length === 0) {
-		throw new Error(`${path} must be null (every database) or a non-empty list of names`);
+		throw new Error(`${path} must be null (${all}) or a non-empty list of names`);
 	}
 	return value.map((item: unknown, index) => {
 		if (typeof item !== "string" || item === "") throw new Error(`${path}[${index}] must be a non-empty string`);

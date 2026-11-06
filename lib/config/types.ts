@@ -3,8 +3,8 @@
 // because the file holds NO secrets. A password is always a reference such as
 // "env:HEYDB_PROD_PASSWORD", resolved on the machine that connects (ADR-0005).
 
-/** Engines a connection may use today. PostgreSQL joins in step 7. */
-export type ConnectionEngine = "mysql" | "mariadb";
+/** Engines a connection may use. */
+export type ConnectionEngine = "mysql" | "mariadb" | "postgresql";
 
 export interface ConnectionConfig {
 	readonly engine: ConnectionEngine;
@@ -13,8 +13,18 @@ export interface ConnectionConfig {
 	readonly user: string;
 	/** Only a reference, "env:HEYDB_NAME"; never the password itself. */
 	readonly password: string;
-	/** Databases to capture; null captures every database the user can see. */
+	/**
+	 * Databases to capture; null captures every database the user can see.
+	 * PostgreSQL: exactly one, the database to connect to, because a PostgreSQL
+	 * connection only ever reaches the database it was opened on.
+	 */
 	readonly databases: readonly string[] | null;
+	/**
+	 * PostgreSQL only: schemas to capture inside that database; null captures
+	 * every non-system schema. Absent for MySQL and MariaDB, where each database
+	 * is its own schema.
+	 */
+	readonly schemas?: readonly string[] | null;
 }
 
 export interface Config {
