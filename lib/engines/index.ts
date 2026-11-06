@@ -11,12 +11,25 @@ import type { MysqlConnectionOptions } from "./mysql/introspect.ts";
 // connect, so they never pay for mysql2. `import type` above is erased before
 // the code runs and loads nothing; tests/engines/index.test.ts checks both.
 
+// One shared promise per engine module: concurrent callers wait for the same
+// import instead of starting their own. Pi's module loader breaks when two
+// imports of mysql2 run at the same time (seen with two /heydb:status at once).
+let mysqlEngine: Promise<typeof import("./mysql/introspect.ts")> | undefined;
+
+function loadMysqlEngine(): Promise<typeof import("./mysql/introspect.ts")> {
+	mysqlEngine ??= import("./mysql/introspect.ts").catch((error: unknown) => {
+		mysqlEngine = undefined; // a failed load can be retried
+		throw error;
+	});
+	return mysqlEngine;
+}
+
 /** Captures the structure of the server described by `entry`. */
 export async function introspect(entry: ConnectionConfig, password: string): Promise<Snapshot> {
 	switch (entry.engine) {
 		case "mysql":
 		case "mariadb": {
-			const { introspectMysql } = await import("./mysql/introspect.ts");
+			const { introspectMysql } = await loadMysqlEngine();
 			return introspectMysql(mysqlOptions(entry, password));
 		}
 	}
