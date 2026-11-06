@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { sortSnapshot } from "../model/order.ts";
 import type { Snapshot } from "../model/snapshot.ts";
+import { validateSnapshot } from "../model/validate.ts";
 import { stableJson, writeFileAtomic } from "./files.ts";
 import { HEYDB_DIR } from "./project.ts";
 
@@ -82,8 +83,9 @@ function isSymlink(path: string): boolean {
 	}
 }
 
-// Checks the parts every reader relies on. Deeper validation of each table is
-// left to the tests that pin what the engines write.
+// First the top-level checks, whose messages say what kind of file this is
+// (not a snapshot at all, or one from a newer heydb); then validateSnapshot
+// checks every field down to each column.
 function checkSnapshot(data: unknown, fileName: string): Snapshot {
 	if (data === null || typeof data !== "object" || Array.isArray(data)) {
 		throw new Error(`${fileName} is not a heydb snapshot: expected a JSON object`);
@@ -105,7 +107,12 @@ function checkSnapshot(data: unknown, fileName: string): Snapshot {
 	if (!Array.isArray(record.databases) || !Array.isArray(record.warnings)) {
 		throw new Error(`${fileName} is not a heydb snapshot: "databases" and "warnings" must be lists`);
 	}
-	return data as Snapshot;
+	try {
+		return validateSnapshot(data);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`${fileName} is not a heydb snapshot: ${reason}`, { cause: error });
+	}
 }
 
 function isMissingFile(error: unknown): boolean {

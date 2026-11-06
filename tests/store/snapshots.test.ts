@@ -184,4 +184,23 @@ describe("reading damaged or foreign files", () => {
 		writeRaw(root, JSON.stringify({ formatVersion: 1, hello: "world" }));
 		assert.throws(() => loadSnapshot(root, "local"), /local\.json is not a heydb snapshot: missing "engine"/);
 	});
+
+	test("validates every table, naming the file and the exact path of the bad value", () => {
+		const root = projectRoot();
+		const data = JSON.parse(JSON.stringify(snapshot([customersTable(), ordersTable()])));
+		data.databases[0].schemas[0].tables[1].columns[2].nullable = "YES";
+		writeRaw(root, JSON.stringify(data));
+		assert.throws(
+			() => loadSnapshot(root, "local"),
+			/^Error: local\.json is not a heydb snapshot: databases\[0\]\.schemas\[0\]\.tables\[1\]\.columns\[2\]\.nullable must be a boolean$/,
+		);
+	});
+
+	test("rejects a snapshot saved before view definitions were captured", () => {
+		const root = projectRoot();
+		const data = JSON.parse(JSON.stringify(snapshot([ordersTable()])));
+		delete data.databases[0].schemas[0].tables[0].viewDefinition;
+		writeRaw(root, JSON.stringify(data));
+		assert.throws(() => loadSnapshot(root, "local"), /tables\[0\]\.viewDefinition is missing$/);
+	});
 });
