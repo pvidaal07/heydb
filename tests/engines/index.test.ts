@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { describe, test } from "node:test";
 
-import { mysqlOptions } from "../../lib/engines/index.ts";
+import { mysqlOptions, postgresOptions } from "../../lib/engines/index.ts";
 
 describe("mysqlOptions", () => {
 	test("maps a config entry and the resolved password to driver options", () => {
@@ -25,16 +25,48 @@ describe("mysqlOptions", () => {
 	});
 });
 
+describe("postgresOptions", () => {
+	const entry = {
+		engine: "postgresql" as const,
+		host: "pg.internal",
+		port: 5433,
+		user: "reader",
+		password: "env:HEYDB_PG_PASSWORD",
+		databases: ["legacy"],
+		schemas: ["public", "billing"],
+	};
+
+	test("connects to the one configured database and passes the schemas", () => {
+		assert.deepEqual(postgresOptions(entry, "resolved"), {
+			host: "pg.internal",
+			port: 5433,
+			user: "reader",
+			password: "resolved",
+			database: "legacy",
+			schemas: ["public", "billing"],
+		});
+		assert.equal(postgresOptions({ ...entry, schemas: null }, "x").schemas, null);
+		assert.equal(postgresOptions({ ...entry, schemas: undefined }, "x").schemas, null);
+	});
+
+	test("refuses an entry without exactly one database instead of guessing", () => {
+		const message = "a postgresql connection needs exactly one database";
+		assert.throws(() => postgresOptions({ ...entry, databases: null }, "x"), { message });
+		assert.throws(() => postgresOptions({ ...entry, databases: ["a", "b"] }, "x"), { message });
+	});
+});
+
 // ADR-0006: a driver is loaded only when its engine is used, so a session that
 // never connects (reading the snapshot, searching, annotating) pays nothing
-// for mysql2. The test runs a fresh Node process, because this one may have
-// loaded mysql2 already through another test file. Inside it, a module
+// for mysql2 or pg. The test runs a fresh Node process, because this one may
+// have loaded a driver already through another test file. Inside it, a module
 // resolution hook (module.registerHooks) records every URL Node resolves,
 // for import and require alike; then the script imports one module and prints
-// whether any recorded URL lies inside node_modules/mysql2/. The second case
-// imports the engine directly and must see mysql2: it proves the detector
-// works, so the first case cannot pass just because nothing was recorded.
-function loadsMysql2(module: string): boolean {
+// which drivers' folders (node_modules/mysql2/, node_modules/pg/) any recorded
+// URL lies in. The engine cases import each engine directly and must see its
+// driver: they prove the detector works, so the first case cannot pass just
+// because nothing was recorded.
+function loadedDrivers(module: string): string[] {
 	const script = `
 		import { registerHooks } from "node:module";
 		const seen = [];
@@ -46,20 +78,25 @@ function loadsMysql2(module: string): boolean {
 			},
 		});
 		await import(${JSON.stringify(new URL(module, import.meta.url).href)});
-		const hit = seen.some((url) => url.replaceAll("\\\\", "/").includes("/node_modules/mysql2/"));
-		process.stdout.write(hit ? "mysql2 loaded" : "mysql2 not loaded");
+		const urls = seen.map((url) => url.replaceAll("\\\\", "/"));
+		const drivers = ["mysql2", "pg"].filter((driver) => urls.some((url) => url.includes("/node_modules/" + driver + "/")));
+		process.stdout.write(JSON.stringify(drivers));
 	`;
 	const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { encoding: "utf8" });
 	assert.equal(child.status, 0, child.stderr);
-	return child.stdout === "mysql2 loaded";
+	return JSON.parse(child.stdout) as string[];
 }
 
 describe("lazy driver loading", () => {
-	test("importing lib/engines/index.ts does not load mysql2", () => {
-		assert.equal(loadsMysql2("../../lib/engines/index.ts"), false);
+	test("importing lib/engines/index.ts loads neither mysql2 nor pg", () => {
+		assert.deepEqual(loadedDrivers("../../lib/engines/index.ts"), []);
 	});
 
 	test("the detector sees mysql2 when the MySQL engine itself is imported", () => {
-		assert.equal(loadsMysql2("../../lib/engines/mysql/introspect.ts"), true);
+		assert.deepEqual(loadedDrivers("../../lib/engines/mysql/introspect.ts"), ["mysql2"]);
+	});
+
+	test("the detector sees pg when the PostgreSQL engine itself is imported", () => {
+		assert.deepEqual(loadedDrivers("../../lib/engines/postgres/introspect.ts"), ["pg"]);
 	});
 });
