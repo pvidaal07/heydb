@@ -1,0 +1,49 @@
+---
+name: heydb
+description: Consult and enrich the database schema of a heydb project (.heydb/ folder) with the heydb_* tools. Use before writing, reviewing or debugging SQL, queries, migrations or ORM models; when asked what a table or column means or how tables join; and when you learn business meaning (valid values, units, legacy quirks) or a join without a foreign key that the team should keep.
+---
+
+# heydb
+
+heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`) and the team's notes about it (`.heydb/knowledge/`), both committed to git. The tools read those files; they never connect to the database.
+
+## Read before you write SQL
+
+1. Unknown schema: `heydb_overview` once.
+2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case and accents.
+3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes.
+
+Never guess table or column names from memory when heydb can answer.
+
+## Warnings mean the picture is incomplete
+
+The overview lists warnings from the last sync. Take them literally:
+
+- hidden triggers or routines: the user that synced could not see them. Writes may fire logic you cannot see; say so before relying on "nothing else happens".
+- a view whose definition is not visible: do not assume what it selects.
+- a stale snapshot: if a table or column you need is missing, the database may have changed. Ask the user to run `/heydb:sync`.
+
+## Save what you learn
+
+When the conversation or the code teaches you something the schema does not say, save it so the next person (or agent) does not have to rediscover it.
+
+- `heydb_annotate` for meaning: valid values, units, encodings, who writes the column, legacy quirks.
+- `heydb_relate` for joins without a foreign key: `orders.customer_id → customers.id`. Say how you know in `note`.
+- Read the existing notes first (`heydb_table`). Fix a wrong note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that contradicts the first.
+
+Good notes are short, factual and verifiable:
+
+| Good | Bad |
+|---|---|
+| `status: 0 draft, 1 paid, 2 refunded (see OrderStatus.php).` | `Status of the order.` (the name already says it) |
+| `Amount in cents, VAT included.` | `Probably the price.` (a guess) |
+| `Legacy: 0000-00-00 means "never". Filter it out.` | A paragraph retelling the conversation |
+| `Joined to customers.id by app code; no FK because the table is MyISAM.` | `I think this links to users.` |
+
+Never invent. If you are not sure, ask the user or leave it unsaved. Notes you write are signed `<author> (via agent)` so readers know a person did not type them.
+
+## Setup is the user's job
+
+If a tool says the project is not initialized, has no connections or was never synced, tell the user which command to run: `/heydb:init`, `/heydb:connect`, `/heydb:sync`. You cannot run them.
+
+Never ask for, repeat or store database passwords, not in notes, files, commands or chat. heydb reads them from `HEYDB_<NAME>_PASSWORD` in the user's environment or `.heydb/.env`, which is never committed.

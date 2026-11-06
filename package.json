@@ -26,11 +26,15 @@
 	"pi": {
 		"extensions": [
 			"./extensions/heydb.ts"
+		],
+		"skills": [
+			"./skills"
 		]
 	},
 	"files": [
 		"extensions",
 		"lib",
+		"skills",
 		"README.md",
 		"LICENSE"
 	],
