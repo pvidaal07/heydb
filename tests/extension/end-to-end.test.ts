@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import { loadKnowledge } from "../../lib/store/knowledge.ts";
+import { customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
+import { fakeContext, fakeIntrospect, loadHeydb, runCommand, runTool, tempDirs } from "./fake-pi.ts";
+
+const tempDir = tempDirs("heydb-e2e-");
+
+// The whole journey through the extension only, as a person and an agent
+// would take it: no database (the engine is a fake) and no Pi.
+test("init → connect → sync → overview, table, search and annotate via tools", async () => {
+	const root = tempDir();
+	const app = join(root, "app");
+	mkdirSync(app);
+	const live = snapshot([customersTable(), ordersTable()]);
+	const { introspect, passwords } = fakeIntrospect(live);
+	const pi = loadHeydb({ introspect, env: { HEYDB_LOCAL_PASSWORD: "from-env" } });
+
+	const init = fakeContext(root);
+	await runCommand(pi, "heydb:init", "", init);
+	assert.match(init.notifications[0]?.message ?? "", /^heydb project ready/);
+
+	const connect = fakeContext(app, { answers: ["local", "mysql", "", "", "root", "shop"] });
+	await runCommand(pi, "heydb:connect", "", connect);
+	assert.match(connect.notifications[0]?.message ?? "", /set HEYDB_LOCAL_PASSWORD/);
+
+	const sync = fakeContext(app);
+	await runCommand(pi, "heydb:sync", "", sync);
+	assert.equal(sync.notifications[0]?.level, "info");
+	assert.deepEqual(passwords, ["from-env"]);
+
+	const overview = await runTool(pi, "heydb_overview", {}, app);
+	assert.equal(overview.isError, false);
+	assert.match(overview.text, /^# heydb · local/);
+	assert.match(overview.text, /shop\.shop\.orders/);
+
+	const annotated = await runTool(pi, "heydb_annotate", { target: "orders.total", text: "Includes VAT, in euros." }, app);
+	assert.equal(annotated.isError, false);
+
+	const table = await runTool(pi, "heydb_table", { table: "orders" }, app);
+	assert.match(table.text, /Includes VAT, in euros\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]/);
+
+	const search = await runTool(pi, "heydb_search", { query: "euros" }, app);
+	assert.equal(search.text, "1 match.\n- column shop.shop.orders.total · annotation: Includes VAT, in euros.");
+
+	assert.equal(loadKnowledge(root, "local").annotations[0]?.author, "Ana (via agent)");
+});

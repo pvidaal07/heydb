@@ -3,48 +3,24 @@ import { test } from "node:test";
 
 import heydb from "../extensions/heydb.ts";
 import pkg from "../package.json" with { type: "json" };
+import { fakeContext, fakePi, runCommand } from "./extension/fake-pi.ts";
 
-type Notification = { message: string; level: string };
-type CommandHandler = (args: string, ctx: unknown) => Promise<void> | void;
-
-// Minimal stand-in for Pi's ExtensionAPI: it records what the extension registers.
-function fakePi() {
-	const commands = new Map<string, { description: string; handler: CommandHandler }>();
-	const api = {
-		registerCommand(name: string, options: { description: string; handler: CommandHandler }) {
-			commands.set(name, options);
-		},
-	};
-	return { api, commands };
-}
-
-function fakeContext() {
-	const notifications: Notification[] = [];
-	const ctx = {
-		ui: {
-			notify(message: string, level: string) {
-				notifications.push({ message, level });
-			},
-		},
-	};
-	return { ctx, notifications };
-}
-
-test("registers the heydb:about command", () => {
-	const { api, commands } = fakePi();
-	heydb(api as never);
-	assert.ok(commands.has("heydb:about"), "expected /heydb:about to be registered");
-	assert.equal(commands.size, 1, "step 0 registers only /heydb:about");
+// The default export is what Pi loads: it must register everything with the
+// real dependencies, without connecting anywhere or loading a driver.
+test("the default export registers the heydb commands, tools and prompt context", () => {
+	const pi = fakePi();
+	heydb(pi.api);
+	assert.deepEqual([...pi.commands.keys()], ["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status"]);
+	assert.equal(pi.tools.size, 7);
+	assert.deepEqual([...pi.handlers.keys()], ["before_agent_start"]);
 });
 
 test("/heydb:about reports the package version", async () => {
-	const { api, commands } = fakePi();
-	heydb(api as never);
-	const { ctx, notifications } = fakeContext();
+	const pi = fakePi();
+	heydb(pi.api);
+	const ctx = fakeContext(process.cwd());
 
-	await commands.get("heydb:about")?.handler("", ctx);
+	await runCommand(pi, "heydb:about", "", ctx);
 
-	assert.deepEqual(notifications, [
-		{ message: `heydb ${pkg.version} (v2 in development)`, level: "info" },
-	]);
+	assert.deepEqual(ctx.notifications, [{ message: `heydb ${pkg.version} (v2 in development)`, level: "info" }]);
 });
