@@ -26,11 +26,12 @@ export function assertConnectionName(name: string): void {
 
 /**
  * .heydb/ is committed, and git can commit symbolic links. A link named .heydb
- * or .heydb/<subdirectory> pointing elsewhere would make heydb read or
- * overwrite files outside the project, so links are refused, never followed.
+ * or .heydb/<entry> (a subdirectory such as "snapshots", or a file such as
+ * ".env") pointing elsewhere would make heydb read or overwrite files outside
+ * the project, so links are refused, never followed.
  */
-export function assertNoSymlinks(projectRoot: string, subdirectory: string): void {
-	for (const relative of [HEYDB_DIR, join(HEYDB_DIR, subdirectory)]) {
+export function assertNoSymlinks(projectRoot: string, entry: string): void {
+	for (const relative of [HEYDB_DIR, join(HEYDB_DIR, entry)]) {
 		if (isSymlink(join(projectRoot, relative))) {
 			throw new Error(`${relative.replaceAll("\\", "/")} is a symbolic link; heydb refuses to follow it`);
 		}
