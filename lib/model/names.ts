@@ -29,6 +29,15 @@ export function formatName(ref: ObjectRef): string {
 	return segments.map(formatSegment).join(".");
 }
 
+/**
+ * Names a database on its own, with the quoting rule of every segment:
+ * shop stays shop, v1.old becomes "v1.old". The first segment of every
+ * canonical name inside that database is exactly this text.
+ */
+export function formatDatabaseName(database: string): string {
+	return formatSegment(database);
+}
+
 function formatSegment(segment: string): string {
 	const needsQuotes = segment === "" || segment.includes(".") || segment.includes(QUOTE);
 	if (!needsQuotes) return segment;
@@ -36,7 +45,7 @@ function formatSegment(segment: string): string {
 }
 
 export function parseName(text: string): ObjectRef {
-	const segments = splitSegments(text);
+	const segments = parseSegments(text);
 	if (segments.length < 2 || segments.length > 4) {
 		throw new Error(`invalid name "${text}": expected 2 to 4 segments, got ${segments.length}`);
 	}
@@ -49,10 +58,17 @@ export function parseName(text: string): ObjectRef {
 	};
 }
 
-// Reads one segment at a time. A segment is either quoted ("...") or plain
-// text up to the next dot. After each segment we must be at the end of the
-// text or at a dot that starts the next segment.
-function splitSegments(text: string): string[] {
+/**
+ * Splits a dotted name into its segments with the same quoting rules as
+ * parseName, but accepts any number of them. People and agents write partial
+ * names ("orders", "shop.orders"); this reads them without guessing what each
+ * segment is.
+ *
+ * Reads one segment at a time. A segment is either quoted ("...") or plain
+ * text up to the next dot. After each segment we must be at the end of the
+ * text or at a dot that starts the next segment.
+ */
+export function parseSegments(text: string): string[] {
 	const segments: string[] = [];
 	let index = 0;
 
