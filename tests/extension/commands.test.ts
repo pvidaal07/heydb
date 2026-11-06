@@ -113,6 +113,19 @@ describe("/heydb:connect", () => {
 		const root = project();
 		const ctx = fakeContext(root, { answers: ["prod", "mysql", "db.internal", "", "reader", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.deepEqual(
+			ctx.dialogs.map((dialog) => [dialog.title, dialog.hint]),
+			[
+				["Connection name", "local"],
+				["Engine", "mysql,mariadb,postgresql"],
+				["Host", "127.0.0.1"],
+				["Port", "3306"],
+				["User", "root"],
+				["Databases (comma-separated, empty for all)", "shop, crm"],
+			],
+			"MySQL keeps its questions and hints",
+		);
+		assert.equal(loadConfig(root).connections.prod?.port, 3306);
 		assert.equal(loadConfig(root).defaultConnection, "local");
 		assert.equal(
 			ctx.notifications[0]?.message,
@@ -120,6 +133,67 @@ describe("/heydb:connect", () => {
 				"heydb never stores passwords: set HEYDB_PROD_PASSWORD in your shell or in .heydb/.env (ignored by git), " +
 				"then run /heydb:sync prod.",
 		);
+	});
+
+	test("PostgreSQL: default port 5432, one database and optional schemas", async () => {
+		const pi = loadHeydb();
+		const root = tempDir();
+		initProject(root);
+		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "", "", "reader", " legacy ", "public, billing"] });
+		await runCommand(pi, "heydb:connect", "", ctx);
+
+		assert.deepEqual(ctx.dialogs, [
+			{ kind: "input", title: "Connection name", hint: "local" },
+			{ kind: "select", title: "Engine", hint: "mysql,mariadb,postgresql" },
+			{ kind: "input", title: "Host", hint: "127.0.0.1" },
+			{ kind: "input", title: "Port", hint: "5432" },
+			{ kind: "input", title: "User", hint: "postgres" },
+			{ kind: "input", title: "Database (exactly one: a PostgreSQL connection reaches one database)", hint: "postgres" },
+			{ kind: "input", title: "Schemas (comma-separated, empty for all non-system schemas)", hint: "public" },
+		]);
+		assert.deepEqual(loadConfig(root).connections.pg, {
+			engine: "postgresql",
+			host: "127.0.0.1",
+			port: 5432,
+			user: "reader",
+			password: "env:HEYDB_PG_PASSWORD",
+			databases: ["legacy"],
+			schemas: ["public", "billing"],
+		});
+		assert.equal(
+			ctx.notifications[0]?.message,
+			'Saved connection "pg" (postgresql reader@127.0.0.1:5432, database legacy, schemas public, billing) as the default.\n' +
+				"heydb never stores passwords: set HEYDB_PG_PASSWORD in your shell or in .heydb/.env (ignored by git), " +
+				"then run /heydb:sync pg.",
+		);
+	});
+
+	test("PostgreSQL: empty schemas capture every non-system schema", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "pg.internal", "5433", "reader", "legacy", ""] });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.equal(loadConfig(root).connections.pg?.schemas, null);
+		assert.match(ctx.notifications[0]?.message ?? "", /^Saved connection "pg" \(postgresql reader@pg\.internal:5433, database legacy, all schemas\)\.\n/);
+	});
+
+	test("PostgreSQL: no database, or more than one, is reported and nothing is saved", async () => {
+		for (const database of ["", "legacy, other"]) {
+			const pi = loadHeydb();
+			const root = project();
+			const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
+			const ctx = fakeContext(root, { answers: ["pg", "postgresql", "", "", "reader", database, ""] });
+			await runCommand(pi, "heydb:connect", "", ctx);
+			assert.equal(readFileSync(join(root, ".heydb", "config.json"), "utf8"), before);
+			assert.deepEqual(ctx.notifications, [
+				{
+					message:
+						"connections.pg.databases must list exactly one database for postgresql: a PostgreSQL connection only reaches " +
+						'the database it connects to, so add one connection per database (and use "schemas" to choose schemas inside it)',
+					level: "error",
+				},
+			]);
+		}
 	});
 
 	test("stops without saving when a dialog is cancelled", async () => {

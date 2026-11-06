@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@
 
 import { aboutMessage } from "../lib/about.ts";
 import type { ConnectionConfig } from "../lib/config/types.ts";
+import { validateConnection } from "../lib/config/validate.ts";
 import type { Snapshot } from "../lib/model/snapshot.ts";
 import { renderChanges, renderStatus } from "../lib/render/markdown.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
@@ -29,7 +30,15 @@ type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
 /** Sends a message into the session; it is shown and becomes context for the model. */
 export type SendMessage = ExtensionAPI["sendMessage"];
 
-const ENGINES = ["mysql", "mariadb"];
+const ENGINES = ["mysql", "mariadb", "postgresql"];
+
+// What each engine is usually reached with: shown as hints, and the port is
+// also what an empty answer means.
+const ENGINE_DEFAULTS: Readonly<Record<string, { port: string; user: string }>> = {
+	mysql: { port: "3306", user: "root" },
+	mariadb: { port: "3306", user: "root" },
+	postgresql: { port: "5432", user: "postgres" },
+};
 
 export function registerHeydbCommands(pi: ExtensionAPI, deps: HeydbDeps): void {
 	for (const [name, command] of createHeydbCommands(deps, (message, options) => pi.sendMessage(message, options))) {
@@ -105,7 +114,9 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 			"/heydb:connect needs an interactive session. Add the connection to .heydb/config.json instead, for example:\n" +
 				'"connections": { "local": { "engine": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root", ' +
 				'"password": "env:HEYDB_LOCAL_PASSWORD", "databases": null } }\n' +
-				'"password" is only the name of the variable that holds it; set HEYDB_LOCAL_PASSWORD in your shell or in .heydb/.env.',
+				'"password" is only the name of the variable that holds it; set HEYDB_LOCAL_PASSWORD in your shell or in .heydb/.env.\n' +
+				'For PostgreSQL use "engine": "postgresql", port 5432, exactly one database in "databases" and, optionally, ' +
+				'"schemas": ["public"] (null captures every non-system schema).',
 			"info",
 		);
 		return;
@@ -115,18 +126,41 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 	// and config.json only holds the name of the variable that has it.
 	const name = await ctx.ui.input("Connection name", "local");
 	const engine = name === undefined ? undefined : await ctx.ui.select("Engine", ENGINES);
+	const defaults = ENGINE_DEFAULTS[engine ?? "mysql"] ?? { port: "3306", user: "root" };
 	const host = engine === undefined ? undefined : await ctx.ui.input("Host", "127.0.0.1");
-	const port = host === undefined ? undefined : await ctx.ui.input("Port", "3306");
-	const user = port === undefined ? undefined : await ctx.ui.input("User", "root");
-	const databases = user === undefined ? undefined : await ctx.ui.input("Databases (comma-separated, empty for all)", "shop, crm");
-	if (name === undefined || engine === undefined || host === undefined || port === undefined || user === undefined || databases === undefined) {
+	const port = host === undefined ? undefined : await ctx.ui.input("Port", defaults.port);
+	const user = port === undefined ? undefined : await ctx.ui.input("User", defaults.user);
+	// A PostgreSQL connection reaches one database and chooses schemas inside it;
+	// in MySQL and MariaDB each database is its own schema.
+	const postgres = engine === "postgresql";
+	const databases =
+		user === undefined
+			? undefined
+			: postgres
+				? await ctx.ui.input("Database (exactly one: a PostgreSQL connection reaches one database)", "postgres")
+				: await ctx.ui.input("Databases (comma-separated, empty for all)", "shop, crm");
+	const schemas =
+		databases === undefined || !postgres
+			? ""
+			: await ctx.ui.input("Schemas (comma-separated, empty for all non-system schemas)", "public");
+	if (
+		name === undefined ||
+		engine === undefined ||
+		host === undefined ||
+		port === undefined ||
+		user === undefined ||
+		databases === undefined ||
+		schemas === undefined
+	) {
 		ctx.ui.notify("heydb:connect cancelled; nothing was saved.", "info");
 		return;
 	}
 
 	attempt(ctx, () => {
 		const connectionName = name.trim() === "" ? "local" : name.trim();
-		const entry = buildConnection(connectionName, { engine, host, port, user, databases });
+		const answers = { engine, host, port: port.trim() === "" ? defaults.port : port, user, databases };
+		const built = buildConnection(connectionName, answers);
+		const entry = postgres ? validateConnection({ ...built, schemas: list(schemas) }, connectionName) : built;
 		const { isDefault } = saveNewConnection(root, connectionName, entry);
 		const variable = entry.password.slice("env:".length);
 		ctx.ui.notify(
@@ -136,6 +170,15 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 			"info",
 		);
 	});
+}
+
+/** Comma-separated names; nothing typed means null, "all". */
+function list(text: string): string[] | null {
+	const items = text
+		.split(",")
+		.map((item) => item.trim())
+		.filter((item) => item !== "");
+	return items.length === 0 ? null : items;
 }
 
 async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -236,8 +279,13 @@ function message(error: unknown): string {
 }
 
 function describe(entry: ConnectionConfig): string {
+	const server = `${entry.engine} ${entry.user}@${entry.host}:${entry.port}`;
+	if (entry.engine === "postgresql") {
+		const schemas = entry.schemas == null ? "all schemas" : `schemas ${entry.schemas.join(", ")}`;
+		return `${server}, database ${entry.databases?.join(", ")}, ${schemas}`;
+	}
 	const databases = entry.databases === null ? "all databases" : `databases ${entry.databases.join(", ")}`;
-	return `${entry.engine} ${entry.user}@${entry.host}:${entry.port}, ${databases}`;
+	return `${server}, ${databases}`;
 }
 
 function summary(snapshot: Snapshot): string[] {
