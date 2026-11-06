@@ -131,8 +131,9 @@ for (const target of targets) {
 
 		test("captures every visible user database when none is requested, never system ones", async () => {
 			const all = await introspectMysql(options(target.port, { databases: null }));
+			// Other integration files run in parallel and may hold a scratch heydb_* database.
 			assert.deepEqual(
-				all.databases.map((d) => d.name),
+				all.databases.map((d) => d.name).filter((name) => !name.startsWith("heydb_")),
 				["crm", "secret", "shop"],
 			);
 		});
