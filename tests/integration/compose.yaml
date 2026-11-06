@@ -1,0 +1,32 @@
+# Real database servers for the integration tests (tests/integration/*.integration.ts).
+#   docker compose -f tests/integration/compose.yaml up -d --wait
+#   node --run test:integration
+#   docker compose -f tests/integration/compose.yaml down
+# Data lives in tmpfs: every `up` after a `down` starts from legacy.sql again.
+# Test-only credentials; never reuse them anywhere else.
+name: heydb-it
+
+services:
+  mysql80:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: heydb-test
+    ports: ["127.0.0.1:33080:3306"]
+    tmpfs: [/var/lib/mysql]
+    volumes: ["./fixtures/legacy.sql:/docker-entrypoint-initdb.d/legacy.sql:ro"]
+    healthcheck:
+      test: ["CMD", "mysql", "-uheydb_reader", "-preader-pass", "-h127.0.0.1", "-e", "SELECT 1 FROM shop.orders LIMIT 1"]
+      interval: 2s
+      retries: 60
+
+  mariadb106:
+    image: mariadb:10.6
+    environment:
+      MARIADB_ROOT_PASSWORD: heydb-test
+    ports: ["127.0.0.1:33106:3306"]
+    tmpfs: [/var/lib/mysql]
+    volumes: ["./fixtures/legacy.sql:/docker-entrypoint-initdb.d/legacy.sql:ro"]
+    healthcheck:
+      test: ["CMD", "mysql", "-uheydb_reader", "-preader-pass", "-h127.0.0.1", "-e", "SELECT 1 FROM shop.orders LIMIT 1"]
+      interval: 2s
+      retries: 60
