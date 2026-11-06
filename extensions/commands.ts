@@ -5,6 +5,7 @@ import type { ConnectionConfig } from "../lib/config/types.ts";
 import { validateConnection } from "../lib/config/validate.ts";
 import type { Snapshot } from "../lib/model/snapshot.ts";
 import { renderChanges, renderStatus } from "../lib/render/markdown.ts";
+import { toConnectionName } from "../lib/store/guards.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
 import { initProject } from "../lib/usecases/init.ts";
 import {
@@ -157,7 +158,18 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 	}
 
 	attempt(ctx, () => {
-		const connectionName = name.trim() === "" ? "local" : name.trim();
+		const typed = name.trim() === "" ? "local" : name.trim();
+		const connectionName = toConnectionName(typed);
+		if (connectionName === null) {
+			return ctx.ui.notify(
+				`"${typed}" has no letters or digits to build a connection name from; use lowercase letters, digits, "-" or "_".`,
+				"error",
+			);
+		}
+		const renamed =
+			connectionName === typed
+				? ""
+				: `Connection names are lowercase letters, digits, "-" and "_", so "${typed}" became "${connectionName}".\n`;
 		const answers = { engine, host, port: port.trim() === "" ? defaults.port : port, user, databases };
 		const built = buildConnection(connectionName, answers);
 		const entry = postgres ? validateConnection({ ...built, schemas: list(schemas) }, connectionName) : built;
@@ -165,6 +177,7 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 		const variable = entry.password.slice("env:".length);
 		ctx.ui.notify(
 			`Saved connection "${connectionName}" (${describe(entry)})${isDefault ? " as the default" : ""}.\n` +
+				renamed +
 				`heydb never stores passwords: set ${variable} in your shell or in .heydb/.env (ignored by git), ` +
 				`then run /heydb:sync ${connectionName}.`,
 			"info",

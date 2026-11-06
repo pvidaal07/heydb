@@ -135,6 +135,21 @@ describe("/heydb:connect", () => {
 		);
 	});
 
+	test("turns a typed name like Eagle into a valid one and says so", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const ctx = fakeContext(root, { answers: ["Eagle", "mysql", "db.internal", "", "reader", ""] });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.ok(loadConfig(root).connections.eagle, "saved as eagle");
+		assert.equal(
+			ctx.notifications[0]?.message,
+			'Saved connection "eagle" (mysql reader@db.internal:3306, all databases).\n' +
+				'Connection names are lowercase letters, digits, "-" and "_", so "Eagle" became "eagle".\n' +
+				"heydb never stores passwords: set HEYDB_EAGLE_PASSWORD in your shell or in .heydb/.env (ignored by git), " +
+				"then run /heydb:sync eagle.",
+		);
+	});
+
 	test("PostgreSQL: default port 5432, one database and optional schemas", async () => {
 		const pi = loadHeydb();
 		const root = tempDir();

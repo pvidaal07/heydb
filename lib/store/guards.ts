@@ -25,6 +25,27 @@ export function assertConnectionName(name: string): void {
 }
 
 /**
+ * Turns what a person typed ("Eagle", "Prod EU", "Producción") into a name
+ * assertConnectionName accepts ("eagle", "prod-eu", "produccion"), so the
+ * rule protects the files without getting in the user's way. Returns null
+ * when nothing usable is left.
+ */
+export function toConnectionName(input: string): string | null {
+	let name = input
+		.normalize("NFD")
+		.replace(/\p{M}/gu, "") // accents: "ó" → "o"
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-") // spaces, dots and anything else become a dash
+		.replace(/-{2,}/g, "-")
+		.replace(/^[-_]+|[-_]+$/g, "")
+		.slice(0, 64)
+		.replace(/[-_]+$/, "");
+	if (name === "") return null;
+	if (WINDOWS_RESERVED.test(name)) name = `${name}-db`;
+	return name;
+}
+
+/**
  * .heydb/ is committed, and git can commit symbolic links. A link named .heydb
  * or .heydb/<entry> (a subdirectory such as "snapshots", or a file such as
  * ".env") pointing elsewhere would make heydb read or overwrite files outside
