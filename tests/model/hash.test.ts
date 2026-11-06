@@ -49,6 +49,15 @@ describe("schemaHash", () => {
 		assert.notEqual(schemaHash(snapshot([a])), schemaHash(snapshot([b])));
 	});
 
+	test("changes when a view definition changes", () => {
+		const view = (definition: string) =>
+			ordersTable({ kind: "view", storageEngine: null, rowEstimate: null, viewDefinition: definition });
+		assert.notEqual(
+			schemaHash(snapshot([view("select `id` from `shop`.`orders`")])),
+			schemaHash(snapshot([view("select `id`,`total` from `shop`.`orders`")])),
+		);
+	});
+
 	test("changes when a table comment changes", () => {
 		assert.notEqual(
 			schemaHash(snapshot([ordersTable()])),

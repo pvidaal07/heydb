@@ -56,6 +56,12 @@ for (const target of targets) {
 			);
 		});
 
+		test("reads the SQL definition of views, and none for tables", () => {
+			assert.match(table(snapshot, "shop", "paid_orders").viewDefinition ?? "", /`orders`/);
+			assert.match(table(snapshot, "crm", "active_customers").viewDefinition ?? "", /`customers`/);
+			assert.equal(table(snapshot, "shop", "orders").viewDefinition, null);
+		});
+
 		test("keeps the primary key in key order, not column order", () => {
 			assert.deepEqual(table(snapshot, "shop", "order_lines").primaryKey, ["line_no", "order_id"]);
 		});
@@ -147,9 +153,12 @@ for (const target of targets) {
 					"routines_hidden:shop",
 					"triggers_hidden:crm",
 					"triggers_hidden:shop",
+					"view_definition_hidden:crm.crm.active_customers",
 				],
 				"what the reader cannot see is reported, never silently left out",
 			);
+			assert.equal(table(reader, "crm", "active_customers").kind, "view", "the view itself is still listed");
+			assert.match(table(reader, "shop", "paid_orders").viewDefinition ?? "", /`orders`/, "SHOW VIEW on shop reveals it");
 		});
 
 		test("works on servers running with sql_mode ANSI_QUOTES, common in legacy setups", async () => {

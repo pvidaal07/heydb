@@ -55,6 +55,11 @@ export interface Table {
 	readonly indexes: readonly Index[];
 	readonly foreignKeys: readonly ForeignKey[];
 	readonly triggers: readonly Trigger[];
+	/**
+	 * The SELECT of a view as the engine prints it. null for tables, and null for a
+	 * view whose definition the user may not see (a warning says so).
+	 */
+	readonly viewDefinition: string | null;
 }
 
 export interface Column {

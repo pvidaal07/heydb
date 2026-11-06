@@ -1,3 +1,4 @@
+import { formatName } from "../../model/names.ts";
 import { sortSnapshot } from "../../model/order.ts";
 import type {
 	Column,
@@ -32,6 +33,7 @@ export interface MysqlCatalog {
 	readonly foreignKeyColumns: readonly ForeignKeyColumnRow[];
 	readonly triggers: readonly TriggerRow[];
 	readonly routines: readonly RoutineRow[];
+	readonly views: readonly ViewRow[];
 	/** The current user's own privileges, global (databaseName null) or per database. */
 	readonly privileges: readonly PrivilegeRow[];
 }
@@ -98,6 +100,13 @@ export interface RoutineRow {
 	readonly routineType: string;
 }
 
+export interface ViewRow {
+	readonly databaseName: string;
+	readonly tableName: string;
+	/** Empty (or null) when the user lacks SHOW VIEW on the view. */
+	readonly viewDefinition: string | null;
+}
+
 export interface PrivilegeRow {
 	readonly databaseName: string | null;
 	readonly privilege: string;
@@ -127,6 +136,7 @@ export function buildSnapshot(catalog: MysqlCatalog): Snapshot {
 	const triggersByTable = groupBy(catalog.triggers.filter(inCapturedDatabase), tableKey);
 	const tablesByDatabase = groupBy(catalog.tables.filter(inCapturedDatabase), (row) => row.databaseName);
 	const routinesByDatabase = groupBy(catalog.routines.filter(inCapturedDatabase), (row) => row.databaseName);
+	const definitionsByView = new Map(catalog.views.map((row) => [tableKey(row), row.viewDefinition]));
 
 	const databases: Database[] = [...captured].sort().map((name) => ({
 		name,
@@ -141,6 +151,7 @@ export function buildSnapshot(catalog: MysqlCatalog): Snapshot {
 						indexesByTable.get(key) ?? [],
 						foreignKeysByTable.get(key) ?? [],
 						triggersByTable.get(key) ?? [],
+						definitionsByView.get(key) ?? null,
 						isMariaDb,
 					);
 				}),
@@ -159,6 +170,7 @@ export function buildSnapshot(catalog: MysqlCatalog): Snapshot {
 		warnings: [
 			...missingDatabaseWarnings(catalog.requestedDatabases, captured),
 			...hiddenObjectWarnings([...captured], catalog.privileges),
+			...hiddenViewDefinitionWarnings(databases),
 		],
 	});
 }
@@ -169,6 +181,7 @@ function buildTable(
 	indexRows: readonly IndexColumnRow[],
 	foreignKeyRows: readonly ForeignKeyColumnRow[],
 	triggerRows: readonly TriggerRow[],
+	viewDefinition: string | null,
 	isMariaDb: boolean,
 ): Table {
 	const isView = row.tableType === "VIEW";
@@ -185,6 +198,8 @@ function buildTable(
 		indexes: buildIndexes(indexRows.filter((r) => r.indexName !== "PRIMARY")),
 		foreignKeys: buildForeignKeys(foreignKeyRows),
 		triggers: buildTriggers(triggerRows),
+		// An empty definition is not an empty SELECT: the server hid it.
+		viewDefinition: isView && viewDefinition ? viewDefinition : null,
 	};
 }
 
@@ -300,6 +315,22 @@ function hiddenObjectWarnings(databases: readonly string[], privileges: readonly
 		}
 	}
 	return warnings;
+}
+
+// Without SHOW VIEW on a view, INFORMATION_SCHEMA.VIEWS still lists it but with
+// an empty definition, so the warning is per view and needs no privilege check.
+function hiddenViewDefinitionWarnings(databases: readonly Database[]): Warning[] {
+	return databases.flatMap((database) =>
+		database.schemas.flatMap((schema) =>
+			schema.tables
+				.filter((table) => table.kind === "view" && table.viewDefinition === null)
+				.map((view) => ({
+					code: "view_definition_hidden",
+					message: `definition of view "${database.name}.${view.name}" is only visible with the SHOW VIEW privilege`,
+					target: formatName({ database: database.name, schema: schema.name, table: view.name }),
+				})),
+		),
+	);
 }
 
 // Database-level grants may use LIKE wildcards: "_" is any character, "%" any

@@ -77,6 +77,9 @@ CREATE TABLE shop.`v1.old_orders` (
 CREATE VIEW shop.paid_orders AS
 	SELECT id, customer_id, total FROM shop.orders WHERE status = 'paid';
 
+-- The reader has SELECT but not SHOW VIEW on crm: it sees this view, not its SQL.
+CREATE VIEW crm.active_customers AS SELECT id, email FROM crm.customers WHERE status = 1;
+
 CREATE TRIGGER shop.trg_orders_bi BEFORE INSERT ON shop.orders
 	FOR EACH ROW SET NEW.total = GREATEST(NEW.total, 0);
 

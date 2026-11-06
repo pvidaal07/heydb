@@ -49,6 +49,7 @@ function canonicalTable(table: Table) {
 			timing: trigger.timing,
 			events: [...trigger.events],
 		})),
+		viewDefinition: table.viewDefinition,
 	};
 }
 

@@ -40,6 +40,7 @@ export function ordersTable(overrides: Partial<Table> = {}): Table {
 			},
 		],
 		triggers: [],
+		viewDefinition: null,
 		...overrides,
 	};
 }

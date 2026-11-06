@@ -23,6 +23,7 @@ function catalog(overrides: Partial<MysqlCatalog> = {}): MysqlCatalog {
 		foreignKeyColumns: [],
 		triggers: [],
 		routines: [],
+		views: [],
 		privileges: [
 			{ databaseName: null, privilege: "TRIGGER" },
 			{ databaseName: null, privilege: "SHOW_ROUTINE" },
@@ -112,6 +113,54 @@ describe("buildSnapshot: tables and columns", () => {
 		assert.equal(view.storageEngine, null);
 		assert.equal(view.rowEstimate, null);
 		assert.equal(view.comment, "", 'MySQL reports the comment "VIEW" for every view; it carries no meaning');
+	});
+
+	test("maps the SQL definition of a view", () => {
+		const snapshot = buildSnapshot(
+			catalog({
+				tables: [{ databaseName: "shop", tableName: "paid", tableType: "VIEW", storageEngine: null, tableRows: null, tableComment: "VIEW" }],
+				views: [{ databaseName: "shop", tableName: "paid", viewDefinition: "select `shop`.`orders`.`id` AS `id` from `shop`.`orders`" }],
+				columns: [],
+				indexColumns: [],
+			}),
+		);
+		assert.equal(onlyTable(snapshot, "shop", "paid").viewDefinition, "select `shop`.`orders`.`id` AS `id` from `shop`.`orders`");
+		assert.deepEqual(snapshot.warnings, []);
+	});
+
+	test("gives tables no view definition", () => {
+		assert.equal(onlyTable(buildSnapshot(catalog())).viewDefinition, null);
+	});
+
+	test("warns per view when its definition is hidden from the user", () => {
+		const snapshot = buildSnapshot(
+			catalog({
+				databases: ["crm"],
+				tables: [
+					{ databaseName: "crm", tableName: "active", tableType: "VIEW", storageEngine: null, tableRows: null, tableComment: "VIEW" },
+					{ databaseName: "crm", tableName: "v1.unlisted", tableType: "VIEW", storageEngine: null, tableRows: null, tableComment: "VIEW" },
+				],
+				// MySQL and MariaDB return an empty definition without SHOW VIEW; a
+				// missing row is treated the same way, never as an empty SELECT.
+				views: [{ databaseName: "crm", tableName: "active", viewDefinition: "" }],
+				columns: [],
+				indexColumns: [],
+			}),
+		);
+		assert.equal(onlyTable(snapshot, "crm", "active").viewDefinition, null);
+		assert.equal(onlyTable(snapshot, "crm", "v1.unlisted").viewDefinition, null);
+		assert.deepEqual(snapshot.warnings, [
+			{
+				code: "view_definition_hidden",
+				message: 'definition of view "crm.v1.unlisted" is only visible with the SHOW VIEW privilege',
+				target: 'crm.crm."v1.unlisted"',
+			},
+			{
+				code: "view_definition_hidden",
+				message: 'definition of view "crm.active" is only visible with the SHOW VIEW privilege',
+				target: "crm.crm.active",
+			},
+		]);
 	});
 
 	test("treats MariaDB system-versioned tables as tables", () => {

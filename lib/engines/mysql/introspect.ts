@@ -10,6 +10,7 @@ import {
 	type RoutineRow,
 	type TableRow,
 	type TriggerRow,
+	type ViewRow,
 } from "./catalog.ts";
 
 // Reads the structure of a MySQL or MariaDB server through INFORMATION_SCHEMA.
@@ -49,7 +50,16 @@ export async function introspectMysql(options: MysqlConnectionOptions): Promise<
 		const visible = await visibleDatabases(connection);
 		const databases = requested === null ? visible : visible.filter((name) => requested.includes(name));
 
-		const empty = { tables: [], columns: [], indexColumns: [], foreignKeyColumns: [], triggers: [], routines: [], privileges: [] };
+		const empty = {
+			tables: [],
+			columns: [],
+			indexColumns: [],
+			foreignKeyColumns: [],
+			triggers: [],
+			routines: [],
+			views: [],
+			privileges: [],
+		};
 		const rows = databases.length === 0 ? empty : await readCatalog(connection, databases);
 
 		return buildSnapshot({ version, capturedAt, requestedDatabases: requested, databases, ...rows });
@@ -117,7 +127,7 @@ async function readCatalog(connection: Connection, databases: readonly string[])
 	};
 
 	// One connection runs these one after another; Promise.all just waits for all of them.
-	const [tables, columns, indexColumns, foreignKeyColumns, triggers, routines, privileges] = await Promise.all([
+	const [tables, columns, indexColumns, foreignKeyColumns, triggers, routines, views, privileges] = await Promise.all([
 		select<TableRow>(`
 			SELECT TABLE_SCHEMA AS databaseName, TABLE_NAME AS tableName, TABLE_TYPE AS tableType,
 			       ENGINE AS storageEngine, TABLE_ROWS AS tableRows, TABLE_COMMENT AS tableComment
@@ -157,6 +167,10 @@ async function readCatalog(connection: Connection, databases: readonly string[])
 			SELECT ROUTINE_SCHEMA AS databaseName, ROUTINE_NAME AS routineName, ROUTINE_TYPE AS routineType
 			FROM INFORMATION_SCHEMA.ROUTINES
 			WHERE ROUTINE_SCHEMA IN (?)`),
+		select<ViewRow>(`
+			SELECT TABLE_SCHEMA AS databaseName, TABLE_NAME AS tableName, VIEW_DEFINITION AS viewDefinition
+			FROM INFORMATION_SCHEMA.VIEWS
+			WHERE TABLE_SCHEMA IN (?)`),
 		// For a non-admin user both views list only that user's own privileges.
 		select<PrivilegeRow>(`
 			SELECT NULL AS databaseName, PRIVILEGE_TYPE AS privilege
@@ -168,5 +182,5 @@ async function readCatalog(connection: Connection, databases: readonly string[])
 			WHERE GRANTEE = ${CURRENT_GRANTEE} AND TABLE_SCHEMA IN (?)`),
 	]);
 
-	return { tables, columns, indexColumns, foreignKeyColumns, triggers, routines, privileges };
+	return { tables, columns, indexColumns, foreignKeyColumns, triggers, routines, views, privileges };
 }
