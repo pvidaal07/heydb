@@ -14,6 +14,7 @@ import type {
 	RegisteredCommand,
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 
 import type { HeydbDeps } from "../../extensions/deps.ts";
 import { registerHeydb } from "../../extensions/heydb.ts";
@@ -21,6 +22,12 @@ import type { Snapshot } from "../../lib/model/snapshot.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
 
 type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
+type CustomFactory = (
+	tui: { requestRender(): void },
+	theme: { fg(color: string, text: string): string },
+	keybindings: KeybindingsManager,
+	done: (value: unknown) => void,
+) => { render(width: number): string[]; handleInput?(data: string): void } | Promise<{ render(width: number): string[]; handleInput?(data: string): void }>;
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
 export interface SentMessage {
@@ -57,24 +64,37 @@ export interface Notification {
 }
 
 export interface Dialog {
-	readonly kind: "input" | "select" | "confirm";
+	readonly kind: "input" | "select" | "confirm" | "secret";
 	readonly title: string;
 	readonly hint: string;
 }
+
+type Mode = "tui" | "rpc" | "print";
 
 /**
  * A context whose dialogs answer from `answers`, in order. `undefined` plays
  * a person pressing Escape. Every dialog is recorded, so a test can check
  * what was (and was not) asked.
+ *
+ * `mode` is Pi's run mode: in "tui" (the default with a UI) custom components
+ * such as the masked password input are typed into key by key with Pi's real
+ * key table, and every frame they draw is kept in `screens`. In "rpc" custom()
+ * returns undefined, as Pi does there.
  */
-export function fakeContext(cwd: string, { hasUI = true, answers = [] as (string | undefined)[] } = {}) {
+export function fakeContext(
+	cwd: string,
+	{ hasUI = true, mode = (hasUI ? "tui" : "print") as Mode, answers = [] as (string | undefined)[] } = {},
+) {
 	const notifications: Notification[] = [];
 	const dialogs: Dialog[] = [];
+	const screens: string[] = [];
 	const queue = [...answers];
 	const next = () => queue.shift();
+	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
 	const ctx = {
 		cwd,
 		hasUI,
+		mode,
 		ui: {
 			notify(message: string, level = "info") {
 				notifications.push({ message, level });
@@ -91,6 +111,30 @@ export function fakeContext(cwd: string, { hasUI = true, answers = [] as (string
 				dialogs.push({ kind: "confirm", title, hint: message });
 				return next() === "yes";
 			},
+			async custom(factory: CustomFactory) {
+				if (mode !== "tui") return undefined;
+				let result: unknown;
+				let finished = false;
+				const component = await factory(
+					{ requestRender: () => screens.push(component.render(80).join("\n")) },
+					{ fg: (_color: string, text: string) => text },
+					keybindings,
+					(value) => {
+						result = value;
+						finished = true;
+					},
+				);
+				// Wide enough that the title stays on one line, as in the dialogs above.
+				const [title = "", ...rest] = component.render(400);
+				screens.push([title, ...rest].join("\n"));
+				dialogs.push({ kind: "secret", title, hint: rest.join("\n") });
+				const answer = next();
+				for (const data of answer === undefined ? ["\x1b"] : [...answer, "\r"]) {
+					if (finished) break;
+					component.handleInput?.(data);
+				}
+				return result;
+			},
 		},
 	};
 	return {
@@ -98,6 +142,7 @@ export function fakeContext(cwd: string, { hasUI = true, answers = [] as (string
 		tool: ctx as unknown as ExtensionToolContext,
 		notifications,
 		dialogs,
+		screens,
 	};
 }
 
