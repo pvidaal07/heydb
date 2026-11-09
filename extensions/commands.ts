@@ -11,6 +11,7 @@ import { validateConnection } from "../lib/config/validate.ts";
 import type { Snapshot } from "../lib/model/snapshot.ts";
 import { renderChanges, renderStatus } from "../lib/render/markdown.ts";
 import { toConnectionName } from "../lib/store/guards.ts";
+import { loadKnowledge } from "../lib/store/knowledge.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
 import { type SchemaUsage, findSchemaUsage } from "../lib/usecases/code-scan.ts";
 import { initProject } from "../lib/usecases/init.ts";
@@ -402,7 +403,7 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 		const facts = [result.written ? "snapshot written" : "unchanged", ...summary(live)];
 		if (result.written) facts.push(count(result.changes.length, "change"));
 		// A failing scan must not turn a good sync into an error: it only loses the offer.
-		const usage = await scanCode(ctx, opened.name, opened.root, live).catch(() => null);
+		const usage = await scanCode(ctx, opened.name, opened.root, opened.root, live).catch(() => null);
 		const noCode = usage !== null && usage.matches.length === 0 ? `\n${NO_CODE}` : "";
 		ctx.ui.notify(`heydb sync ${opened.name}: ${facts.join(" · ")}.${noCode}`, "info");
 		// The changes also go into the session, so the model knows the schema it reads just moved.
@@ -423,7 +424,7 @@ const NO_CODE =
 	"No code using these tables was found here; heydb will learn from your conversations (the agent annotates what you explain).";
 
 /** Another folder to read instead of the project's: its real path, and the path as typed (to repeat it). */
-interface CodeFolder {
+export interface CodeFolder {
 	readonly root: string;
 	readonly typed: string;
 }
@@ -441,7 +442,7 @@ async function learnCode(sendMessage: SendMessage, args: string, ctx: ExtensionC
 		const [name, path] = words.length === 1 && isFolderNotConnection(ctx.cwd, words[0] as string) ? [undefined, words[0]] : words;
 		const opened = openSnapshot(ctx.cwd, name);
 		const folder = path === undefined ? undefined : codeFolder(opened.root, path);
-		const usage = await scanCode(ctx, opened.name, folder?.root ?? opened.root, opened.snapshot);
+		const usage = await scanCode(ctx, opened.name, opened.root, folder?.root ?? opened.root, opened.snapshot);
 		if (usage.matches.length === 0) return ctx.ui.notify(`heydb learn-code ${opened.name}: ${NO_CODE}`, "info");
 		if (!ctx.hasUI) {
 			return ctx.ui.notify("/heydb:learn-code needs an interactive session to ask before the agent spends tokens.", "error");
@@ -516,12 +517,15 @@ async function offerCode(
 }
 
 /**
- * The agent's instructions: which files, and what is worth a note. Bounded by
- * the scan's top 30 tables. The rules are in English, so the language rule
- * comes first: the person may well be writing in Spanish.
+ * The agent's instructions: which tables, in the order a note helps most,
+ * and what is worth a note. Bounded by the scan's top 30 tables. Notes are
+ * what heydb_search finds a cryptic table by, so they must say what the table
+ * is in the words people search with. The rules are in English, so the
+ * language rule comes first: the person may well be writing in Spanish.
  */
-function learnMessage(connection: string, usage: SchemaUsage, folder?: CodeFolder): string {
-	const example = usage.matches[0]?.files[0] ?? "src/Models/Order.php";
+export function learnMessage(connection: string, usage: SchemaUsage, folder?: CodeFolder): string {
+	const example = usage.matches.find((match) => match.files.length > 0)?.files[0] ?? "src/Models/Order.php";
+	const doc = usage.matches.find((match) => match.docs.length > 0)?.docs[0];
 	const source =
 		folder === undefined
 			? "this project's code."
@@ -529,20 +533,33 @@ function learnMessage(connection: string, usage: SchemaUsage, folder?: CodeFolde
 	return [
 		`heydb: the user agreed that you learn about the database of connection "${connection}" from ${source}`,
 		"",
-		"Files that use its tables, most used first:",
-		...usage.matches.map((match) => `- ${match.table} (${count(match.hits, "use")}): ${match.files.join(", ")}`),
+		"Tables, the ones that most need a note first, with the code that uses them and the docs that define them:",
+		...usage.matches.map(tableLine),
 		"",
 		"Rules:",
 		"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
 			"keep table and column names as they are.",
-		"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.",
-		"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
+		"- Go down the list. For each table read heydb_table and its files (models, repositories, queries, docs); skip what its comment and notes already say.",
+		"- Save one heydb_annotate note per table: what it holds in business words, with the other words people use for it " +
+			'(synonyms, both languages when the team mixes them), like "Customer master (clientes, customers): one row per customer". ' +
+			"heydb_search finds tables by those words.",
+		"- Add valid values, enums and magic numbers with their meaning, units or soft-delete flags only when the code states them. " +
 			"Record joins the code makes without a foreign key with heydb_relate.",
-		`- End every note with its source, like "(code: ${example})".`,
-		"- Never invent or guess: what the code does not make clear is not saved.",
+		`- End every note with its source, like "(code: ${example})"${doc === undefined ? "" : ` or "(docs: ${doc})"`}.`,
+		"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.",
 		"- A few valuable notes beat many; stop after about 20.",
 		"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.",
 	].join("\n");
+}
+
+/** `- shop.orders (1 use, has a note): src/a.php; docs: docs/tables.md` */
+function tableLine(match: SchemaUsage["matches"][number]): string {
+	const facts = [
+		...(match.hits > 0 ? [count(match.hits, "use")] : []),
+		...(match.described === "nothing" ? [] : [`has a ${match.described}`]),
+	];
+	const evidence = [...(match.files.length > 0 ? [match.files.join(", ")] : []), ...(match.docs.length > 0 ? [`docs: ${match.docs.join(", ")}`] : [])];
+	return `- ${match.table}${facts.length > 0 ? ` (${facts.join(", ")})` : ""}: ${evidence.join("; ")}`;
 }
 
 async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -561,11 +578,16 @@ async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContex
 }
 
 /** Opens the connection named in `args` (or the default), captures its live schema and hands both to `work`. */
-/** Looks for code that uses the tables, showing progress: on a large legacy codebase it takes seconds. */
-async function scanCode(ctx: ExtensionCommandContext, connection: string, root: string, snapshot: Snapshot) {
+/**
+ * Looks for code that uses the tables, showing progress: on a large legacy
+ * codebase it takes seconds. The connection's notes come from the project,
+ * wherever the code lives: a table that has one comes last.
+ */
+async function scanCode(ctx: ExtensionCommandContext, connection: string, projectRoot: string, codeRoot: string, snapshot: Snapshot) {
+	const knowledge = loadKnowledge(projectRoot, connection);
 	const stop = showProgress(ctx, `heydb: ${connection} · looking for code that uses its tables…`);
 	try {
-		return await findSchemaUsage(root, snapshot);
+		return await findSchemaUsage(codeRoot, snapshot, { knowledge });
 	} finally {
 		stop();
 	}

@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { type CodeFiles, type ScanLimits, findSchemaUsage } from "../../lib/usecases/code-scan.ts";
+import type { Knowledge } from "../../lib/knowledge/types.ts";
+import { type CodeFiles, type ScanLimits, findSchemaUsage, isCrypticName } from "../../lib/usecases/code-scan.ts";
 import type { Table } from "../../lib/model/snapshot.ts";
 import { customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 
-function table(name: string): Table {
-	return { ...customersTable(), name };
+function table(name: string, overrides: Partial<Table> = {}): Table {
+	return { ...customersTable(), name, ...overrides };
 }
+
+/** What every match of an uncommented, unreferenced table found only in code carries besides its files. */
+const plain = { docs: [], described: "nothing", referenced: 0 } as const;
 
 // art holds the articles, cus the customers: legacy names the code explains.
 const erp = snapshot([
@@ -65,15 +69,17 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(usage, {
 			hasCode: true,
 			filesScanned: 4,
+			docsScanned: 1,
 			filesMatched: 3,
 			tablesMatched: 2,
 			matches: [
-				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2 },
-				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2 },
+				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
+				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
 			],
 			truncated: false,
 		});
-		assert.deepEqual(reads.sort(), ["src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/article.php"]);
+		// README.md is read as documentation; "art cus dln" only names the tables, so it is no evidence.
+		assert.deepEqual(reads.sort(), ["README.md", "src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/article.php"]);
 	});
 
 	test("never reads anything under .heydb, the secrets file included", async () => {
@@ -109,6 +115,7 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(await findSchemaUsage("/app", erp, { files: empty.files }), {
 			hasCode: false,
 			filesScanned: 0,
+			docsScanned: 2,
 			filesMatched: 0,
 			tablesMatched: 0,
 			matches: [],
@@ -158,7 +165,9 @@ describe("findSchemaUsage", () => {
 			files,
 			limits: { maxTables: 1 },
 		});
-		assert.deepEqual(usage.matches, [{ table: "shop.customers", name: "customers", files: ["src/app.sql"], hits: 1 }]);
+		assert.deepEqual(usage.matches, [
+			{ table: "shop.customers", name: "customers", files: ["src/app.sql"], hits: 1, cryptic: false, ...plain, referenced: 1 },
+		]);
 	});
 
 	test("keeps at most 5 files per table and the 30 most used tables", async () => {
@@ -177,6 +186,8 @@ describe("findSchemaUsage", () => {
 			name: "t34x",
 			files: ["src/t34x.sql", "src/extra0.sql", "src/extra1.sql", "src/extra2.sql", "src/extra3.sql"],
 			hits: 42,
+			cryptic: true,
+			...plain,
 		});
 		assert.equal(usage.matches.at(-1)?.name, "t05x");
 	});
@@ -192,9 +203,9 @@ describe("findSchemaUsage", () => {
 		});
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(usage.matches, [
-			{ table: "shop.art", name: "art", files: ["from.php", "into.py", "table.sql", "update.go"], hits: 4 },
-			{ table: "shop.cus", name: "cus", files: ["update.go", "join.sql"], hits: 3 },
-			{ table: "shop.dln", name: "dln", files: ["delete.ts", "join.sql", "table.sql"], hits: 3 },
+			{ table: "shop.art", name: "art", files: ["from.php", "into.py", "table.sql", "update.go"], hits: 4, cryptic: true, ...plain },
+			{ table: "shop.cus", name: "cus", files: ["update.go", "join.sql"], hits: 3, cryptic: true, ...plain },
+			{ table: "shop.dln", name: "dln", files: ["delete.ts", "join.sql", "table.sql"], hits: 3, cryptic: true, ...plain },
 		]);
 	});
 
@@ -277,6 +288,7 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(usage, {
 			hasCode: true,
 			filesScanned: 3,
+			docsScanned: 1,
 			filesMatched: 0,
 			tablesMatched: 0,
 			matches: [],
@@ -342,6 +354,94 @@ describe("findSchemaUsage", () => {
 				["sup", ["src/repo.ts"]],
 			].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
 		);
+	});
+
+	// Projects often document their tables in markdown or text: "`cst` = maestro de clientes",
+	// "| tda | Almacenes |". That is the best evidence of what a cryptic table is.
+	test("documentation that defines a table is evidence; a passing mention in prose is not", async () => {
+		const tables = snapshot(["cst", "tda", "dln", "art", "albaranes"].map((name) => table(name)));
+		const { files } = memoryFiles({
+			"docs/tablas.md": "# Tablas\n\n| Tabla | Descripción |\n|---|---|\n| tda | Almacenes |\n\n- `cst` = maestro de clientes\n",
+			"docs/notas.txt": "dln: líneas de albarán de venta\n**albaranes** – cabeceras de albarán\n",
+			"README.md": "Close dln and cst before the month ends. The art table is old; see albaranes: later.\nart\n",
+			"CHANGELOG.md": "- fix(art): export\n| 2 | tda was renamed |\n",
+			"src/app.php": "SELECT * FROM cst",
+		});
+		const usage = await findSchemaUsage("/app", tables, { files });
+		assert.equal(usage.hasCode, true);
+		assert.equal(usage.filesScanned, 1);
+		assert.equal(usage.docsScanned, 4);
+		assert.equal(usage.filesMatched, 3);
+		assert.deepEqual(
+			usage.matches.map((match) => [match.name, match.files, match.docs, match.hits]),
+			[
+				["cst", ["src/app.php"], ["docs/tablas.md"], 1],
+				["dln", [], ["docs/notas.txt"], 0],
+				["tda", [], ["docs/tablas.md"], 0],
+				["albaranes", [], ["docs/notas.txt"], 0],
+			],
+		);
+	});
+
+	test("documentation is read within the same file, byte and size limits", async () => {
+		const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`docs/t${i}.md`, "- `art`: articles"]));
+		const { files, reads } = memoryFiles({ ...many, "docs/huge.md": `${"x".repeat(100)}\n- \`cus\`: customers` });
+		const usage = await findSchemaUsage("/app", erp, { files, limits: { maxFiles: 3, maxFileBytes: 50 } });
+		assert.deepEqual(reads, ["docs/t0.md", "docs/t1.md"]);
+		assert.equal(usage.truncated, true);
+		assert.deepEqual(usage.matches.map((match) => [match.name, match.docs]), [["art", ["docs/t0.md", "docs/t1.md"]]]);
+	});
+
+	// The agent has a budget of about 20 notes: spend it where a note changes what search finds.
+	test("orders by need: an uncommented cryptic much-referenced table first, a commented one later, a noted one last", async () => {
+		const pointsTo = (target: string, i: number) => ({ ...ordersTable().foreignKeys[0]!, name: `fk_${i}`, columns: ["x"], references: { database: "shop", schema: "shop", table: target, columns: ["id"] } });
+		const tables = snapshot([
+			table("cst"),
+			table("warehouse"),
+			table("customers_master", { comment: "Customers: one row per customer" }),
+			table("orders_history"),
+			table("sales_lines", { foreignKeys: [pointsTo("cst", 1)] }),
+			table("payments_log", { foreignKeys: [pointsTo("cst", 2), pointsTo("orders_history", 3)] }),
+		]);
+		const knowledge: Knowledge = {
+			formatVersion: 1,
+			annotations: [
+				{ id: "1", target: "shop.shop.orders_history", text: "Closed orders (pedidos)", author: "Ana", createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z" },
+			],
+			relationships: [],
+		};
+		const { files } = memoryFiles({
+			"src/a.sql": "SELECT * FROM cst;\nSELECT * FROM warehouse;\n".repeat(2),
+			"src/b.sql": "SELECT * FROM customers_master;\n".repeat(10),
+			"src/c.sql": "SELECT * FROM orders_history;\n".repeat(20),
+		});
+		const usage = await findSchemaUsage("/app", tables, { files, knowledge });
+		assert.deepEqual(
+			usage.matches.map((match) => [match.name, match.hits, match.described, match.cryptic, match.referenced]),
+			[
+				["cst", 2, "nothing", true, 2],
+				["warehouse", 2, "nothing", false, 0],
+				["customers_master", 10, "comment", false, 0],
+				["orders_history", 20, "note", false, 1],
+			],
+		);
+		// Among tables that need a note alike, more code using it comes first.
+		const more = memoryFiles({ "src/a.sql": "SELECT * FROM warehouse;\n".repeat(4), "src/b.sql": "SELECT * FROM orders_history;" });
+		const plainOrder = await findSchemaUsage("/app", tables, { files: more.files });
+		assert.deepEqual(plainOrder.matches.map((match) => match.name), ["warehouse", "orders_history"]);
+	});
+
+	test("a comment that only repeats the name is no description", async () => {
+		const { files } = memoryFiles({ "src/a.sql": "SELECT * FROM cst JOIN tda" });
+		const usage = await findSchemaUsage("/app", snapshot([table("cst", { comment: "cst" }), table("tda", { comment: "Almacenes" })]), { files });
+		assert.deepEqual(usage.matches.map((match) => [match.name, match.described]), [["cst", "nothing"], ["tda", "comment"]]);
+	});
+
+	test("a cryptic name: 4 letters or fewer, a part without vowels, or mostly parts of 3 letters or fewer", () => {
+		for (const name of ["cst", "art", "tda", "fac_cab", "mvtos_stk", "tblcntr", "t00x", "CliPrv", "a_b_clientes"]) assert.ok(isCrypticName(name), name);
+		for (const name of ["customers", "warehouse", "asistencia_rec", "order_items", "CustomerOrders", "almacenes", "clientes_2024", "работники"]) {
+			assert.ok(!isCrypticName(name), name);
+		}
 	});
 
 });

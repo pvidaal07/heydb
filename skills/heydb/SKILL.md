@@ -44,8 +44,8 @@ When the conversation or the code teaches you something the schema does not say,
 - `heydb_relate` with `to_connection` when the referenced table is in another connection of the project (`crm.clientes.cod_erp → erp`'s `cus.cod`). Call it from the referencing connection; `heydb_table` on the other side shows it too, prefixed with the connection.
 - A name without a dot is a table: `heydb_annotate` with `art` notes the table even if some column is also called `art`; write `pos.art` for the column.
 - If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
-- End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
-- After `/heydb:sync` (or `/heydb:learn-code`) the user may ask you to read the project's code: follow the rules in that message and stop after about 20 notes.
+- End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(docs: docs/tables.md)` when the project's docs say it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
+- After `/heydb:sync` (or `/heydb:learn-code`) the user may ask you to read the project's code and docs. That message lists the tables that most need a note first: go down it, one note per table in business words and synonyms as above, follow its rules and stop after about 20 notes. What the code or docs do not make explicit is a question for the user, not a note.
 - Read the existing notes first (`heydb_table`). Fix a wrong note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that contradicts the first.
 
 Good notes are short, factual and verifiable:
