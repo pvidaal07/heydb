@@ -392,6 +392,84 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(usage.matches.map((match) => [match.name, match.docs]), [["art", ["docs/t0.md", "docs/t1.md"]]]);
 	});
 
+	// A legacy project whose code folders come before docs/ in folder order: walking in that
+	// order, the code used up the time and byte limits and the module docs were never read.
+	const legacyCode = (count: number, folder = "a-legacy") =>
+		Object.fromEntries(
+			Array.from({ length: count }, (_, i) => [`${folder}/m${String(i).padStart(2, "0")}.prg`, "SELECT * FROM art;".padEnd(100, " ")]),
+		);
+	const moduleDocs = (count: number) =>
+		Object.fromEntries(
+			Array.from({ length: count }, (_, i) => [`docs/mod${String(i).padStart(2, "0")}.md`, "- `cus`: customers".padEnd(100, " ")]),
+		);
+
+	test("reads documentation before code, so code that comes first in folder order cannot use up the byte or time limit", async () => {
+		const contents = { ...legacyCode(20), ...moduleDocs(2) };
+		const bytes = memoryFiles(contents);
+		const byBytes = await findSchemaUsage("/app", erp, { files: bytes.files, limits: { maxBytes: 1000 } });
+		assert.deepEqual(byBytes.matches.map((match) => [match.name, match.docs]), [
+			["art", []],
+			["cus", ["docs/mod00.md", "docs/mod01.md"]],
+		]);
+		// The docs took 200 bytes; the code gets the rest of the limit.
+		assert.deepEqual([byBytes.docsScanned, byBytes.filesScanned, byBytes.truncated], [2, 8, true]);
+		assert.deepEqual(bytes.reads.slice(0, 2), ["docs/mod00.md", "docs/mod01.md"]);
+
+		let clock = 0;
+		const timed = memoryFiles(contents);
+		const byTime = await findSchemaUsage("/app", erp, {
+			files: { ...timed.files, read: async (path) => ((clock += 100), timed.files.read(path)) },
+			now: () => clock,
+			limits: { maxMillis: 1000 },
+		});
+		assert.deepEqual(byTime.matches.find((match) => match.name === "cus")?.docs, ["docs/mod00.md", "docs/mod01.md"]);
+		assert.deepEqual([byTime.docsScanned, byTime.filesScanned, byTime.truncated], [2, 9, true]);
+	});
+
+	test("documentation gets at most a quarter of each limit while code waits, so huge docs never starve the code", async () => {
+		const contents = { ...legacyCode(5, "src"), ...moduleDocs(40) };
+		const bytes = memoryFiles(contents);
+		const byBytes = await findSchemaUsage("/app", erp, { files: bytes.files, limits: { maxBytes: 1000 } });
+		assert.deepEqual([byBytes.docsScanned, byBytes.filesScanned, byBytes.truncated], [2, 5, true]);
+		assert.deepEqual(byBytes.matches.map((match) => [match.name, match.files.length, match.docs.length]), [
+			["art", 5, 0],
+			["cus", 0, 2],
+		]);
+
+		let clock = 0;
+		const timed = memoryFiles(contents);
+		const byTime = await findSchemaUsage("/app", erp, {
+			files: { ...timed.files, read: async (path) => ((clock += 100), timed.files.read(path)) },
+			now: () => clock,
+			limits: { maxMillis: 1000 },
+		});
+		// Docs are read at 0, 100 and 200 ms; at 300 ms their quarter is spent.
+		assert.deepEqual([byTime.docsScanned, byTime.filesScanned, byTime.truncated], [3, 5, true]);
+
+		const counted = memoryFiles({ ...legacyCode(10, "src"), ...moduleDocs(10) });
+		const byFiles = await findSchemaUsage("/app", erp, { files: counted.files, limits: { maxFiles: 8 } });
+		assert.deepEqual([byFiles.docsScanned, byFiles.filesScanned, byFiles.truncated], [2, 6, true]);
+	});
+
+	test("documentation and code together stay within the file, byte and time limits", async () => {
+		const contents: Record<string, string> = { ...legacyCode(30), ...moduleDocs(30) };
+		const sizes = (reads: string[]) => reads.reduce((sum, path) => sum + Buffer.byteLength(contents[path] ?? ""), 0);
+		const bytes = memoryFiles(contents);
+		await findSchemaUsage("/app", erp, { files: bytes.files, limits: { maxBytes: 1050 } });
+		assert.equal(sizes(bytes.reads), 1000);
+		const counted = memoryFiles(contents);
+		await findSchemaUsage("/app", erp, { files: counted.files, limits: { maxFiles: 9 } });
+		assert.equal(counted.reads.length, 9);
+		let clock = 0;
+		const timed = memoryFiles(contents);
+		await findSchemaUsage("/app", erp, {
+			files: { ...timed.files, read: async (path) => ((clock += 100), timed.files.read(path)) },
+			now: () => clock,
+			limits: { maxMillis: 1000 },
+		});
+		assert.ok(clock <= 1100, `read until ${clock} ms`);
+	});
+
 	// The agent has a budget of about 20 notes: spend it where a note changes what search finds.
 	test("orders by need: an uncommented cryptic much-referenced table first, a commented one later, a noted one last", async () => {
 		const pointsTo = (target: string, i: number) => ({ ...ordersTable().foreignKeys[0]!, name: `fk_${i}`, columns: ["x"], references: { database: "shop", schema: "shop", table: target, columns: ["id"] } });

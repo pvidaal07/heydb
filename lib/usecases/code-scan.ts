@@ -22,7 +22,9 @@ import { HEYDB_DIR } from "../store/project.ts";
 //
 // Documentation (markdown, text) counts too, but only where it defines a
 // table: "`cst` = maestro de clientes", "| tda | Almacenes |". A passing
-// mention in prose does not.
+// mention in prose does not. It is read before the code, with at most a
+// quarter of each limit while code waits, so code early in the walk cannot
+// use up the limits before the docs are reached, and huge docs cannot either.
 //
 // The agent has a budget of about 20 notes, so the tables come in the order a
 // note helps most: first those with no comment and no note, then those with a
@@ -55,6 +57,8 @@ export const DEFAULT_SCAN_LIMITS: ScanLimits = {
 const MAX_MATCHES = 30;
 const MAX_FILES_PER_TABLE = 5;
 const MAX_DOCS_PER_TABLE = 3;
+/** Documentation is read first, with at most this share of each limit while code waits to be read. */
+const DOCS_SHARE = 0.25;
 /** Two-letter names ("id", "ab") are everywhere in code: they would only add noise. */
 const MIN_NAME_LENGTH = 3;
 
@@ -181,11 +185,9 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	const files = options.files ?? realFiles(projectRoot);
 	const now = options.now ?? (() => performance.now());
 	const deadline = now() + limits.maxMillis;
-	const outOfTime = () => now() > deadline;
 
 	const names = tableNames(snapshot, options.knowledge ?? EMPTY_KNOWLEDGE, limits.maxTables);
-	const listed = await listSources(files, limits.maxFiles, outOfTime);
-	let truncated = listed.truncated;
+	const listed = await listSources(files, limits.maxFiles, () => now() > deadline);
 
 	// lowercased table name → file → hits, in code and in documentation
 	const found = new Map<string, Map<string, number>>();
@@ -193,40 +195,56 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	let filesScanned = 0;
 	let docsScanned = 0;
 	let filesMatched = 0;
-	let bytes = 0;
-	for (const path of listed.paths) {
-		if (outOfTime()) {
-			truncated = true;
-			break;
+
+	/** Reads `paths` in order until one of the budgets runs out; `stopped` when files remained unread. */
+	async function readPass(paths: readonly string[], budget: { files: number; bytes: number; deadline: number }, doc: boolean) {
+		let considered = 0;
+		let bytes = 0;
+		for (const path of paths) {
+			if (considered >= budget.files || now() > budget.deadline) return { considered, bytes, stopped: true };
+			considered += 1;
+			const size = await files.size(path);
+			if (size === null || size > limits.maxFileBytes) continue;
+			if (bytes + size > budget.bytes) return { considered, bytes, stopped: true };
+			bytes += size;
+			let text: string;
+			try {
+				text = await files.read(path);
+			} catch {
+				continue; // deleted or unreadable since it was listed: not this scan's business
+			}
+			if (doc) docsScanned += 1;
+			else filesScanned += 1;
+			let matched = false;
+			for (const token of doc ? tableDefinitions(text) : tableReferences(text)) {
+				const key = token.toLowerCase();
+				if (!names.has(key)) continue;
+				const into = doc ? defined : found;
+				const perFile = into.get(key) ?? new Map<string, number>();
+				into.set(key, perFile);
+				perFile.set(path, (perFile.get(path) ?? 0) + 1);
+				matched = true;
+			}
+			if (matched) filesMatched += 1;
 		}
-		const size = await files.size(path);
-		if (size === null || size > limits.maxFileBytes) continue;
-		if (bytes + size > limits.maxBytes) {
-			truncated = true;
-			break;
-		}
-		bytes += size;
-		let text: string;
-		try {
-			text = await files.read(path);
-		} catch {
-			continue; // deleted or unreadable since it was listed: not this scan's business
-		}
-		const doc = isDoc(path);
-		if (doc) docsScanned += 1;
-		else filesScanned += 1;
-		let matched = false;
-		for (const token of doc ? tableDefinitions(text) : tableReferences(text)) {
-			const key = token.toLowerCase();
-			if (!names.has(key)) continue;
-			const into = doc ? defined : found;
-			const perFile = into.get(key) ?? new Map<string, number>();
-			into.set(key, perFile);
-			perFile.set(path, (perFile.get(path) ?? 0) + 1);
-			matched = true;
-		}
-		if (matched) filesMatched += 1;
+		return { considered, bytes, stopped: false };
 	}
+
+	// Documentation first: it is small, and the best evidence of what a table is.
+	// While code waits it gets at most a share of each limit; code gets the rest.
+	const share = listed.code.length > 0 ? DOCS_SHARE : 1;
+	const listedAt = now();
+	const docs = await readPass(
+		listed.docs,
+		{
+			files: Math.ceil(limits.maxFiles * share),
+			bytes: Math.floor(limits.maxBytes * share),
+			deadline: Math.min(deadline, listedAt + (deadline - listedAt) * share),
+		},
+		true,
+	);
+	const code = await readPass(listed.code, { files: limits.maxFiles - docs.considered, bytes: limits.maxBytes - docs.bytes, deadline }, false);
+	const truncated = listed.truncated || docs.stopped || code.stopped;
 
 	const mostFirst = (perFile: Map<string, number> | undefined) =>
 		[...(perFile ?? [])].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
@@ -525,11 +543,13 @@ async function listSources(
 	files: CodeFiles,
 	maxFiles: number,
 	outOfTime: () => boolean,
-): Promise<{ paths: string[]; truncated: boolean }> {
-	const paths: string[] = [];
+): Promise<{ docs: string[]; code: string[]; truncated: boolean }> {
+	const docs: string[] = [];
+	const code: string[] = [];
+	let truncated = false;
 	const pending = [""];
 	while (pending.length > 0) {
-		if (outOfTime()) return { paths, truncated: true };
+		if (outOfTime()) return { docs, code, truncated: true };
 		const dir = pending.shift() as string;
 		let entries: Awaited<ReturnType<CodeFiles["list"]>>;
 		try {
@@ -540,12 +560,16 @@ async function listSources(
 		for (const entry of [...entries].sort((a, b) => compareText(a.name, b.name))) {
 			const path = dir === "" ? entry.name : `${dir}/${entry.name}`;
 			if (entry.kind === "dir" && !SKIPPED_FOLDERS.has(entry.name)) pending.push(path);
-			if (entry.kind !== "file" || !(isSource(path) || isDoc(path))) continue;
-			if (paths.length === maxFiles) return { paths, truncated: true };
-			paths.push(path);
+			if (entry.kind !== "file") continue;
+			// Each kind is listed up to the file limit on its own, so code early in the walk never hides the docs.
+			const into = isDoc(path) ? docs : isSource(path) ? code : null;
+			if (into === null) continue;
+			if (into.length === maxFiles) truncated = true;
+			else into.push(path);
 		}
+		if (truncated && docs.length === maxFiles && code.length === maxFiles) return { docs, code, truncated: true };
 	}
-	return { paths, truncated: false };
+	return { docs, code, truncated };
 }
 
 function isSource(path: string): boolean {
