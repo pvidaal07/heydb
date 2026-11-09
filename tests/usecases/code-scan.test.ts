@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { type CodeFiles, type ScanLimits, findSchemaUsage } from "../../lib/usecases/code-scan.ts";
-import type { RunGit } from "../../lib/usecases/sharing.ts";
 import type { Table } from "../../lib/model/snapshot.ts";
 import { customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 
@@ -46,7 +45,6 @@ function memoryFiles(contents: Record<string, string>) {
 	return { files, reads };
 }
 
-const noGit: RunGit = async () => "missing";
 
 const project = {
 	"src/Models/Articulo.php": "class Articulo extends Model { protected $table = 'gar'; }\n// gar.ref is the article code; GAR in SQL too\n",
@@ -63,7 +61,7 @@ const project = {
 describe("findSchemaUsage", () => {
 	test("counts table names in database context, case-insensitive, and skips vendored code", async () => {
 		const { files, reads } = memoryFiles(project);
-		const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(usage, {
 			hasCode: true,
 			filesScanned: 4,
@@ -78,39 +76,37 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(reads.sort(), ["src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/garage.php"]);
 	});
 
-	test("never reads anything under .heydb, the secrets file included, even when git lists it", async () => {
+	test("never reads anything under .heydb, the secrets file included", async () => {
 		const { files, reads } = memoryFiles({ ...project, ".heydb/model.php": "SELECT * FROM gar" });
-		const listed = Object.keys(project).concat(".heydb/model.php").join("\0");
-		const runGit: RunGit = async () => ({ exitCode: 0, stdout: `${listed}\0`, stderr: "" });
-		const usage = await findSchemaUsage("/app", erp, { files, runGit });
+		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.equal(usage.filesScanned, 4);
 		for (const path of reads) assert.doesNotMatch(path, /^\.heydb\/|vendor|node_modules|\.env/, path);
 	});
 
-	test("lists files with git ls-files from the project root when there is a repository", async () => {
-		const calls: { args: readonly string[]; cwd: string }[] = [];
-		const { files, reads } = memoryFiles(project);
-		const runGit: RunGit = async (args, cwd) => {
-			calls.push({ args, cwd });
-			return { exitCode: 0, stdout: "src/Models/Cliente.php\0", stderr: "" };
-		};
-		const usage = await findSchemaUsage("/app", erp, { files, runGit });
-		assert.deepEqual(calls, [{ args: ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd: "/app" }]);
-		assert.deepEqual(reads, ["src/Models/Cliente.php"]);
-		assert.deepEqual(usage.matches, [{ table: "shop.gcl", name: "gcl", files: ["src/Models/Cliente.php"], hits: 1 }]);
-	});
-
-	test("walks the folder when git is missing or this is not a repository", async () => {
-		const notRepo: RunGit = async () => ({ exitCode: 128, stdout: "", stderr: "fatal: not a git repository" });
-		for (const runGit of [noGit, notRepo]) {
-			const { files } = memoryFiles(project);
-			assert.equal((await findSchemaUsage("/app", erp, { files, runGit })).filesScanned, 4);
-		}
+	// Found on a real ERP: the code that used the database was a reference copy in
+	// source-code/, which the project's .gitignore excludes. Listing files through
+	// git hid it, so the folders are walked directly.
+	test("reads code in folders git ignores, such as a reference copy of another repository", async () => {
+		const { files } = memoryFiles({
+			".gitignore": "source-code/\n",
+			"src/cli.ts": "console.log('help')",
+			"source-code/eagle-master/Articulos.pas": "x",
+			"source-code/eagle-master/sql/ventas.sql": "SELECT * FROM gcl JOIN gar ON gar.id = gcl.id",
+			"coverage/lcov-report/index.js": "SELECT * FROM gcv",
+		});
+		const usage = await findSchemaUsage("/app", erp, { files });
+		assert.deepEqual(
+			usage.matches.map((match) => [match.name, match.files]),
+			[
+				["gar", ["source-code/eagle-master/sql/ventas.sql"]],
+				["gcl", ["source-code/eagle-master/sql/ventas.sql"]],
+			],
+		);
 	});
 
 	test("without source files there is no code, and no code using the tables is no match", async () => {
 		const empty = memoryFiles({ "README.md": "FROM gar", "notes.txt": "FROM gcl" });
-		assert.deepEqual(await findSchemaUsage("/app", erp, { files: empty.files, runGit: noGit }), {
+		assert.deepEqual(await findSchemaUsage("/app", erp, { files: empty.files }), {
 			hasCode: false,
 			filesScanned: 0,
 			filesMatched: 0,
@@ -119,14 +115,14 @@ describe("findSchemaUsage", () => {
 			truncated: false,
 		});
 		const unrelated = memoryFiles({ "src/app.ts": "export const x = 1;" });
-		const usage = await findSchemaUsage("/app", erp, { files: unrelated.files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", erp, { files: unrelated.files });
 		assert.equal(usage.hasCode, true);
 		assert.deepEqual(usage.matches, []);
 	});
 
 	test("skips files bigger than the per-file limit without calling the scan truncated", async () => {
 		const { files, reads } = memoryFiles({ "big.sql": `${"x".repeat(100)} FROM gar`, "small.sql": "FROM gcl" });
-		const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit, limits: { maxFileBytes: 50 } });
+		const usage = await findSchemaUsage("/app", erp, { files, limits: { maxFileBytes: 50 } });
 		assert.deepEqual(reads, ["small.sql"]);
 		assert.equal(usage.truncated, false);
 	});
@@ -139,7 +135,7 @@ describe("findSchemaUsage", () => {
 		];
 		for (const [limits, scanned] of cases) {
 			const { files } = memoryFiles(many);
-			const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit, limits });
+			const usage = await findSchemaUsage("/app", erp, { files, limits });
 			assert.equal(usage.filesScanned, scanned, JSON.stringify(limits));
 			assert.equal(usage.truncated, true);
 			assert.equal(usage.matches[0]?.hits, scanned);
@@ -148,7 +144,6 @@ describe("findSchemaUsage", () => {
 		const { files } = memoryFiles(many);
 		const usage = await findSchemaUsage("/app", erp, {
 			files: { ...files, read: async (path) => ((clock += 400), files.read(path)) },
-			runGit: noGit,
 			now: () => clock,
 			limits: { maxMillis: 1000 },
 		});
@@ -161,7 +156,6 @@ describe("findSchemaUsage", () => {
 		// accounts comes first by name, but orders points to customers.
 		const usage = await findSchemaUsage("/app", snapshot([table("accounts"), customersTable(), ordersTable()]), {
 			files,
-			runGit: noGit,
 			limits: { maxTables: 1 },
 		});
 		assert.deepEqual(usage.matches, [{ table: "shop.customers", name: "customers", files: ["src/app.sql"], hits: 1 }]);
@@ -175,7 +169,7 @@ describe("findSchemaUsage", () => {
 		});
 		for (let i = 0; i < 7; i++) contents[`src/extra${i}.sql`] = "SELECT * FROM t34x";
 		const { files } = memoryFiles(contents);
-		const usage = await findSchemaUsage("/app", snapshot(tables), { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", snapshot(tables), { files });
 		assert.equal(usage.tablesMatched, 35);
 		assert.equal(usage.matches.length, 30);
 		assert.deepEqual(usage.matches[0], {
@@ -196,7 +190,7 @@ describe("findSchemaUsage", () => {
 			"table.sql": "CREATE TABLE IF NOT EXISTS gcv (id int);\nALTER TABLE 'gar' ADD x int;",
 			"delete.ts": "await sql`DELETE FROM gcv WHERE id = ${id}`;",
 		});
-		const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(usage.matches, [
 			{ table: "shop.gar", name: "gar", files: ["from.php", "into.py", "table.sql", "update.go"], hits: 4 },
 			{ table: "shop.gcl", name: "gcl", files: ["update.go", "join.sql"], hits: 3 },
@@ -223,7 +217,7 @@ describe("findSchemaUsage", () => {
 	for (const [family, path, code] of declarations) {
 		test(`ORM declaration: ${family}`, async () => {
 			const { files } = memoryFiles({ [path]: code });
-			const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit });
+			const usage = await findSchemaUsage("/app", erp, { files });
 			assert.deepEqual(
 				usage.matches.map((match) => match.name),
 				["gar"],
@@ -238,7 +232,7 @@ describe("findSchemaUsage", () => {
 			"src/b.php": "/* see gcl and gcv */ $gar->save(); echo 'gar';",
 			"src/c.yml": "name: gar\ndescription: the gcl table\n",
 		});
-		const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.equal(usage.hasCode, true);
 		assert.equal(usage.filesScanned, 3);
 		assert.deepEqual(usage.matches, []);
@@ -263,12 +257,9 @@ describe("findSchemaUsage", () => {
 		];
 		const contents = Object.fromEntries(skipped.map((path) => [path, "SELECT * FROM gar"]));
 		const { files, reads } = memoryFiles({ ...contents, "src/app.js": "SELECT * FROM gcl" });
-		for (const runGit of [noGit, async () => ({ exitCode: 0, stdout: `${Object.keys(contents).join("\0")}\0src/app.js\0`, stderr: "" })]) {
-			reads.length = 0;
-			const usage = await findSchemaUsage("/app", erp, { files, runGit });
-			assert.deepEqual(reads, ["src/app.js"]);
-			assert.deepEqual(usage.matches.map((match) => match.name), ["gcl"]);
-		}
+		const usage = await findSchemaUsage("/app", erp, { files });
+		assert.deepEqual(reads, ["src/app.js"]);
+		assert.deepEqual(usage.matches.map((match) => match.name), ["gcl"]);
 	});
 
 	test("field case: ordinary-word table names in a project without database code match nothing", async () => {
@@ -282,7 +273,7 @@ describe("findSchemaUsage", () => {
 			// SQL words in prose: no SELECT before "from", no SET after "update", no FROM before "join".
 			"src/commits.ts": 'export const EXAMPLE = "chore(project): update config and join project";\n// read defaults from config\n',
 		});
-		const usage = await findSchemaUsage("/app", words, { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", words, { files });
 		assert.deepEqual(usage, {
 			hasCode: true,
 			filesScanned: 3,
@@ -298,7 +289,7 @@ describe("findSchemaUsage", () => {
 			"app/Models/Articulo.php": "<?php\nclass Articulo extends Model\n{\n    protected $table = 'gar';\n}\n",
 			"app/Repositories/Ventas.php": '<?php\n$sql = "SELECT * FROM gcl JOIN gcv ON gcv.cliente = gcl.codigo";\n',
 		});
-		const usage = await findSchemaUsage("/app", erp, { files, runGit: noGit });
+		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(
 			usage.matches.map((match) => [match.name, match.files]),
 			[
@@ -308,4 +299,49 @@ describe("findSchemaUsage", () => {
 			],
 		);
 	});
+
+	// Found on a real ERP written in Harbour (.prg): 23 files took 66 s because
+	// the SQL rules looked back from every position of the file.
+	test("scans large legacy source files quickly: the time grows with the text, not text × lookback", async () => {
+		const filler = "  cVar := 'x' // from the old menu, select it\n".repeat(10_000); // ~470 KB, no statement ends
+		const source = `${filler}  cSql := "SELECT cod FROM gcl WHERE x = 1"\n${filler}`;
+		const { files } = memoryFiles({ "src/clientes.prg": source, "src/articulos.prg": `${filler}USE gar\nUPDATE gar SET pvp = 1\n` });
+		const started = performance.now();
+		const usage = await findSchemaUsage("/app", erp, { files, limits: { maxFileBytes: 2 * 1024 * 1024 } });
+		const elapsed = performance.now() - started;
+		assert.deepEqual(usage.matches.map((match) => match.name).sort(), ["gar", "gcl"]);
+		assert.equal(usage.truncated, false);
+		assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+	});
+
+
+	// Real lines from a Harbour ERP: the database name is built by code, and the
+	// table goes in variables named after "tabla". PHP and JS do the same.
+	test("SQL whose database prefix is built by code, and variables named after a table", async () => {
+		const { files } = memoryFiles({
+			"src/locales.prg": [
+				'oLocales:AnadeBrowse( "(SELECT gar.nom FROM "+cMySQLEmp+".gar WHERE plan.ref = gar.ref) AS Producto" , 200)',
+				'qUpd:cDirect := "UPDATE "+cMySqlEmp+".gar SET "+CRLF',
+				'cSql := "SELECT nom FROM "+cMySqlEmp+".gfa WHERE gar.fa=gfa.cod"',
+				'qUpd:cTabla := "gcv"',
+			].join("\n"),
+			"src/Repo.php": "$sql = \"SELECT * FROM \" . $db . \".gcl WHERE cod = ?\";\n$tableName = 'ghc';",
+			"src/repo.ts": "const rows = await q(`SELECT * FROM ${db}.gpr WHERE cod = ?`);",
+			"src/menu.prg": 'cTitulo := "gfa" // a title, not a table variable',
+		});
+		const tables = snapshot(["gar", "gcl", "gcv", "gfa", "ghc", "gpr"].map((name) => table(name)));
+		const usage = await findSchemaUsage("/app", tables, { files });
+		assert.deepEqual(
+			usage.matches.map((match) => [match.name, match.files]),
+			[
+				["gar", ["src/locales.prg"]],
+				["gcl", ["src/Repo.php"]],
+				["gcv", ["src/locales.prg"]],
+				["gfa", ["src/locales.prg"]],
+				["ghc", ["src/Repo.php"]],
+				["gpr", ["src/repo.ts"]],
+			].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+		);
+	});
+
 });

@@ -402,7 +402,7 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 		const facts = [result.written ? "snapshot written" : "unchanged", ...summary(live)];
 		if (result.written) facts.push(count(result.changes.length, "change"));
 		// A failing scan must not turn a good sync into an error: it only loses the offer.
-		const usage = await findSchemaUsage(opened.root, live).catch(() => null);
+		const usage = await scanCode(ctx, opened.name, opened.root, live).catch(() => null);
 		const noCode = usage !== null && usage.matches.length === 0 ? `\n${NO_CODE}` : "";
 		ctx.ui.notify(`heydb sync ${opened.name}: ${facts.join(" · ")}.${noCode}`, "info");
 		// The changes also go into the session, so the model knows the schema it reads just moved.
@@ -441,7 +441,7 @@ async function learnCode(sendMessage: SendMessage, args: string, ctx: ExtensionC
 		const [name, path] = words.length === 1 && isFolderNotConnection(ctx.cwd, words[0] as string) ? [undefined, words[0]] : words;
 		const opened = openSnapshot(ctx.cwd, name);
 		const folder = path === undefined ? undefined : codeFolder(opened.root, path);
-		const usage = await findSchemaUsage(folder?.root ?? opened.root, opened.snapshot);
+		const usage = await scanCode(ctx, opened.name, folder?.root ?? opened.root, opened.snapshot);
 		if (usage.matches.length === 0) return ctx.ui.notify(`heydb learn-code ${opened.name}: ${NO_CODE}`, "info");
 		if (!ctx.hasUI) {
 			return ctx.ui.notify("/heydb:learn-code needs an interactive session to ask before the agent spends tokens.", "error");
@@ -561,6 +561,16 @@ async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContex
 }
 
 /** Opens the connection named in `args` (or the default), captures its live schema and hands both to `work`. */
+/** Looks for code that uses the tables, showing progress: on a large legacy codebase it takes seconds. */
+async function scanCode(ctx: ExtensionCommandContext, connection: string, root: string, snapshot: Snapshot) {
+	const stop = showProgress(ctx, `heydb: ${connection} · looking for code that uses its tables…`);
+	try {
+		return await findSchemaUsage(root, snapshot);
+	} finally {
+		stop();
+	}
+}
+
 /** Footer status and widget slot heydb uses while it reads a database. */
 const PROGRESS_KEY = "heydb";
 

@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -6,7 +5,6 @@ import { incomingCounts } from "../model/references.ts";
 import { displayName, formatName } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
 import { HEYDB_DIR } from "../store/project.ts";
-import type { GitRun, RunGit } from "./sharing.ts";
 
 // Whether the project next to .heydb/ has code that uses this database, and
 // where. After a sync heydb offers to let the agent read that code and note
@@ -38,7 +36,8 @@ export const DEFAULT_SCAN_LIMITS: ScanLimits = {
 	maxFiles: 5000,
 	maxBytes: 50 * 1024 * 1024,
 	maxFileBytes: 512 * 1024,
-	maxMillis: 3000,
+	// A large legacy codebase (900 Harbour files) needs about 9 s; progress is shown meanwhile.
+	maxMillis: 10_000,
 	maxTables: 300,
 };
 
@@ -49,7 +48,18 @@ const MAX_FILES_PER_TABLE = 5;
 const MIN_NAME_LENGTH = 3;
 
 /** Folders that hold someone else's code, build output, CI configuration or heydb's own files. */
-const SKIPPED_FOLDERS = new Set(["node_modules", "vendor", ".git", HEYDB_DIR, "dist", "build", ".github", ".gitlab", ".circleci"]);
+const SKIPPED_FOLDERS = new Set([
+	"node_modules",
+	"vendor",
+	".git",
+	HEYDB_DIR,
+	"dist",
+	"build",
+	"coverage",
+	".github",
+	".gitlab",
+	".circleci",
+]);
 /** Files that are never database code: lockfiles and CI configuration. Minified bundles (*.min.js) too. */
 const SKIPPED_FILES = new Set([
 	"pnpm-lock.yaml",
@@ -79,6 +89,21 @@ const SOURCE_EXTENSIONS = new Set([
 	"xml",
 	"yml",
 	"yaml",
+	// Legacy business code, where ERP databases are usually queried: xBase
+	// (Harbour, Clipper, FoxPro), Delphi, Visual Basic, COBOL, ABL and RPG.
+	"prg",
+	"ch",
+	"pas",
+	"dfm",
+	"vb",
+	"bas",
+	"frm",
+	"cls",
+	"cbl",
+	"cob",
+	"p",
+	"w",
+	"rpgle",
 ]);
 
 /** The project's files, with paths relative to its root and "/" separators. */
@@ -93,8 +118,6 @@ export interface CodeFiles {
 export interface ScanOptions {
 	/** Replaced in tests; the default reads the real folder. */
 	readonly files?: CodeFiles;
-	/** Replaced in tests; the default runs the real git. */
-	readonly runGit?: RunGit;
 	/** Milliseconds; replaced in tests. */
 	readonly now?: () => number;
 	readonly limits?: Partial<ScanLimits>;
@@ -132,7 +155,7 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	const outOfTime = () => now() > deadline;
 
 	const names = tableNames(snapshot, limits.maxTables);
-	const listed = await listSources(projectRoot, files, options.runGit ?? runRealGit, limits.maxFiles, outOfTime);
+	const listed = await listSources(files, limits.maxFiles, outOfTime);
 	let truncated = listed.truncated;
 
 	// lowercased table name → file → hits
@@ -199,10 +222,18 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 const ID = "[\\p{L}\\p{N}_]+";
 /** A name as SQL writes it: optionally quoted (` " ' [ ]) and qualified (db.table, db.schema.table). */
 const SQL_NAME = `(?:[\`"'\\[]?${ID}[\`"'\\]]?\\.){0,2}[\`"'\\[]?(?<name>${ID})(?![\\p{L}\\p{N}_])`;
+/**
+ * A database prefix built by code in front of the table, as legacy and web
+ * code often write it: "FROM "+cEmp+".gar" (Harbour, JS), "FROM " . $db . ".gar"
+ * (PHP), `FROM ${db}.gar` (template strings). Bounded, so it stays cheap.
+ */
+const BUILT_PREFIX = `(?:["'\`]\\s*(?:\\+|\\.|&|\\|\\|)\\s*[^"'\`\\n]{1,60}?\\s*(?:\\+|\\.|&|\\|\\|)\\s*["'\`]\\.|\\$\\{[^}\\n]{1,60}\\}\\.)`;
+/** A table name after a SQL keyword: plain, quoted or qualified, or behind a built prefix. */
+const SQL_TARGET = `(?:${BUILT_PREFIX})?${SQL_NAME}`;
 /** A quoted string that holds only the name: 'gar', "gar", `gar`. */
 const QUOTED_NAME = `["'\`](?<name>${ID})["'\`]`;
 /** How far back, within one statement (no ";"), the verb that opens it may be. */
-const STATEMENT = "[^;]{0,2000}?";
+const STATEMENT_CHARS = 2000;
 
 /**
  * SQL, anywhere in a file (strings included). Each keyword needs the verb of
@@ -222,31 +253,74 @@ const STATEMENT = "[^;]{0,2000}?";
  * - `@Table(name = "x")`, `@Entity(name = "x")` (JPA), `[Table("x")]` (C#)
  * - `table: x` on its own line (YAML mappings)
  */
-const REFERENCES: readonly RegExp[] = [
-	new RegExp(`(?<=\\b(?:SELECT|DELETE)\\b${STATEMENT})\\bFROM\\s+${SQL_NAME}`, "dgiu"),
-	new RegExp(`(?<=\\bFROM\\b${STATEMENT})\\bJOIN\\s+${SQL_NAME}`, "dgiu"),
-	new RegExp(`(?<=\\bUPDATE\\b${STATEMENT})\\bJOIN\\s+${SQL_NAME}(?=[^;]{0,500}?\\bSET\\b)`, "dgiu"),
-	new RegExp(`(?<=\\b(?:INSERT|REPLACE|MERGE)\\b[^;]{0,100}?)\\bINTO\\s+${SQL_NAME}`, "dgiu"),
-	new RegExp(`\\bUPDATE\\s+${SQL_NAME}(?=[^;]{0,500}?\\bSET\\b)`, "dgiu"),
-	new RegExp(
-		`(?<=\\b(?:CREATE|ALTER|DROP|TRUNCATE|RENAME|LOCK)\\b[^;]{0,40}?)\\bTABLES?\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_NAME}`,
-		"dgiu",
-	),
-	new RegExp(`(?<![\\p{L}\\p{N}_])\\$?(?:table|db_table|__tablename__|tableName)\\s*[:=]\\s*${QUOTED_NAME}`, "dgiu"),
-	new RegExp(`(?:->|::|\\.)\\s*(?:table|from)\\s*\\(\\s*${QUOTED_NAME}`, "dgu"),
-	new RegExp(`\\bknex\\s*\\(\\s*${QUOTED_NAME}`, "dgu"),
-	new RegExp(`(?:@(?:Table|Entity)\\s*\\([^)]*?\\bname\\s*=\\s*|\\[Table\\s*\\(\\s*)${QUOTED_NAME}`, "dgu"),
-	new RegExp(`^[ \\t]*table:[ \\t]*(?<name>${ID})[ \\t]*\\r?$`, "dgmu"),
+/**
+ * A keyword match plus the context it needs. The keyword is searched first and
+ * the context is checked only around each match, in a bounded window cut at
+ * the statement end (";"). A lookbehind such as (?<=SELECT[^;]{0,2000}?) would
+ * be tried at every position of the file: on a real 500 KB Harbour source that
+ * meant minutes per file.
+ */
+interface ReferenceRule {
+	readonly pattern: RegExp;
+	/** Must appear in the statement before the match, at most `before.chars` back. */
+	readonly before?: { readonly verb: RegExp; readonly chars: number };
+	/** Must appear in the statement after the match, at most `after.chars` ahead. */
+	readonly after?: { readonly verb: RegExp; readonly chars: number };
+}
+
+const REFERENCES: readonly ReferenceRule[] = [
+	{ pattern: new RegExp(`\\bFROM\\s+${SQL_TARGET}`, "dgiu"), before: { verb: /\b(?:SELECT|DELETE)\b/iu, chars: STATEMENT_CHARS } },
+	{ pattern: new RegExp(`\\bJOIN\\s+${SQL_TARGET}`, "dgiu"), before: { verb: /\bFROM\b/iu, chars: STATEMENT_CHARS } },
+	{
+		pattern: new RegExp(`\\bJOIN\\s+${SQL_TARGET}`, "dgiu"),
+		before: { verb: /\bUPDATE\b/iu, chars: STATEMENT_CHARS },
+		after: { verb: /\bSET\b/iu, chars: 500 },
+	},
+	{ pattern: new RegExp(`\\bINTO\\s+${SQL_TARGET}`, "dgiu"), before: { verb: /\b(?:INSERT|REPLACE|MERGE)\b/iu, chars: 100 } },
+	{ pattern: new RegExp(`\\bUPDATE\\s+${SQL_TARGET}`, "dgiu"), after: { verb: /\bSET\b/iu, chars: 500 } },
+	{
+		pattern: new RegExp(`\\bTABLES?\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_TARGET}`, "dgiu"),
+		before: { verb: /\b(?:CREATE|ALTER|DROP|TRUNCATE|RENAME|LOCK)\b/iu, chars: 40 },
+	},
+	// Any variable or property whose name says "table" or "tabla": $table, db_table,
+	// __tablename__, tableName, cTabla, oQuery:cTabla. `==` comparisons do not count.
+	{
+		pattern: new RegExp(
+			`(?<![\\p{L}\\p{N}_])\\$?[\\p{L}\\p{N}_]*(?:tabla|table)[\\p{L}\\p{N}_]*\\s*(?::=|=(?!=)|:)\\s*${QUOTED_NAME}`,
+			"dgiu",
+		),
+	},
+	{ pattern: new RegExp(`(?:->|::|\\.)\\s*(?:table|from)\\s*\\(\\s*${QUOTED_NAME}`, "dgu") },
+	{ pattern: new RegExp(`\\bknex\\s*\\(\\s*${QUOTED_NAME}`, "dgu") },
+	{ pattern: new RegExp(`(?:@(?:Table|Entity)\\s*\\([^)]*?\\bname\\s*=\\s*|\\[Table\\s*\\(\\s*)${QUOTED_NAME}`, "dgu") },
+	{ pattern: new RegExp(`^[ \\t]*table:[ \\t]*(?<name>${ID})[ \\t]*\\r?$`, "dgmu") },
 ];
+
+/** The part of the statement before `index`: at most `chars` back, cut after the last ";". */
+function statementBefore(text: string, index: number, chars: number): string {
+	const window = text.slice(Math.max(0, index - chars), index);
+	return window.slice(window.lastIndexOf(";") + 1);
+}
+
+/** The part of the statement after `index`: at most `chars` ahead, cut at the first ";". */
+function statementAfter(text: string, index: number, chars: number): string {
+	const window = text.slice(index, index + chars);
+	const end = window.indexOf(";");
+	return end === -1 ? window : window.slice(0, end);
+}
 
 /** Every table name the file uses in database context; one per place, even when two patterns see it. */
 function tableReferences(text: string): string[] {
 	const found = new Map<number, string>();
-	for (const pattern of REFERENCES) {
-		for (const match of text.matchAll(pattern)) {
+	for (const rule of REFERENCES) {
+		for (const match of text.matchAll(rule.pattern)) {
 			const start = match.indices?.groups?.name?.[0];
 			const name = match.groups?.name;
-			if (start !== undefined && name !== undefined) found.set(start, name);
+			if (start === undefined || name === undefined) continue;
+			const { before, after } = rule;
+			if (before !== undefined && !before.verb.test(statementBefore(text, match.index, before.chars))) continue;
+			if (after !== undefined && !after.verb.test(statementAfter(text, match.index + match[0].length, after.chars))) continue;
+			found.set(start, name);
 		}
 	}
 	return [...found.values()];
@@ -292,24 +366,16 @@ function tableNames(snapshot: Snapshot, maxTables: number): Map<string, TableNam
  * folder is walked. Either way the same folders and extensions are skipped,
  * so nothing under .heydb/, its secrets file included, is ever read.
  */
+// The folders are walked directly, never listed through git: the code that
+// uses a database is often a reference copy kept in a folder the project's
+// .gitignore excludes (found on a real ERP: source-code/), and git would hide
+// it. Generated and third-party folders are skipped by name, and the walk is
+// bounded by the file and time limits.
 async function listSources(
-	root: string,
 	files: CodeFiles,
-	runGit: RunGit,
 	maxFiles: number,
 	outOfTime: () => boolean,
 ): Promise<{ paths: string[]; truncated: boolean }> {
-	let run: GitRun | "missing";
-	try {
-		run = await runGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root);
-	} catch {
-		run = "missing"; // too slow or too much output: the walk has its own limits
-	}
-	if (run !== "missing" && run.exitCode === 0) {
-		const paths = run.stdout.split("\0").filter((path) => path !== "" && isSource(path));
-		return { paths: paths.slice(0, maxFiles), truncated: paths.length > maxFiles };
-	}
-
 	const paths: string[] = [];
 	const pending = [""];
 	while (pending.length > 0) {
@@ -362,23 +428,6 @@ function realFiles(root: string): CodeFiles {
 	};
 }
 
-const GIT_TIMEOUT_MS = 2000;
-/** git ls-files of a very large repository; beyond it the walk takes over. */
-const GIT_MAX_OUTPUT = 32 * 1024 * 1024;
-
-// An argument list and no shell: nothing in a path is ever interpreted.
-function runRealGit(args: readonly string[], cwd: string): Promise<GitRun | "missing"> {
-	return new Promise((resolve, reject) => {
-		const options = { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_OUTPUT, shell: false, windowsHide: true, encoding: "utf8" as const };
-		execFile("git", [...args], options, (error, stdout, stderr) => {
-			if (error === null) return resolve({ exitCode: 0, stdout, stderr });
-			const failure = error as NodeJS.ErrnoException & { code?: unknown; killed?: boolean };
-			if (failure.code === "ENOENT") return resolve("missing");
-			if (typeof failure.code === "number" && !failure.killed) return resolve({ exitCode: failure.code, stdout, stderr });
-			reject(error);
-		});
-	});
-}
 
 // Plain code-unit comparison: the same order on every machine and locale.
 function compareText(a: string, b: string): number {
