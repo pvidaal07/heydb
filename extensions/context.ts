@@ -24,7 +24,7 @@ export function heydbPromptLine(cwd: string): string | null {
 	if (names.length === 0) return null;
 	return (
 		`This project has a heydb schema snapshot (connections: ${names.join(", ")}). ` +
-		"Use heydb_overview, heydb_table and heydb_search before writing SQL."
+		"Before writing SQL, find tables with heydb_search and check them with heydb_table; heydb_overview maps an unknown schema."
 	);
 }
 

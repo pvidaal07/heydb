@@ -61,7 +61,7 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 		description:
 			"Project notes, then a summary of the schema snapshot: per database comment coverage, name prefixes, most referenced tables; warnings; noted tables.",
 		promptSnippet: "Summarize the database schema of this project (stored snapshot)",
-		promptGuidelines: ["Use heydb_overview first when you do not know the database schema of a heydb project."],
+		promptGuidelines: ["Use heydb_overview for a map of an unknown heydb schema and its project notes, not to look up one concept."],
 		parameters: OVERVIEW_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -149,7 +149,7 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 			"Search tables by name, comment, notes, columns and meaning inferred from the columns that reference them. Words match in any order, abbreviations too (fac_cab); ignores case, accents, plurals.",
 		promptSnippet: "Search the database schema and its notes by keyword",
 		promptGuidelines: [
-			"Use heydb_search to find which tables or columns hold a concept before writing SQL.",
+			"Use heydb_search first to find which tables or columns hold a concept, before writing SQL.",
 			"A heydb_search result marked (inferred) matched only through the comments of columns that reference it: present it as an inference and confirm with the user before relying on it or saving it.",
 		],
 		parameters: SEARCH_PARAMETERS,

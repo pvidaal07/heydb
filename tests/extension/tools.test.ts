@@ -83,6 +83,15 @@ describe("tool registration", () => {
 		assert.match(all, /heydb_relate/);
 	});
 
+	test("search comes first: the overview is for a map, not the first call of every question", () => {
+		const tools = loadHeydb().tools;
+		const overview = (tools.get("heydb_overview")?.promptGuidelines ?? []).join("\n");
+		const search = (tools.get("heydb_search")?.promptGuidelines ?? []).join("\n");
+		assert.doesNotMatch(overview, /\bfirst\b/);
+		assert.match(overview, /heydb_overview .*map/);
+		assert.match(search, /heydb_search first/);
+	});
+
 	test("heydb_annotate says where a note comes from: the code file, or the user", () => {
 		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
 		assert.match(guidelines, /\(code: [^)]+\)/);
