@@ -59,10 +59,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # No registry-url: setup-node would write an .npmrc with a placeholder
+      # token, and npm would use it instead of trusted publishing.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+
+      - name: npm supports trusted publishing
+        run: |
+          version="$(npm --version)"
+          echo "npm ${version}"
+          if [ "$(printf '%s\n' 11.5.1 "${version}" | sort -V | head -n1)" != "11.5.1" ]; then
+            echo "::error::npm ${version} is older than 11.5.1, the first version with trusted publishing"
+            exit 1
+          fi
 
       # No dependency install here: the package ships its own sources and
       # nothing third-party runs with this job's permissions.
