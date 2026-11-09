@@ -3,6 +3,7 @@
 //
 //   node bench/run.ts                       synthetic legacy ERP (10 companies) and its code
 //   node bench/run.ts --companies 50        the same with 50 company databases
+//   node bench/run.ts --scenario small      synthetic small app: one database, 15 tables, and its code
 //   node bench/run.ts --project ../app --questions questions.json [--connection erp] [--code ../app/src]
 //   node bench/run.ts --learn               any of the above, adding heydb after noting
 //                                           each answer (on a temporary copy)
@@ -22,6 +23,7 @@ import { initProject } from "../lib/usecases/init.ts";
 import { compete, renderComparison } from "./compare.ts";
 import { LEGACY_ERP_QUESTIONS, legacyErpSnapshot } from "./legacy-erp.ts";
 import type { Question } from "./measure.ts";
+import { SMALL_APP_QUESTIONS, smallAppSnapshot, writeSmallAppCode } from "./small-app.ts";
 import { writeSyntheticCode } from "./synthetic-code.ts";
 
 const { values } = parseArgs({
@@ -31,12 +33,14 @@ const { values } = parseArgs({
 		questions: { type: "string" },
 		code: { type: "string" },
 		companies: { type: "string" },
+		scenario: { type: "string", default: "erp" },
 		json: { type: "boolean", default: false },
 		learn: { type: "boolean", default: false },
 	},
 });
 
 async function main(): Promise<void> {
+	if (values.scenario !== "erp" && values.scenario !== "small") throw new Error("--scenario must be erp or small");
 	if (values.project !== undefined) {
 		if (values.questions === undefined) throw new Error("--project needs --questions <file.json>");
 		const questions = JSON.parse(readFileSync(values.questions, "utf8")) as Question[];
@@ -46,13 +50,15 @@ async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "heydb-bench-"));
 	try {
 		initProject(root);
-		const erp = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "bench", password: "env:HEYDB_BENCH_PASSWORD", databases: null };
-		saveConfig(root, { formatVersion: 1, defaultConnection: "erp", connections: { erp } });
+		const small = values.scenario === "small";
+		const connection = small ? "app" : "erp";
+		const server = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "bench", password: "env:HEYDB_BENCH_PASSWORD", databases: null };
+		saveConfig(root, { formatVersion: 1, defaultConnection: connection, connections: { [connection]: server } });
 		const companies = values.companies === undefined ? undefined : Number(values.companies);
-		saveSnapshot(root, "erp", legacyErpSnapshot(companies === undefined ? {} : { companies }));
+		saveSnapshot(root, connection, small ? smallAppSnapshot() : legacyErpSnapshot(companies === undefined ? {} : { companies }));
 		const code = values.code ?? join(root, "src");
-		if (values.code === undefined) writeSyntheticCode(code);
-		await run(root, LEGACY_ERP_QUESTIONS, undefined, code);
+		if (values.code === undefined) (small ? writeSmallAppCode : writeSyntheticCode)(code);
+		await run(root, small ? SMALL_APP_QUESTIONS : LEGACY_ERP_QUESTIONS, undefined, code);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

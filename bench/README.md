@@ -8,6 +8,7 @@ an ORM schema, a generic database MCP server.
 ```bash
 node bench/run.ts                     # synthetic legacy ERP, 10 company databases, and its code
 node bench/run.ts --companies 50      # the same with 50
+node bench/run.ts --scenario small    # synthetic small app: one database, 15 tables, and its code
 node bench/run.ts --json              # raw numbers
 node bench/run.ts --project ../app --questions questions.json [--connection erp] [--code ../app/src]
 node bench/run.ts --learn             # any of the above, adding heydb after noting each answer
@@ -287,6 +288,38 @@ What it says:
   with 50: each tool call reads and parses the stored snapshot again. Still
   below one model round trip, but the next thing to make faster.
 
+## Competitive comparison (small app)
+
+`node bench/run.ts --scenario small --learn`: the other end from the ERP, a
+personal or small-team project (`small-app.ts`): one database of 15 tables
+and 124 columns with clear English names, InnoDB, 16 declared foreign keys,
+3 table and 4 column comments, a small code tree, 10 questions (3 in Spanish,
+2 about one column, 1 needing two tables), 11 expected tables:
+
+| strategy | ≈tokens | calls | found | first call: top 1 / top 5 | time |
+|---|---|---|---|---|---|
+| heydb | ≈2.9k | 22 | 11 of 11 | 9 / 10 | ≈10 ms |
+| heydb, one note per answer | ≈3.0k | 21 | 11 of 11 | 10 / 11 | ≈6 ms |
+| schema-doc-full | ≈15.8k | 10 | 11 of 11 | — | ≈0.1 ms |
+| schema-doc-grep | ≈4.0k | 26 | 10 of 11 | 4 / 7 | ≈1.5 ms |
+| code-grep | ≈2.5k | 34 | 7 of 11 | 4 / 5 | ≈8 ms |
+| db-smart * | ≈1.6k | 22 | 11 of 11 | 5 / 9 | ≈1 ms |
+| orm-schema | ≈3.8k | 24 | 11 of 11 | 4 / 8 | ≈0.8 ms |
+| db-mcp * | ≈1.4k | 21 | 9 of 11 (name pick) | 7 / 9 | ≈0.1 ms |
+| info-schema-guided * | ≈1.8k | 30 | 10 of 11 (name pick) | 8 / 10 | ≈0.1 ms |
+| info-schema-columns * | ≈12.1k | 10 | 11 of 11 | — | ≈0.2 ms |
+
+Clear names and declared keys make every approach cheap and mostly right:
+nothing costs more than ≈16k tokens, even loading the whole schema, and a
+plain list of 15 table names (db-mcp, guided) or a `LIKE` on names (db-smart)
+costs about half of heydb, before heydb's ≈1.7k tokens of tool definitions per
+turn, which here weigh as much as a question's work. Where heydb still wins is
+the rank, the right table first in 9 of 11 first searches (10 with notes)
+against 4 to 8, and tables whose name is not the word asked: `reviews` for
+"product rating" (a column) and `audit_log` for "cambios panel administracion"
+(its comment), which a pick from the names misses. Notes add a little text
+here instead of saving it: there was little left to find.
+
 ## Real-agent benchmark
 
 The comparison above simulates the agent. `bench/agent/run.ts` runs a real
@@ -307,7 +340,8 @@ Other options: `--strategies heydb,code,db`, `--model claude-bridge/claude-sonne
 `--timeout` seconds per run (default 300), `--resume` (skip the runs already in
 `<out>/runs.jsonl`), `--provider-extension <file>` (the extension that
 registers the model's provider; for `claude-bridge/` models it is found in Pi's
-packages), `--mysql-image` (default `mysql:8.0`), `--companies` (synthetic ERP).
+packages), `--mysql-image` (default `mysql:8.0`), `--companies` (synthetic ERP),
+`--scenario small` (the synthetic small app instead of the ERP).
 
 Without `--yes` it prints the plan (strategies × questions × repeats = runs)
 and, with `--estimate-from`, the tokens a pilot spent per run times the runs

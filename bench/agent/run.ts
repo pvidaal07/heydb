@@ -3,6 +3,7 @@
 // it spent and whether the model named the expected tables.
 //
 //   node bench/agent/run.ts [--limit 2]               synthetic legacy ERP and its code (a pilot)
+//   node bench/agent/run.ts --scenario small [--limit 2]   synthetic small app (one database) and its code
 //   node bench/agent/run.ts --project ../app --questions q.json [--connection erp] [--code ../app/src]
 //   options: --strategies heydb,code,db  --model claude-bridge/claude-sonnet-5-5  --thinking low
 //            --timeout 300  --repeat 3  --out <dir>  --resume  --yes  --estimate-from <runs.jsonl>
@@ -25,6 +26,7 @@ import { initProject } from "../../lib/usecases/init.ts";
 import { openSnapshot } from "../../lib/usecases/project.ts";
 import { LEGACY_ERP_QUESTIONS, legacyErpSnapshot } from "../legacy-erp.ts";
 import { type Question, allTables } from "../measure.ts";
+import { SMALL_APP_QUESTIONS, smallAppSnapshot, writeSmallAppCode } from "../small-app.ts";
 import { writeSyntheticCode } from "../synthetic-code.ts";
 import { schemaDdl } from "./ddl.ts";
 import { parseEvents } from "./events.ts";
@@ -45,6 +47,7 @@ const { values } = parseArgs({
 		questions: { type: "string" },
 		code: { type: "string" },
 		companies: { type: "string" },
+		scenario: { type: "string", default: "erp" },
 		strategies: { type: "string" },
 		model: { type: "string", default: "claude-bridge/claude-haiku-5-5" },
 		thinking: { type: "string", default: "low" },
@@ -96,12 +99,13 @@ async function main(): Promise<void> {
 		console.log(report);
 		return;
 	}
+	if (values.scenario !== "erp" && values.scenario !== "small") throw new Error("--scenario must be erp or small");
 	const limit = positive("limit", values.limit);
 	const repeats = positive("repeat", values.repeat) ?? 1;
 	const timeoutSeconds = positive("timeout", values.timeout) ?? 300;
 	const companies = positive("companies", values.companies);
 
-	// The measured project: a real one, only read, or the synthetic ERP in a temporary folder.
+	// The measured project: a real one, only read, or the synthetic ERP or small app in a temporary folder.
 	let root: string;
 	let codeDir: string | undefined;
 	let questions: readonly Question[];
@@ -117,13 +121,15 @@ async function main(): Promise<void> {
 		const synthetic = root;
 		cleanups.push(() => rmSync(synthetic, { recursive: true, force: true }));
 		initProject(root);
-		const erp = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "bench", password: "env:HEYDB_BENCH_PASSWORD", databases: null };
-		saveConfig(root, { formatVersion: 1, defaultConnection: "erp", connections: { erp } });
-		saveSnapshot(root, "erp", legacyErpSnapshot(companies === undefined ? {} : { companies }));
+		const small = values.scenario === "small";
+		const connection = small ? "app" : "erp";
+		const server = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "bench", password: "env:HEYDB_BENCH_PASSWORD", databases: null };
+		saveConfig(root, { formatVersion: 1, defaultConnection: connection, connections: { [connection]: server } });
+		saveSnapshot(root, connection, small ? smallAppSnapshot() : legacyErpSnapshot(companies === undefined ? {} : { companies }));
 		codeDir = values.code === undefined ? join(root, "src") : resolve(values.code);
-		if (values.code === undefined) writeSyntheticCode(codeDir);
-		questions = LEGACY_ERP_QUESTIONS;
-		dataset = "synthetic legacy ERP";
+		if (values.code === undefined) (small ? writeSmallAppCode : writeSyntheticCode)(codeDir);
+		questions = small ? SMALL_APP_QUESTIONS : LEGACY_ERP_QUESTIONS;
+		dataset = small ? "synthetic small app" : "synthetic legacy ERP";
 	}
 	if (limit !== undefined) questions = questions.slice(0, limit);
 	const { snapshot } = openSnapshot(root, values.connection);
