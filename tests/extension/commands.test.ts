@@ -661,21 +661,26 @@ describe("extra arguments", () => {
 describe("/heydb:sync", () => {
 	test("shows what it is doing while it reads the database, and clears it afterwards", async () => {
 		const seen: (string | undefined)[] = [];
-		let statuses: Map<string, string | undefined> | undefined;
+		const seenWidgets: (string[] | undefined)[] = [];
+		let ctx: ReturnType<typeof fakeContext> | undefined;
 		const pi = loadHeydb({
 			introspect: async () => {
-				seen.push(statuses?.get("heydb"));
+				seen.push(ctx?.statuses.get("heydb"));
+				seenWidgets.push(ctx?.widgets.get("heydb"));
 				return live;
 			},
 			env: { HEYDB_LOCAL_PASSWORD: "s3cret" },
 		});
-		const ctx = fakeContext(project());
-		statuses = ctx.statuses;
+		ctx = fakeContext(project());
 		await runCommand(pi, "heydb:sync", "", ctx);
 
 		assert.equal(seen.length, 1);
 		assert.match(seen[0] ?? "", /^heydb: syncing local · reading the structure of [^ ]+:\d+…$/);
+		// The footer may be too narrow to show it (Gentle Shell keeps one status row in a
+		// narrow split), so the same text also goes above the editor, with the seconds.
+		assert.match(seenWidgets[0]?.join("\n") ?? "", /^heydb: syncing local · reading the structure of [^ ]+:\d+… \(0s\)$/);
 		assert.equal(ctx.statuses.get("heydb"), undefined, "cleared when done");
+		assert.equal(ctx.widgets.get("heydb"), undefined, "widget removed when done");
 	});
 
 	test("clears the progress status when the database cannot be read", async () => {
@@ -689,6 +694,7 @@ describe("/heydb:sync", () => {
 		await runCommand(pi, "heydb:sync", "", ctx);
 		assert.equal(ctx.statuses.has("heydb"), true, "a status was shown");
 		assert.equal(ctx.statuses.get("heydb"), undefined, "and cleared after the error");
+		assert.equal(ctx.widgets.get("heydb"), undefined, "widget removed after the error");
 	});
 
 	test("captures the live schema with the resolved password and reports the first sync", async () => {

@@ -561,8 +561,31 @@ async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContex
 }
 
 /** Opens the connection named in `args` (or the default), captures its live schema and hands both to `work`. */
-/** Footer status slot heydb uses while it reads a database. */
+/** Footer status and widget slot heydb uses while it reads a database. */
 const PROGRESS_KEY = "heydb";
+
+/**
+ * Shows `text` until the returned function is called. The footer alone is not
+ * enough: in a narrow terminal (a split) Gentle Shell paints a single status
+ * row and other statuses replace ours. A widget above the editor stays
+ * visible, and its elapsed seconds show the read is still going.
+ */
+function showProgress(ctx: ExtensionCommandContext, text: string): () => void {
+	const started = Date.now();
+	const paint = () => {
+		const seconds = Math.floor((Date.now() - started) / 1000);
+		ctx.ui.setWidget(PROGRESS_KEY, [`${text} (${seconds}s)`]);
+	};
+	ctx.ui.setStatus(PROGRESS_KEY, text);
+	paint();
+	const timer = setInterval(paint, 1000);
+	timer.unref?.();
+	return () => {
+		clearInterval(timer);
+		ctx.ui.setWidget(PROGRESS_KEY, undefined);
+		ctx.ui.setStatus(PROGRESS_KEY, undefined);
+	};
+}
 
 async function withLive(
 	deps: HeydbDeps,
@@ -582,16 +605,14 @@ async function withLive(
 		// doing until it finishes or fails.
 		const introspect: HeydbDeps["introspect"] = async (entry, password) => {
 			const doing = action === "sync" ? "syncing" : "checking";
-			ctx.ui.setStatus(
-				PROGRESS_KEY,
-				`heydb: ${doing} ${opened.name} · reading the structure of ${entry.host}:${entry.port}…`,
-			);
+			const text = `heydb: ${doing} ${opened.name} · reading the structure of ${entry.host}:${entry.port}…`;
+			const stop = showProgress(ctx, text);
 			try {
 				return await deps.introspect(entry, password);
 			} catch (error) {
 				throw new Error(`heydb ${action} ${opened.name} failed: ${message(error)}`, { cause: error });
 			} finally {
-				ctx.ui.setStatus(PROGRESS_KEY, undefined);
+				stop();
 			}
 		};
 		await work(opened, await captureLive(opened, { env: deps.env, introspect }));

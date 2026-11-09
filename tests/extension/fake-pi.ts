@@ -90,6 +90,8 @@ export function fakeContext(
 	const notifications: Notification[] = [];
 	// Footer status texts as Pi would show them, by key; undefined means cleared.
 	const statuses = new Map<string, string | undefined>();
+	// Widgets above the editor, by key: their lines, or undefined when removed.
+	const widgets = new Map<string, string[] | undefined>();
 	const dialogs: Dialog[] = [];
 	const screens: string[] = [];
 	const queue = [...answers];
@@ -106,6 +108,9 @@ export function fakeContext(
 			},
 			setStatus(key: string, text: string | undefined) {
 				statuses.set(key, text);
+			},
+			setWidget(key: string, lines: string[] | undefined) {
+				widgets.set(key, lines);
 			},
 			async input(title: string, placeholder = "") {
 				dialogs.push({ kind: "input", title, hint: placeholder });
@@ -150,6 +155,7 @@ export function fakeContext(
 		tool: ctx as unknown as ExtensionToolContext,
 		notifications,
 		statuses,
+		widgets,
 		dialogs,
 		screens,
 	};
