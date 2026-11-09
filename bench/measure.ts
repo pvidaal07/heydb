@@ -257,27 +257,43 @@ export interface LearningReport {
  * measured is only read.
  */
 export async function measureLearning(cwd: string, questions: readonly Question[], connection?: string): Promise<LearningReport> {
-	const opened = openSnapshot(cwd, connection);
 	const root = mkdtempSync(join(tmpdir(), "heydb-bench-learn-"));
 	try {
-		initProject(root);
-		saveConfig(root, { formatVersion: 1, defaultConnection: opened.name, connections: { [opened.name]: opened.connection } });
-		saveSnapshot(root, opened.name, opened.snapshot);
-		for (const name of knowledgeConnections(opened.root)) saveKnowledge(root, name, loadKnowledge(opened.root, name));
-		const before = await measure(root, questions, opened.name);
-		let notes = 0;
-		for (const [index, question] of questions.entries()) {
-			const read = before.questions[index]?.steps.filter((step) => step.tool === "heydb_table") ?? [];
-			for (const step of read) {
-				annotate(root, opened.name, { target: step.args, text: question.ask, author: "bench" });
-				notes += 1;
-			}
-		}
-		const after = await measure(root, questions, opened.name);
+		const name = copyProject(cwd, root, connection);
+		const before = await measure(root, questions, name);
+		const notes = noteAnswers(root, name, questions, before);
+		const after = await measure(root, questions, name);
 		return { before, after, notes };
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Makes `root` a heydb project holding one connection of the project above
+ * `cwd`: its config, its stored snapshot and every knowledge file. Returns
+ * the connection's name. The source is only read.
+ */
+export function copyProject(cwd: string, root: string, connection?: string): string {
+	const opened = openSnapshot(cwd, connection);
+	initProject(root);
+	saveConfig(root, { formatVersion: 1, defaultConnection: opened.name, connections: { [opened.name]: opened.connection } });
+	saveSnapshot(root, opened.name, opened.snapshot);
+	for (const name of knowledgeConnections(opened.root)) saveKnowledge(root, name, loadKnowledge(opened.root, name));
+	return opened.name;
+}
+
+/** Notes on each table read for a question the question's `ask`, as an agent does once the user confirms it. Returns the notes added. */
+export function noteAnswers(root: string, connection: string, questions: readonly Question[], report: Report): number {
+	let notes = 0;
+	for (const [index, question] of questions.entries()) {
+		const read = report.questions[index]?.steps.filter((step) => step.tool === "heydb_table") ?? [];
+		for (const step of read) {
+			annotate(root, connection, { target: step.args, text: question.ask, author: "bench" });
+			notes += 1;
+		}
+	}
+	return notes;
 }
 
 export const tokens = (chars: number): number => Math.round(chars / 4);

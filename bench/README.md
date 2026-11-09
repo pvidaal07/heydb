@@ -286,3 +286,106 @@ What it says:
 - heydb is the slowest in time, ≈80 ms per call with 10 companies and ≈450 ms
   with 50: each tool call reads and parses the stored snapshot again. Still
   below one model round trip, but the next thing to make faster.
+
+## Real-agent benchmark
+
+The comparison above simulates the agent. `bench/agent/run.ts` runs a real
+one: a model inside Pi answers each question with exactly one strategy's tools,
+and every run records what the provider says it spent and whether the model
+named the expected tables.
+
+```bash
+node bench/agent/run.ts --limit 2                      # pilot on the synthetic ERP: every strategy, 2 questions
+node bench/agent/run.ts --estimate-from <pilot>/runs.jsonl          # plan and cost estimate, then stop
+node bench/agent/run.ts --yes --repeat 3 --out <dir>              # the full run
+node bench/agent/run.ts --project ../app --questions q.json [--connection erp] [--code ../app/src] --yes --out <dir>
+node bench/agent/run.ts --report <dir>                 # render report.md again from <dir>/runs.jsonl
+```
+
+Other options: `--strategies heydb,code,db`, `--model claude-bridge/claude-sonnet-5-5`
+(default `claude-bridge/claude-haiku-5-5`), `--thinking` (default `low`),
+`--timeout` seconds per run (default 300), `--resume` (skip the runs already in
+`<out>/runs.jsonl`), `--provider-extension <file>` (the extension that
+registers the model's provider; for `claude-bridge/` models it is found in Pi's
+packages), `--mysql-image` (default `mysql:8.0`), `--companies` (synthetic ERP).
+
+Without `--yes` it prints the plan (strategies × questions × repeats = runs)
+and, with `--estimate-from`, the tokens a pilot spent per run times the runs
+planned, then stops; a pilot (`--limit 3` or fewer, one repeat) needs no
+`--yes`. Results go to `--out` (a new temporary folder by default):
+`runs.jsonl`, one line per run written as it goes, `meta.json` and
+`report.md`. A real project's questions and `runs.jsonl` name real tables:
+keep them out of this repository.
+
+| strategy | what the model gets | tools |
+|---|---|---|
+| heydb | a copy of the project's `.heydb/` (config, snapshot, notes; no `.env`) and the heydb extension | `heydb_overview`, `heydb_search`, `heydb_table` (no notes written during the run) |
+| heydb-notes | the same plus one note per expected table with the question as asked, as `--learn` writes them | the same |
+| schema-doc | `SCHEMA.md` as written above | Pi's `read`, `grep`, `find` |
+| orm-schema | `schema.prisma` as written above | `read`, `grep`, `find` |
+| code | a copy of `--code` without `node_modules`, `.git`, `.heydb`, `.env` files, files over 2 MB and symbolic links; skipped without `--code` | `read`, `grep`, `find` |
+| db | a MySQL server in docker holding the snapshot's schema, no rows | `sql`: one SELECT, SHOW or DESCRIBE, printed as `mysql --batch`, at most 200 rows then "… N more rows" |
+| db-mcp | the same server | `list_tables(database?)` (names only; the databases when there are several and none is named), `describe_table(table)` (DESCRIBE) |
+
+Fairness rules, the same for every run:
+
+- Pi starts with nothing discovered: `--no-extensions --no-skills
+  --no-context-files --no-mcp --no-prompt-templates --no-themes --no-approve`,
+  then loads only the provider's extension, the strategy's extension and
+  `bench/agent/probe.ts`, and `--tools` allows only the strategy's tools. The
+  probe adds no tool and no prompt text; it records the tools declared and the
+  prompt's size per run, shown in the report ("What each strategy was given").
+  heydb adds its one prompt line ("This project has a heydb schema snapshot…"),
+  as it does for its users.
+- The same model, thinking level, timeout and instructions for every strategy,
+  appended to Pi's system prompt: find which tables hold the data that answers
+  the question with the available tools, change nothing, and end with exactly
+  one line `TABLES: t1, t2` of bare table names. The question as asked is the
+  user message.
+- Each strategy works in its own temporary folder holding only its material,
+  prepared once: never the measured project, which is only read.
+- The database is built from the snapshot: `CREATE TABLE` with the captured
+  types, primary keys, indexes, comments and storage engine, foreign keys as
+  declared, views from their definitions; what MySQL rejects is retried
+  without defaults and secondary indexes, then skipped, and the report counts
+  both. The model's user has only `SELECT` and `SHOW VIEW` on those databases,
+  and the `sql` tool refuses anything but one SELECT, SHOW or DESCRIBE. The
+  container keeps its data in tmpfs and is removed at the end, interrupted or not.
+- Runs go one at a time; for each question every strategy runs in turn.
+- Tokens are the provider's, summed over every model call of the run: total =
+  input + output + cache read + cache write. "% fewer" compares two
+  strategies over the questions both ran, each question the mean of its repeats.
+- Correct: every expected table (bare name, any case, database prefix ignored)
+  is in the reply's last `TABLES:` line. The report also counts expected
+  tables named (partial credit) and extra tables named; a reply without the
+  line names nothing.
+
+Honest limits:
+
+- One model at a time; another model makes other choices. Tool choice varies
+  between runs of the same question: use `--repeat` and read the spread.
+- Every model call carries the provider's own fixed prompt (with the
+  claude-bridge provider, about 3–4k tokens before any tool), the same for
+  every strategy; it is in the totals.
+- The database is schema only: the model cannot sample rows to tell two
+  similar tables apart, as it could on a real server.
+- The synthetic code tree is ten small files, so code search is cheap and
+  precise there; a real project's code is not.
+- heydb-notes' notes repeat the questions word for word: the upper bound of
+  what notes buy.
+- It costs real tokens: about 15k to 90k per run in the pilot below.
+
+Pilot, synthetic ERP (10 company databases, 2,560 tables, 56,170 columns), the
+first 2 questions, `claude-bridge/claude-haiku-5-5`, thinking low, one repeat:
+
+| strategy | tokens per run | tool calls per run | time per run | correct |
+|---|---|---|---|---|
+| heydb | ≈24.7k | 5.0 | 9.2 s | 2 of 2 |
+| heydb-notes | ≈25.5k | 3.5 | 7.3 s | 2 of 2 |
+| schema-doc | ≈85.2k | 7.0 | 14.4 s | 2 of 2 |
+| orm-schema | ≈92.1k | 10.0 | 17.6 s | 2 of 2 |
+| code | ≈15.9k | 3.5 | 6.1 s | 2 of 2 |
+| db | ≈55.7k | 7.0 | 15.4 s | 2 of 2 |
+| db-mcp | ≈47.5k | 10.0 | 10.3 s | 2 of 2 |
+
+Two questions and one repeat show the harness works, not who wins.
