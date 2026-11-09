@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
-import { parseEnvFile, resolveSecret } from "../lib/secrets.ts";
+import { parseEnvFile, resolveSecret, secretSource } from "../lib/secrets.ts";
 
 const SECRET = "s3cr3t-Value#1";
 const dirs: string[] = [];
@@ -107,6 +107,25 @@ describe("resolveSecret", () => {
 			() => resolveSecret("env:HEYDB_A", { connection: "local", env: {}, projectRoot }),
 			/^\.heydb\/\.env line 2 is not KEY=VALUE/,
 		);
+	});
+});
+
+describe("secretSource", () => {
+	test("says where a password would come from, never what it is", () => {
+		const projectRoot = projectWithEnv(`HEYDB_FILE=${SECRET}\nHEYDB_BOTH=file\n`);
+		const env = { HEYDB_ENV: SECRET, HEYDB_BOTH: "env" };
+		const source = (reference: string) => secretSource(reference, { connection: "local", env, projectRoot });
+		assert.equal(source("env:HEYDB_ENV"), "environment");
+		assert.equal(source("env:HEYDB_FILE"), "env-file");
+		assert.equal(source("env:HEYDB_BOTH"), "environment", "the environment wins, as in resolveSecret");
+		assert.equal(source("env:HEYDB_NONE"), null);
+		assert.equal(secretSource("env:HEYDB_FILE", { connection: "local", env: {} }), null, "no project, no file");
+	});
+
+	test("rejects what resolveSecret rejects, without echoing it", () => {
+		assertNoSecret(() => secretSource(SECRET, { connection: "local", env: {} }), /must be a reference/);
+		const projectRoot = projectWithEnv(`${SECRET}\n`);
+		assertNoSecret(() => secretSource("env:HEYDB_A", { connection: "local", env: {}, projectRoot }), /line 1 is not KEY=VALUE/);
 	});
 });
 

@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { assertNoSymlinks } from "./store/guards.ts";
 import { HEYDB_DIR } from "./store/project.ts";
 
-// Resolves a password reference from .heydb/config.json (ADR-0005). heydb
-// stores no secrets, so it has none to leak; what remains is not leaking the
-// ones it reads at connect time. No error built here ever contains a value:
+// Resolves a password reference from .heydb/config.json (ADR-0005). No
+// committed file holds a secret: the value lives in the environment or in
+// .heydb/.env, which git ignores (store/envfile.ts writes it when a person
+// types the password). What remains is not leaking the values read here. No error built here ever contains a value:
 // not the resolved password, not a line of .env, not even a reference that
 // failed to parse (it might be a password typed in the wrong field).
 //
@@ -31,7 +32,8 @@ export function suggestedReference(name: string): string {
 	return `env:HEYDB_${name.toUpperCase().replaceAll("-", "_")}_PASSWORD`;
 }
 
-const ENV_FILE = ".env";
+/** The file under .heydb/ that holds local secrets; .heydb/.gitignore excludes it. */
+export const ENV_FILE = ".env";
 const ENV_LINE = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
 export interface SecretOptions {
@@ -43,28 +45,49 @@ export interface SecretOptions {
 }
 
 export function resolveSecret(reference: string, options: SecretOptions): string {
-	const { connection, env = process.env, projectRoot } = options;
+	const found = lookup(reference, options);
+	if (found !== null) return found.value;
+	throw new Error(
+		`password for connection "${options.connection}" comes from ${reference}, which is not set. ` +
+			"Set it in your shell or in .heydb/.env (ignored by git).",
+	);
+}
+
+/** Where a password reference is set, in resolveSecret's order. Never the value. */
+export type SecretSource = "environment" | "env-file";
+
+/** Where resolveSecret would find the password; null when it is not set anywhere. */
+export function secretSource(reference: string, options: SecretOptions): SecretSource | null {
+	return lookup(reference, options)?.source ?? null;
+}
+
+/**
+ * The variable a reference names: "env:HEYDB_LOCAL_PASSWORD" → "HEYDB_LOCAL_PASSWORD".
+ * `connection`, when known, makes the error name it and suggest a reference.
+ */
+export function referenceVariable(reference: string, connection?: string): string {
 	const match = PASSWORD_REFERENCE.exec(reference);
 	if (match === null) {
-		throw new Error(
-			`password for connection "${connection}" must be a reference such as "${suggestedReference(connection)}": ${REFERENCE_RULE}`,
-		);
+		const subject = connection === undefined ? "password" : `password for connection "${connection}"`;
+		const example = suggestedReference(connection ?? "name");
+		throw new Error(`${subject} must be a reference such as "${example}": ${REFERENCE_RULE}`);
 	}
-	const name = match[1] as string;
+	return match[1] as string;
+}
+
+function lookup(reference: string, options: SecretOptions): { value: string; source: SecretSource } | null {
+	const { connection, env = process.env, projectRoot } = options;
+	const name = referenceVariable(reference, connection);
 
 	// An empty value counts as set: local servers often have no password.
 	const fromEnv = env[name];
-	if (fromEnv !== undefined) return fromEnv;
+	if (fromEnv !== undefined) return { value: fromEnv, source: "environment" };
 
 	if (projectRoot !== undefined) {
 		const fromFile = readEnvFile(projectRoot);
-		if (fromFile !== null && Object.hasOwn(fromFile, name)) return fromFile[name] as string;
+		if (fromFile !== null && Object.hasOwn(fromFile, name)) return { value: fromFile[name] as string, source: "env-file" };
 	}
-
-	throw new Error(
-		`password for connection "${connection}" comes from env:${name}, which is not set. ` +
-			"Set it in your shell or in .heydb/.env (ignored by git).",
-	);
+	return null;
 }
 
 /** The parsed file, or null when it does not exist. */
@@ -97,15 +120,26 @@ export function parseEnvFile(text: string): Readonly<Record<string, string>> {
 	const values = new Map<string, string>();
 	// Some Windows editors start the file with a byte order mark.
 	text.replace(/^\uFEFF/, "").split("\n").forEach((raw, index) => {
-		const line = raw.replace(/\r$/, "").trim();
-		if (line === "" || line.startsWith("#")) return;
-		const match = ENV_LINE.exec(line);
-		if (match === null) {
+		const entry = parseEnvLine(raw);
+		if (entry === undefined) {
 			throw new Error(`.heydb/.env line ${index + 1} is not KEY=VALUE (names use letters, digits and _)`);
 		}
-		values.set(match[1] as string, unquote((match[2] as string).trim()));
+		if (entry !== null) values.set(entry.key, entry.value);
 	});
 	return Object.fromEntries(values);
+}
+
+/**
+ * One line as parseEnvFile reads it: null for a blank or comment line,
+ * undefined when it is not KEY=VALUE. Shared with the code that rewrites the
+ * file (store/envfile.ts), so both always agree on which line sets which name.
+ */
+export function parseEnvLine(raw: string): { key: string; value: string } | null | undefined {
+	const line = raw.replace(/\r$/, "").trim();
+	if (line === "" || line.startsWith("#")) return null;
+	const match = ENV_LINE.exec(line);
+	if (match === null) return undefined;
+	return { key: match[1] as string, value: unquote((match[2] as string).trim()) };
 }
 
 function unquote(value: string): string {

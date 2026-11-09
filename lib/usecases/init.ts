@@ -1,8 +1,8 @@
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { emptyConfig } from "../config/operations.ts";
-import { stableJson } from "../store/files.ts";
+import { stableJson, writeFileAtomic } from "../store/files.ts";
 import { assertNoSymlinks } from "../store/guards.ts";
 import { HEYDB_DIR } from "../store/project.ts";
 
@@ -42,6 +42,33 @@ export function initProject(root: string): InitResult {
 		if (createFile(join(root, HEYDB_DIR, name), content)) created.push(`${HEYDB_DIR}/${name}`);
 	}
 	return { created };
+}
+
+const ENV_RULE = "# Added by heydb: .env holds local secrets for env:HEYDB_NAME references; never commit it.\n.env\n";
+
+/**
+ * Makes sure git ignores .heydb/.env before heydb writes a secret there. A
+ * team may have replaced the .gitignore heydb wrote, so it is checked every
+ * time: the rule is appended when no line ignores .env or a later "!.env"
+ * un-ignores it, and the usual file is written when there is none. Returns
+ * whether the file changed.
+ */
+export function ensureEnvIgnored(root: string): boolean {
+	assertNoSymlinks(root, ".gitignore");
+	const path = join(root, HEYDB_DIR, ".gitignore");
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch (error) {
+		if (!hasCode(error, "ENOENT")) throw error;
+		return createFile(path, GITIGNORE);
+	}
+	// The last rule that names .env decides, as in git.
+	const rules = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^!?\/?\.env$/.test(line));
+	if (rules.length > 0 && !rules[rules.length - 1]?.startsWith("!")) return false;
+	const separator = text === "" || text.endsWith("\n") ? "" : "\n";
+	writeFileAtomic(path, `${text}${separator}${ENV_RULE}`);
+	return true;
 }
 
 function createDirectory(path: string): boolean {

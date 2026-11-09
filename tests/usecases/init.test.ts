@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { afterEach, describe, test } from "node:test";
 
 import { emptyConfig } from "../../lib/config/operations.ts";
 import { loadConfig } from "../../lib/config/store.ts";
-import { initProject } from "../../lib/usecases/init.ts";
+import { ensureEnvIgnored, initProject } from "../../lib/usecases/init.ts";
 
 const roots: string[] = [];
 
@@ -67,5 +68,70 @@ describe("initProject", () => {
 		const root = tempDir();
 		writeFileSync(join(root, ".heydb"), "");
 		assert.throws(() => initProject(root), { message: ".heydb exists but is not a directory" });
+	});
+});
+
+describe("ensureEnvIgnored", () => {
+	const APPENDED = "# Added by heydb: .env holds local secrets for env:HEYDB_NAME references; never commit it.\n.env\n";
+
+	function gitignore(root: string): string {
+		return readFileSync(join(root, ".heydb", ".gitignore"), "utf8");
+	}
+
+	function projectWith(content: string | null): string {
+		const root = tempDir();
+		mkdirSync(join(root, ".heydb"));
+		if (content !== null) writeFileSync(join(root, ".heydb", ".gitignore"), content);
+		return root;
+	}
+
+	test("leaves a .gitignore that already ignores .env alone", () => {
+		const root = tempDir();
+		initProject(root);
+		const before = gitignore(root);
+		assert.equal(ensureEnvIgnored(root), false);
+		assert.equal(gitignore(root), before);
+	});
+
+	test("writes the usual .gitignore when there is none", () => {
+		const root = projectWith(null);
+		assert.equal(ensureEnvIgnored(root), true);
+		const fresh = tempDir();
+		initProject(fresh);
+		assert.equal(gitignore(root), gitignore(fresh));
+	});
+
+	test("appends .env to a .gitignore that lacks it or un-ignores it, keeping what was there", () => {
+		const cases: [before: string, after: string][] = [
+			["custom\n", `custom\n${APPENDED}`],
+			["custom", `custom\n${APPENDED}`],
+			[".env\n!.env\n", `.env\n!.env\n${APPENDED}`],
+			["", APPENDED],
+		];
+		for (const [before, after] of cases) {
+			const root = projectWith(before);
+			assert.equal(ensureEnvIgnored(root), true, JSON.stringify(before));
+			assert.equal(gitignore(root), after);
+			assert.equal(ensureEnvIgnored(root), false, "a second call changes nothing");
+		}
+	});
+
+	test("refuses a .gitignore that is a symbolic link", () => {
+		const root = projectWith(null);
+		symlinkSync(join(tempDir(), "target"), join(root, ".heydb", ".gitignore"));
+		assert.throws(() => ensureEnvIgnored(root), { message: ".heydb/.gitignore is a symbolic link; heydb refuses to follow it" });
+	});
+
+	// The promise that matters: git itself agrees the secrets file is ignored.
+	const git = spawnSync("git", ["--version"]).status === 0;
+	test("git ignores .heydb/.env afterwards", { skip: !git && "git is not installed" }, () => {
+		for (const before of [null, "custom\n", ".env\n!.env\n", "!.env\n"]) {
+			const root = projectWith(before);
+			execFileSync("git", ["init", "-q"], { cwd: root });
+			ensureEnvIgnored(root);
+			writeFileSync(join(root, ".heydb", ".env"), "HEYDB_A=x\n");
+			const check = spawnSync("git", ["check-ignore", "-q", ".heydb/.env"], { cwd: root });
+			assert.equal(check.status, 0, `not ignored after ${JSON.stringify(before)}`);
+		}
 	});
 });

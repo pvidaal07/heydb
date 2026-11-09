@@ -9,12 +9,17 @@ import { dirname } from "node:path";
  * target is either the old file or the new one, never half of each. After a
  * power loss the rename itself may be lost (the old file remains): the
  * directory is not flushed, because Windows does not support that.
+ *
+ * `mode` sets the permissions of the new file (0o600 for secrets). It is
+ * applied when the temporary file is created, so the content is never
+ * readable by others, not even for an instant. Windows only honors the
+ * read-only bit, so there the file keeps the folder's permissions.
  */
-export function writeFileAtomic(path: string, content: string): void {
+export function writeFileAtomic(path: string, content: string, mode?: number): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
-		const fd = openSync(temporary, "w");
+		const fd = openSync(temporary, "w", mode);
 		try {
 			writeSync(fd, content, null, "utf8");
 			fsyncSync(fd);
