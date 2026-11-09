@@ -20,6 +20,7 @@ import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-age
 
 import { defaultDeps } from "../extensions/deps.ts";
 import { registerHeydbTools } from "../extensions/tools.ts";
+import { displayNameOf } from "../lib/model/names.ts";
 import type { Snapshot, Table } from "../lib/model/snapshot.ts";
 import { searchSchema } from "../lib/search.ts";
 import { openSnapshot } from "../lib/usecases/project.ts";
@@ -111,9 +112,12 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 		for (const [index, query] of question.queries.entries()) {
 			const text = await call(tools, cwd, "heydb_search", withConnection({ query }));
 			steps.push({ tool: "heydb_search", args: query, chars: text.length });
-			const targets = searchSchema(snapshot, knowledge, query, { limit: 20 })
+			// Ranked with the tool's own defaults, and counted only when the text the
+			// model read names the table: a result the tool cut is not a find.
+			const targets = searchSchema(snapshot, knowledge, query)
 				.results.filter((result) => result.object === "table" || result.object === "view")
-				.map((result) => result.target);
+				.map((result) => result.target)
+				.filter((target) => names(text, displayNameOf(target)));
 			const ranks = question.expect.map((expected) => {
 				const rank = targets.findIndex((target) => matches(target, expected));
 				if (rank >= 0 && !located.has(expected)) located.set(expected, targets[rank]!);
@@ -151,6 +155,12 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 		questions: results,
 		fullDumpChars: columnsDump(tables, true).length,
 	};
+}
+
+/** True when `text` names `name` as a whole name, not inside a longer one. */
+function names(text: string, name: string): boolean {
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(^|[^\\w.])${escaped}(?![\\w])`, "m").test(text);
 }
 
 /** "emp_001.emp_001.fac_cab" matches "fac_cab" and "emp_001.fac_cab". */

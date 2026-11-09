@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 - `heydb_search` matches words, not a phrase: "facturas de venta cabecera" finds tables whose names, comments, notes or columns hold those words in any order, skipping stopwords, reading abbreviated names (`alb_lin` for "albarán") and ranking by BM25 with more matched words first. Identical tables in several databases are one result, and words that matched nothing are named instead of a bare "No matches".
+- `heydb_search` answers in fewer tokens: one line per result with what the table is (its comment or note) and up to 3 matching columns with their comments; the 10 best by default (was 20), with matches scoring under a fifth of the best counted as "… N weaker matches" instead of listed (an explicit `limit` lists them). Only inferred meanings and abbreviation-only names are still marked.
+- `heydb_table` lists one line per column (`- num_fac int(11) PK — "Factura"`, with `null`, `=default` and `auto` only when they apply) instead of a mostly empty table, cuts column comments and notes at 100 characters unless a `column_filter` asks for them, and lists at most 10 foreign keys, triggers and indexes with "… N more".
 
 ## [2.0.0-beta.1]
 

@@ -20,7 +20,8 @@ The heydb side runs the real tools, so every character counted is one the
 model would read. The agent follows a fixed policy, the same in every run:
 
 1. `heydb_search` with each of the question's queries, in order, until every
-   expected table shows up;
+   expected table shows up in the text the tool returned (a result the tool
+   cut or left beyond its default limit does not count);
 2. `heydb_overview` if one is still missing;
 3. `heydb_table` on each expected table, with the default options.
 
@@ -78,3 +79,27 @@ results instead of nothing, so it costs more per call: with one company that
 outweighs the calls saved. The miss left is the English question ("customer
 invoice"): no table or comment is in English, so only a vocabulary bridge
 (layer 2) can find it; the overview still costs ≈8.5k at 50 databases.
+
+## After compact output (synthetic ERP)
+
+`heydb_search` prints one line per result (what the table is, up to 3
+matching columns with their comments), lists the 10 best (was 20) and only
+counts matches scoring under a fifth of the best; `heydb_table` prints one
+line per column and caps foreign keys, triggers and indexes at 10. "Before" is
+the word-level search above, re-run with the stricter rule that a table counts
+as found only when the text the tool returned names it (same numbers: it
+showed 20 results).
+
+| companies | heydb, 10 questions | heydb_search, average | heydb_table, average / max | expected table in first search (top 1 / top 5 / anywhere) | needed the overview |
+|---|---|---|---|---|---|
+| 1 | ≈4.9k tokens (was ≈6.6k) | ≈104 (was ≈239) | ≈193 / ≈410 (was ≈291 / ≈635) | 9 / 9 / 9 of 11 (was 9 / 9 / 10) | 2 of 10 (was 1) |
+| 10 | ≈7.9k (was ≈8.6k) | ≈133 (was ≈299) | ≈193 / ≈410 | 9 / 9 / 9 of 11 | 2 of 10 |
+| 50 | ≈20.7k (was ≈15.0k) | ≈135 (was ≈303) | ≈193 / ≈410 | 9 / 9 / 9 of 11 | 2 of 10 |
+
+Searches cost less than half and tables a third less. The cost: `fac_cab` for
+"facturas pendientes de cobro" ranked 13th, so it is no longer shown and that
+question falls back to the overview, which is what grows the total at 50
+companies (≈8.5k for the overview alone). `fac_cab` has no comment and matches
+only as an abbreviation, behind nine filler tables `int_cob_rem_*` that match
+"cobro" the same way: a ranking problem for the vocabulary layer, not one the
+output can fix.

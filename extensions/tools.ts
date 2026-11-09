@@ -133,7 +133,7 @@ const SEARCH_PARAMETERS = {
 	type: "object",
 	properties: {
 		query: { type: "string", description: "Text to find; case and accents are ignored." },
-		limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Maximum results (default 20)." },
+		limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Maximum results (default 10; set it to list weaker matches too)." },
 		database: { type: "string", description: 'Only this database, e.g. "shop" (PostgreSQL: "app.public").' },
 		connection: CONNECTION,
 	},
@@ -157,12 +157,13 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return guarded(() => {
 				// Pi validates the schema, but the check is repeated so no other caller can ask for 10,000 results.
-				const { limit = 20 } = params;
-				if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT) {
+				const { limit } = params;
+				if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT)) {
 					throw new Error(`limit must be an integer from 1 to ${MAX_SEARCH_LIMIT}`);
 				}
 				const opened = openSnapshot(ctx.cwd, params.connection);
-				const options = { limit, ...(params.database !== undefined && { database: params.database }) };
+				// Without a limit, searchSchema leaves out the far weaker matches; with one, it lists that many.
+				const options = { ...(limit !== undefined && { limit }), ...(params.database !== undefined && { database: params.database }) };
 				return ok(renderSearch(searchSchema(opened.snapshot, opened.knowledge, params.query, options)), opened.name);
 			});
 		},

@@ -459,7 +459,7 @@ describe("a PostgreSQL snapshot through the tools' building blocks", () => {
 	});
 
 	test("search results and resolve errors keep every level of a PostgreSQL name", () => {
-		assert.match(renderSearch(searchSchema(snapshot, emptyKnowledge(), "orders")), /^- table legacy\.public\.orders · name · table comment: Customer orders$/m);
+		assert.match(renderSearch(searchSchema(snapshot, emptyKnowledge(), "orders")), /^- table legacy\.public\.orders — Customer orders$/m);
 		assert.throws(() => resolveTable(snapshot, "ordrs"), { message: 'no table matches "ordrs". Did you mean: legacy.public.orders?' });
 	});
 

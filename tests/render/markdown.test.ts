@@ -272,12 +272,10 @@ describe("renderTable", () => {
 				"- trg_audit: AFTER INSERT, UPDATE",
 				"",
 				"## Columns",
-				"| # | column | type | null | default | comment | notes |",
-				"|---|---|---|---|---|---|---|",
-				"| 1 | id | int auto_increment | no |  |  |  |",
-				"| 2 | customer_id | int | no |  |  |  |",
-				"| 3 | total | decimal(10,2) | yes | 0.00 | With VAT | Includes VAT \\| taxes. [id a-col · ana · 2026-11-06] |",
-				"| 4 | code | varchar(8) | no | '' |  |  |",
+				"- id int PK auto",
+				"- customer_id int",
+				'- total decimal(10,2) null =0.00 — "With VAT" · note: Includes VAT | taxes. [id a-col · ana · 2026-11-06]',
+				"- code varchar(8) =''",
 				"",
 				"## Indexes",
 				"- idx_customer (customer_id) BTREE",
@@ -298,9 +296,7 @@ describe("renderTable", () => {
 				"```",
 				"",
 				"## Columns",
-				"| # | column | type | null | default |",
-				"|---|---|---|---|---|",
-				"| 1 | id | int | no |  |",
+				"- id int",
 			].join("\n"),
 		);
 	});
@@ -308,7 +304,7 @@ describe("renderTable", () => {
 	test("says when a view definition is hidden, and shows generated columns", () => {
 		const hidden = { ...ordersView, viewDefinition: null, columns: [column("net", 1, { generated: { expression: "`total` / 1.21", stored: false } })] };
 		const text = render(hidden, snapshot([hidden]), emptyKnowledge(), "shop.shop.v_orders");
-		assert.match(text, /\| 1 \| net \| int generated \(`total` \/ 1\.21\) virtual \| no \|  \|/);
+		assert.match(text, /\n- net int generated \(`total` \/ 1\.21\) virtual$/);
 		assert.match(text, /\n## Definition\nnot visible to this user \(see the snapshot warnings\)\n/);
 	});
 
@@ -369,8 +365,8 @@ describe("renderTable columns", () => {
 	const positions = (text: string) =>
 		text
 			.split("\n")
-			.filter((line) => /^\| \d+ \| /.test(line))
-			.map((line) => Number(line.split(" | ")[0]?.slice(2)));
+			.filter((line) => /^- #\d+ /.test(line))
+			.map((line) => Number(line.slice(3, line.indexOf(" ", 3))));
 
 	test("by default shows 60: keys, related, commented or noted first, then by position, in position order", () => {
 		const text = render(wide, world, notes, "shop.shop.orders");
@@ -386,7 +382,7 @@ describe("renderTable columns", () => {
 
 	test('columns: "all" shows every column and no footer', () => {
 		const text = render(wide, world, notes, "shop.shop.orders", { columns: "all" });
-		assert.equal(positions(text).length, 600);
+		assert.equal(text.split("\n").filter((line) => /^- \w+ int\b/.test(line)).length, 600);
 		assert.match(text, /\n## Columns\n/);
 		assert.doesNotMatch(text, /more columns/);
 	});
@@ -397,6 +393,39 @@ describe("renderTable columns", () => {
 		assert.deepEqual(positions(text), [400, 401]);
 		const none = render(wide, world, notes, "shop.shop.orders", { columnFilter: "zzz" });
 		assert.match(none, /\n## Columns matching "zzz" \(0 of 600\)\nNo column matches; try another column_filter or columns: "all"\./);
+	});
+});
+
+describe("renderTable stays short", () => {
+	const long = `Estado: ${"0 pendiente, 1 cobrada, 2 devuelta; ".repeat(5)}fin`;
+	const note = `Ver ${"el proceso de cobro ".repeat(8)}fin`;
+	const table = ordersTable({
+		columns: [column("id", 1), column("estado", 2, { comment: long }), column("cobro", 3)],
+		indexes: Array.from({ length: 15 }, (_, index) => ({ name: `idx_${index}`, columns: ["estado"], unique: false, method: "BTREE" })),
+		triggers: Array.from({ length: 12 }, (_, index) => ({ name: `trg_${index}`, timing: "AFTER" as const, events: ["INSERT" as const] })),
+		foreignKeys: Array.from({ length: 14 }, (_, index) => ({ ...ordersTable().foreignKeys[0]!, name: `fk_${index}` })),
+	});
+	const notes = knowledge([annotation("a-c", "shop.shop.orders.cobro", { text: note })]);
+	const world = snapshot([customersTable(), table]);
+
+	test("cuts long column comments and notes at 100 characters, keeps note ids, and says how to read them whole", () => {
+		const text = render(table, world, notes, "shop.shop.orders");
+		assert.ok(text.includes(`\n- estado int — "${long.slice(0, 99)}…"\n`), text);
+		assert.ok(text.includes(`\n- cobro int · note: ${note.slice(0, 99)}… [id a-c · ana · 2026-11-06]\n`), text);
+		assert.match(text, /\nLong comments and notes are cut; a column_filter shows them whole\.\n/);
+		const filtered = render(table, world, notes, "shop.shop.orders", { columnFilter: "estado" });
+		assert.ok(filtered.includes(`\n- #2 estado int — "${long}"`), filtered);
+		assert.doesNotMatch(filtered, /are cut/);
+		assert.doesNotMatch(render(ordersTable(), snapshot([ordersTable()]), emptyKnowledge(), "shop.shop.orders"), /are cut/);
+	});
+
+	test("lists at most 10 indexes, triggers and foreign keys, and counts the rest", () => {
+		const text = render(table, world, notes, "shop.shop.orders");
+		const count = (prefix: string) => text.split("\n").filter((line) => line.startsWith(prefix)).length;
+		assert.deepEqual([count("- idx_"), count("- trg_"), count("- fk_")], [10, 10, 10]);
+		assert.match(text, /\n- fk_9: [^\n]*\n… 4 more foreign keys\n/);
+		assert.match(text, /\n- trg_9: AFTER INSERT\n… 2 more triggers\n/);
+		assert.match(text, /\n- idx_9 \(estado\) BTREE\n… 5 more indexes$/);
 	});
 });
 
@@ -463,45 +492,73 @@ describe("renderStatus", () => {
 });
 
 describe("renderSearch", () => {
-	const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
-	const results: SearchResult[] = [
-		{ ...base, target: "shop.shop.orders", object: "table", matchedIn: ["name", 'columns: total ("Includes VAT.")'] },
-		{ ...base, target: "legacy.public.cus", object: "table", matchedIn: ['referenced as "Cliente" ×3 (inferred)'], inferred: true },
-		{ ...base, target: "shop.shop", object: "database", matchedIn: ["note: The web store."], snippet: "The web store." },
-	];
+	const base = { snippet: "", inferred: false, abbreviated: false, about: "", matchedIn: [], columns: [], moreColumns: 0 };
+	const orders: SearchResult = {
+		...base,
+		target: "shop.shop.orders",
+		object: "table",
+		about: "One row per checkout.",
+		columns: [
+			{ name: "total", snippet: "Includes VAT." },
+			{ name: "customer_id", snippet: "" },
+		],
+	};
+	const cus: SearchResult = { ...base, target: "legacy.public.cus", object: "table", inferred: true, inferredFrom: [{ comment: "Cliente", count: 3 }] };
+	const database: SearchResult = { ...base, target: "shop.shop", object: "database", about: "The web store." };
 
-	test("one line per result with why it matched, names as displayed", () => {
+	test("one line per result: kind, name, what it is, matching columns", () => {
 		assert.equal(
-			renderSearch({ results: results.slice(0, 1).concat(results.slice(2)), total: 2 }),
-			["2 matches.", '- table shop.orders · name · columns: total ("Includes VAT.")', "- database shop · note: The web store."].join("\n"),
+			renderSearch({ results: [orders, database], total: 2 }),
+			["2 matches.", '- table shop.orders — One row per checkout. · columns: total "Includes VAT.", customer_id', "- database shop — The web store."].join("\n"),
 		);
 	});
 
-	test("says inferred results are inferences", () => {
+	test("cuts what a result is at 80 characters and lists at most 3 columns", () => {
+		const columns = ["a", "b", "c", "d", "e"].map((name) => ({ name, snippet: "" }));
 		assert.equal(
-			renderSearch({ results: results.slice(1, 2), total: 1 }),
+			renderSearch({ results: [{ ...orders, about: `${"x".repeat(100)}\nmore`, columns, moreColumns: 2 }], total: 1 }),
+			`1 match.\n- table shop.orders — ${"x".repeat(79)}… · columns: a, b, c (+4)`,
+		);
+	});
+
+	test("marks inferred results and says once what that means", () => {
+		assert.equal(
+			renderSearch({ results: [cus, { ...cus, target: "legacy.public.art", inferredFrom: [{ comment: "Artículo", count: 2 }] }], total: 2 }),
 			[
-				"1 match.",
+				"2 matches.",
 				'- table legacy.public.cus · referenced as "Cliente" ×3 (inferred)',
+				'- table legacy.public.art · referenced as "Artículo" ×2 (inferred)',
 				"(inferred): only the comments of columns that reference the table match; present that meaning as an inference and ask the user to confirm it.",
 			].join("\n"),
 		);
 	});
 
-	test("shows relationship sides by display name", () => {
-		const relationship = { from: { table: "shop.shop.refunds", columns: ["order_id"] }, to: { table: "shop.shop.orders", columns: ["id"] } };
-		const target = "shop.shop.refunds(order_id) → shop.shop.orders(id)";
+	test("marks a table found only by an abbreviation of its name", () => {
 		assert.equal(
-			renderSearch({
-				results: [{ ...base, target, object: "relationship", matchedIn: ["relationship note: app code"], snippet: "app code", relationship }],
-				total: 1,
-			}),
-			"1 match.\n- relationship shop.refunds(order_id) → shop.orders(id) · relationship note: app code",
+			renderSearch({ results: [{ ...base, target: "shop.shop.alb_cab", object: "table", abbreviated: true }], total: 1 }),
+			"1 match.\n- table shop.alb_cab (abbreviated name)",
 		);
 	});
 
-	test("says when the list is partial, and when there is nothing", () => {
-		assert.equal(renderSearch({ results: results.slice(0, 1), total: 87 }).split("\n")[0], "Showing 1 of 87 matches; refine the query to narrow them.");
+	test("shows relationship sides by display name, with their note", () => {
+		const relationship = { from: { table: "shop.shop.refunds", columns: ["order_id"] }, to: { table: "shop.shop.orders", columns: ["id"] } };
+		const target = "shop.shop.refunds(order_id) → shop.shop.orders(id)";
+		assert.equal(
+			renderSearch({ results: [{ ...base, target, object: "relationship", about: "app code", relationship }], total: 1 }),
+			"1 match.\n- relationship shop.refunds(order_id) → shop.orders(id) — app code",
+		);
+	});
+
+	test("says when the list is partial, how many weaker matches were left out, and when there is nothing", () => {
+		assert.equal(
+			renderSearch({ results: [orders], total: 87 }).split("\n")[0],
+			"Showing 1 of 87 matches; refine the query or pass a higher limit for more.",
+		);
+		assert.deepEqual(renderSearch({ results: [orders], total: 5, weaker: 4 }).split("\n"), [
+			"Showing 1 of 5 matches; refine the query or pass a higher limit for more.",
+			'- table shop.orders — One row per checkout. · columns: total "Includes VAT.", customer_id',
+			"… 4 weaker matches not shown.",
+		]);
 		assert.equal(renderSearch({ results: [], total: 0 }), "No matches.");
 	});
 
@@ -510,23 +567,23 @@ describe("renderSearch", () => {
 			renderSearch({ results: [], total: 0, unmatched: ["xyzzy", "plugh"] }),
 			'No matches for "xyzzy", "plugh". Try synonyms, another language (English or Spanish) or single words.',
 		);
-		assert.deepEqual(renderSearch({ results: results.slice(0, 1), total: 1, unmatched: ["xyzzy"] }).split("\n"), [
+		assert.deepEqual(renderSearch({ results: [database], total: 1, unmatched: ["xyzzy"] }).split("\n"), [
 			"1 match.",
 			'Nothing matches "xyzzy"; these results match the other words.',
-			'- table shop.orders · name · columns: total ("Includes VAT.")',
+			"- database shop — The web store.",
 		]);
 	});
 
 	test("shows the other databases of an identical table compactly", () => {
 		const alsoIn = Array.from({ length: 9 }, (_, index) => `emp_${String(index + 2).padStart(3, "0")}`);
 		assert.equal(
-			renderSearch({ results: [{ ...base, target: "emp_001.emp_001.fac_cab", object: "table", matchedIn: ["name"], alsoIn }], total: 1 }),
-			"1 match.\n- table emp_001.fac_cab (+9 identical: emp_002, emp_003, emp_004, …) · name",
+			renderSearch({ results: [{ ...base, target: "emp_001.emp_001.fac_cab", object: "table", alsoIn }], total: 1 }),
+			"1 match.\n- table emp_001.fac_cab (+9 identical: emp_002, emp_003, emp_004, …)",
 		);
-		const twice = ["fac_cab", "fac_lin"].map((name): SearchResult => ({ ...base, target: `emp_001.emp_001.${name}`, object: "table", matchedIn: ["name"], alsoIn: ["emp_002"] }));
+		const twice = ["fac_cab", "fac_lin"].map((name): SearchResult => ({ ...base, target: `emp_001.emp_001.${name}`, object: "table", alsoIn: ["emp_002"] }));
 		assert.equal(
 			renderSearch({ results: twice, total: 2 }),
-			"2 matches.\n- table emp_001.fac_cab (+1 identical: emp_002) · name\n- table emp_001.fac_lin (+1 identical) · name",
+			"2 matches.\n- table emp_001.fac_cab (+1 identical: emp_002)\n- table emp_001.fac_lin (+1 identical)",
 		);
 	});
 });
@@ -590,13 +647,13 @@ describe("project notes and other connections", () => {
 
 	test("search shows the connection of a relationship side in another connection", () => {
 		const relationship = { from: { table: "crm.crm.clientes", columns: ["cod_erp"] }, to: { connection: "erp", table: "erp.erp.cus", columns: ["cod"] } };
-		const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
+		const base = { snippet: "", inferred: false, abbreviated: false, columns: [], moreColumns: 0 };
 		assert.equal(
 			renderSearch({
-				results: [{ ...base, target: "x", object: "relationship", matchedIn: ["relationship note: code"], snippet: "code", relationship }],
+				results: [{ ...base, target: "x", object: "relationship", matchedIn: ["relationship note: code"], snippet: "code", about: "code", relationship }],
 				total: 1,
 			}),
-			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.cus(cod) · relationship note: code",
+			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.cus(cod) — code",
 		);
 	});
 });

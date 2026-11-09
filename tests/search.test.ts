@@ -229,7 +229,9 @@ describe("searchSchema: what it covers", () => {
 			object: "relationship",
 			matchedIn: ["relationship note: Sin FK: tablas MyISAM"],
 			snippet: "Sin FK: tablas MyISAM",
+			about: "Sin FK: tablas MyISAM",
 			inferred: false,
+			abbreviated: false,
 			columns: [],
 			moreColumns: 0,
 			relationship: { from: { table: "shop.shop.orders", columns: ["customer_id"] }, to: { table: "shop.shop.customers", columns: ["id"] } },
@@ -245,12 +247,13 @@ describe("searchSchema: what it covers", () => {
 		assert.match(result.snippet, /^….* la facturación anual .*…$/);
 	});
 
-	test("returns the first `limit` results and the total", () => {
+	test("returns the first `limit` results (10 by default) and the total", () => {
 		const tables = Array.from({ length: 30 }, (_, index) => ordersTable({ name: `t_${String(index).padStart(2, "0")}`, columns: [] }));
 		const many = snapshot(tables);
 		const page = searchSchema(many, emptyKnowledge(), "t_");
 		assert.equal(page.total, 30);
-		assert.equal(page.results.length, 20);
+		assert.equal(page.results.length, 10);
+		assert.equal(page.weaker, 0);
 		assert.equal(page.results[0]?.target, "shop.shop.t_00");
 		assert.equal(searchSchema(many, emptyKnowledge(), "t_", { limit: 5 }).results.length, 5);
 	});
@@ -359,7 +362,8 @@ describe("searchSchema: words", () => {
 	});
 
 	test("keeps a table that matches only some words, below those that match more", () => {
-		const found = targets("pedido cliente");
+		// The limit lists the weak matches too: by default cli scores too far below ped_cab to be shown.
+		const found = searchSchema(abbreviated, emptyKnowledge(), "pedido cliente", { limit: 50 }).results.map((result) => result.target);
 		assert.equal(found[0], "shop.shop.ped_cab");
 		assert.ok(found.includes("shop.shop.cli"), found.join("\n"));
 	});
@@ -427,5 +431,50 @@ describe("searchSchema: identical databases", () => {
 			found.results.map((result) => [result.target, result.alsoIn]),
 			[["emp_002.emp_002.fac_cab", undefined]],
 		);
+	});
+});
+
+describe("searchSchema: what a result says", () => {
+	test("says what the table is: its comment, else its team note, whatever matched", () => {
+		const team = knowledge([annotation("n-1", "shop.shop.alb_cab", { text: "Albaranes de venta.\nUno por envío." })]);
+		const found = searchSchema(abbreviated, team, "cliente", { limit: 50 }).results;
+		const about = (name: string) => found.find((result) => result.target === `shop.shop.${name}`)?.about;
+		assert.equal(about("fac_cab"), "Cabecera de facturas emitidas");
+		assert.equal(about("alb_cab"), "Albaranes de venta. Uno por envío.");
+		assert.equal(about("ped_cab"), "");
+		const [database] = searchSchema(legacy, notes, "principal").results;
+		assert.equal(database?.about, "Base principal de la tienda online");
+	});
+
+	test("marks a table found only by an abbreviation of its name", () => {
+		const [cab] = searchSchema(abbreviated, emptyKnowledge(), "albaran cabecera").results;
+		assert.equal(cab?.target, "shop.shop.alb_cab");
+		assert.equal(cab?.abbreviated, true);
+		const [fac] = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas").results;
+		assert.equal(fac?.target, "shop.shop.fac_cab");
+		assert.equal(fac?.abbreviated, false);
+	});
+
+	test("an inferred result carries the comments it was inferred from", () => {
+		const cus = searchSchema(erp, emptyKnowledge(), "cliente").results.find((result) => result.target === "gestion.gestion.cus");
+		assert.deepEqual(cus?.inferredFrom, [
+			{ comment: "Cliente Habitual", count: 5 },
+			{ comment: "Cliente", count: 2 },
+		]);
+		assert.equal(searchSchema(erp, emptyKnowledge(), "cliente").results[0]?.inferredFrom, undefined);
+	});
+});
+
+describe("searchSchema: how many results", () => {
+	test("leaves out matches far weaker than the best and counts them; an explicit limit lists them", () => {
+		const found = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas cabecera");
+		assert.deepEqual(
+			found.results.map((result) => result.target),
+			["shop.shop.fac_cab"],
+		);
+		assert.ok(found.total > 1, String(found.total));
+		assert.equal(found.weaker, found.total - 1);
+		const all = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas cabecera", { limit: 50 });
+		assert.deepEqual([all.results.length, all.weaker], [found.total, 0]);
 	});
 });

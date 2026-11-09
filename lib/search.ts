@@ -1,6 +1,6 @@
 import type { Annotation, Knowledge, RelationshipSide } from "./knowledge/types.ts";
 import { displayName, formatName, parseName } from "./model/names.ts";
-import { incomingReferences, namePatternTargets } from "./model/references.ts";
+import { type CommentCount, incomingReferences, namePatternTargets } from "./model/references.ts";
 import type { Snapshot, Table } from "./model/snapshot.ts";
 
 // Search over the stored snapshot and knowledge; it never touches the server.
@@ -57,7 +57,15 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // Results are tables (and views, databases, documented relationships), never
 // loose columns: a column that matches is listed under its table, so 40
 // matching columns of one table cost one line, not 40. Each result says what
-// it matched, strongest field first.
+// it matched, strongest field first, and what it is (`about`: the table
+// comment, else a team note), so the agent can often answer from the results
+// alone.
+//
+// Without a limit, the 10 best are returned, and only those scoring at least
+// WEAK_SHARE of the best (the exact-name bonus left out on both sides; an
+// exact name always stays): a table matching one word of four, or a passing
+// mention in a column comment, is counted in `weaker` instead of costing a
+// line. An explicit limit returns that many, weak or not.
 //
 // Inferred meaning is how "cliente" finds cus, a table without comment that
 // fifty columns called cod_cus describe as "Cliente Habitual". It is evidence,
@@ -92,8 +100,18 @@ export interface SearchResult {
 	readonly matchedIn: readonly string[];
 	/** At most SNIPPET_LENGTH characters of the strongest matched text, around the match; "" when only names matched. */
 	readonly snippet: string;
+	/**
+	 * What it is, on one line and uncut: the table comment, else its matching (or
+	 * first) team note; a database's note; a relationship's note. "" when there
+	 * is none: then `snippet` is the best there is.
+	 */
+	readonly about: string;
 	/** True when part of the match is meaning inferred from referencing columns: an inference, not a fact. */
 	readonly inferred: boolean;
+	/** The comments of the referencing columns that matched, when inferred. */
+	readonly inferredFrom?: readonly CommentCount[];
+	/** True when the only thing that matched is an abbreviation in its name (alb_cab for "albarán"). */
+	readonly abbreviated: boolean;
 	/** Matching columns of a table or view, best first, at most MAX_COLUMNS. */
 	readonly columns: readonly ColumnMatch[];
 	/** Matching columns beyond those listed. */
@@ -107,20 +125,26 @@ export interface SearchResult {
 export interface SearchResults {
 	/** The best `limit` results. */
 	readonly results: readonly SearchResult[];
-	/** How many matched in total, identical copies counted once, so callers can say "showing 20 of 87". */
+	/** How many matched in total, identical copies counted once, so callers can say "showing 10 of 87". */
 	readonly total: number;
+	/** Matches left out for scoring far below the best; 0 with an explicit limit. Optional for callers building results by hand. */
+	readonly weaker?: number;
 	/** Query words, as typed but normalized, that match nothing in the databases searched. */
 	readonly unmatched?: readonly string[];
 }
 
 export interface SearchOptions {
+	/** How many results; without it, DEFAULT_SEARCH_LIMIT and the weak ones left out. */
 	readonly limit?: number;
 	/** Only this database: "acme", "acme.acme", or in PostgreSQL "app" or "app.public". */
 	readonly database?: string;
 }
 
 export const SNIPPET_LENGTH = 120;
-const COLUMN_SNIPPET_LENGTH = 60;
+export const DEFAULT_SEARCH_LIMIT = 10;
+/** Without a limit, results scoring under this share of the best are only counted. */
+const WEAK_SHARE = 0.2;
+const COLUMN_SNIPPET_LENGTH = 40;
 const MAX_COLUMNS = 5;
 /** Tables whose referencing columns are summarized per search; each costs one scan of its database. */
 const MAX_INFERRED_TABLES = 10;
@@ -185,10 +209,10 @@ export function foldWord(word: string): string {
 }
 
 export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: string, options: SearchOptions = {}): SearchResults {
-	const { limit = 20 } = options;
+	const limit = options.limit ?? DEFAULT_SEARCH_LIMIT;
 	const q = parseQuery(query);
 	const wanted = databaseFilter(snapshot, options.database);
-	if (q.words.length === 0) return { results: [], total: 0, unmatched: [q.needle] };
+	if (q.words.length === 0) return { results: [], total: 0, weaker: 0, unmatched: [q.needle] };
 
 	const match = matcher(q);
 	const notes = notesByTarget(knowledge.annotations);
@@ -230,7 +254,9 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 				const matched = names.map((name) => match.text(name));
 				addName(doc, matched);
 				doc.exactName = names.some((name) => match.isExactName(name));
-				for (const note of notes.get(schemaName) ?? []) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
+				const own = notes.get(schemaName) ?? [];
+				for (const note of own) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
+				doc.about = bestNote(own, match);
 				docs.push(doc);
 			}
 
@@ -262,6 +288,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 		const doc = byTarget.get(name) as Doc;
 		const tf = new Array<number>(q.words.length).fill(0);
 		const shown: string[] = [];
+		const from: CommentCount[] = [];
 		let phrase = false;
 		for (const item of incomingReferences(snapshot, knowledge, name).summary) {
 			const matched = match.text(item.comment);
@@ -273,9 +300,11 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 			});
 			phrase ||= matched.phrase;
 			shown.push(`"${item.comment}" ×${item.count}`);
+			from.push(item);
 		}
 		if (shown.length === 0) continue;
 		doc.inferred = true;
+		doc.inferredFrom = from;
 		addEvidence(doc, { field: "inferred", label: `referenced as ${shown.join(", ")} (inferred)`, snippet: "", tf, length: 0 });
 		if (phrase) doc.phrase = Math.max(doc.phrase, PHRASE_BONUS.stated);
 	}
@@ -286,13 +315,17 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 		if (wanted !== null && !here.some((item) => wanted.has(schemaKeyOf(item.table)))) continue;
 		const doc = newDoc(`${side(relationship.from)} → ${side(relationship.to)}`, "relationship", docs.length);
 		doc.relationship = { from: relationship.from, to: relationship.to };
+		doc.about = collapse(relationship.note);
 		addText(doc, "relationship", "relationship note", relationship.note, match.text(relationship.note), SNIPPET_LENGTH);
 		docs.push(doc);
 	}
 
 	const ranked = rank(docs, q);
 	const unmatched = q.shown.filter((_, index) => !docs.some((doc) => doc.matched[index]));
-	return { results: ranked.slice(0, Math.max(0, limit)).map((item) => item.result), total: ranked.length, unmatched };
+	const best = Math.max(0, ...ranked.map((item) => item.base));
+	const kept = options.limit !== undefined ? ranked : ranked.filter((item) => item.exactName || item.base >= WEAK_SHARE * best);
+	const results = kept.slice(0, Math.max(0, limit)).map((item) => item.result);
+	return { results, total: ranked.length, weaker: ranked.length - kept.length, unmatched };
 }
 
 interface Query {
@@ -440,6 +473,8 @@ interface Evidence {
 interface ColumnDraft {
 	readonly name: string;
 	readonly snippet: string;
+	/** True when only an abbreviation in its name matched, no comment or note. */
+	readonly abbreviated: boolean;
 	readonly position: number;
 	readonly nameTf: readonly number[] | null;
 	readonly textTf: readonly number[] | null;
@@ -462,6 +497,8 @@ interface Doc {
 	/** The phrase bonus earned, as a share of the query's IDF. */
 	phrase: number;
 	inferred: boolean;
+	inferredFrom?: readonly CommentCount[];
+	about: string;
 	relationship?: SearchResult["relationship"];
 	/** Tables only: what makes copies identical, and the database to show for this one. */
 	copy?: { readonly key: string; readonly shown: string };
@@ -469,6 +506,9 @@ interface Doc {
 
 interface Ranked {
 	readonly score: number;
+	/** The score without the exact-name bonus: what weak results are measured by. */
+	readonly base: number;
+	readonly exactName: boolean;
 	readonly result: SearchResult;
 }
 
@@ -476,7 +516,7 @@ type Notes = ReadonlyMap<string, readonly Annotation[]>;
 
 function newDoc(target: string, object: SearchObject, order: number): Doc {
 	const lengths = Object.fromEntries(FIELD_NAMES.map((field) => [field, 0])) as Record<Field, number>;
-	return { target, object, order, evidence: [], columns: [], lengths, tf: {}, matched: [], exactName: false, phrase: 0, inferred: false };
+	return { target, object, order, evidence: [], columns: [], lengths, tf: {}, matched: [], exactName: false, phrase: 0, inferred: false, about: "" };
 }
 
 function collectTable(table: Table, tableName: string, notes: Notes, match: Matcher, order: number): Doc {
@@ -485,7 +525,9 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 	addName(doc, [own]);
 	doc.exactName = match.isExactName(table.name);
 	addText(doc, "stated", "table comment", table.comment, match.text(table.comment), SNIPPET_LENGTH);
-	for (const note of notes.get(tableName) ?? []) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
+	const tableNotes = notes.get(tableName) ?? [];
+	for (const note of tableNotes) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
+	doc.about = collapse(table.comment) || bestNote(tableNotes, match);
 	const definition = table.viewDefinition ?? "";
 	addText(doc, "definition", "definition", definition, match.text(definition), SNIPPET_LENGTH);
 
@@ -512,12 +554,19 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 		doc.columns.push({
 			name: column.name,
 			snippet: text === null ? "" : snippetAround(collapse(text.raw), text.first, COLUMN_SNIPPET_LENGTH),
+			abbreviated: text === null && matchedName.abbreviated,
 			position: column.position,
 			nameTf: name.tf,
 			textTf: text?.tf ?? null,
 		});
 	}
 	return doc;
+}
+
+/** The first note that matched, else the first one, on one line; "" without notes. */
+function bestNote(notes: readonly Annotation[], match: Matcher): string {
+	const note = notes.find((item) => match.text(item.text).tf !== null) ?? notes[0];
+	return note === undefined ? "" : collapse(note.text);
 }
 
 function addName(doc: Doc, matched: readonly Matched[]): void {
@@ -587,7 +636,7 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 	};
 
 	const idfSum = idf.reduce((total, value) => total + value, 0);
-	const scored: { doc: Doc; score: number; result: SearchResult }[] = [];
+	const scored: { doc: Doc; score: number; base: number; exactName: boolean; result: SearchResult }[] = [];
 	for (const doc of docs) {
 		if (!doc.matched.some(Boolean)) continue;
 		let sum = 0;
@@ -599,14 +648,15 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 			matched += 1;
 			sum += ((idf[index] as number) * tf * (K1 + 1)) / (tf + K1);
 		}
-		const score = sum * (matched / count) ** 2 + (doc.exactName ? EXACT_NAME_BONUS : 0) + doc.phrase * idfSum;
-		scored.push({ doc, score, result: finish(doc, idf, (field) => norm(doc, field)) });
+		const base = sum * (matched / count) ** 2 + doc.phrase * idfSum;
+		const score = base + (doc.exactName ? EXACT_NAME_BONUS : 0);
+		scored.push({ doc, score, base, exactName: doc.exactName, result: finish(doc, idf, (field) => norm(doc, field)) });
 	}
 
 	// Identical copies: the first in snapshot order is shown, ranked by the best of them.
-	const groups = new Map<string, { doc: Doc; score: number; result: SearchResult; others: Doc[] }>();
+	const groups = new Map<string, { doc: Doc; score: number; base: number; exactName: boolean; result: SearchResult; others: Doc[] }>();
 	const ranked: Ranked[] = [];
-	const single: { score: number; result: SearchResult }[] = [];
+	const single: Ranked[] = [];
 	for (const item of scored) {
 		if (item.doc.copy === undefined) {
 			single.push(item);
@@ -618,11 +668,13 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 		} else {
 			group.others.push(item.doc);
 			group.score = Math.max(group.score, item.score);
+			group.base = Math.max(group.base, item.base);
 		}
 	}
 	for (const group of groups.values()) {
 		const alsoIn = group.others.sort((a, b) => a.order - b.order).map((doc) => doc.copy?.shown as string);
-		ranked.push({ score: group.score, result: alsoIn.length === 0 ? group.result : { ...group.result, alsoIn } });
+		const { score, base, exactName } = group;
+		ranked.push({ score, base, exactName, result: alsoIn.length === 0 ? group.result : { ...group.result, alsoIn } });
 	}
 	ranked.push(...single);
 	return ranked.sort(compareRanked);
@@ -653,12 +705,19 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 	}
 	// Stable sort: equal weights keep the order they were found in (name before comment).
 	lines.sort((a, b) => b.weight - a.weight);
+	const abbreviated =
+		doc.evidence.length > 0 &&
+		doc.evidence.every((evidence) => evidence.label === "name (abbreviation)") &&
+		doc.columns.every((column) => column.abbreviated);
 	return {
 		target: doc.target,
 		object: doc.object,
 		matchedIn: lines.map((line) => line.label),
 		snippet: lines.find((line) => line.snippet !== "")?.snippet ?? "",
+		about: doc.about,
 		inferred: doc.inferred,
+		...(doc.inferredFrom !== undefined && { inferredFrom: doc.inferredFrom }),
+		abbreviated,
 		columns: columns.slice(0, MAX_COLUMNS).map(({ column }) => ({ name: column.name, snippet: column.snippet })),
 		moreColumns: Math.max(0, columns.length - MAX_COLUMNS),
 		...(doc.relationship !== undefined && { relationship: doc.relationship }),
