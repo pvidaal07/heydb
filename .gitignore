@@ -1,6 +1,12 @@
-# Binary
-/heydb
-dist/
+# Dependencies
+node_modules/
+
+# Local heydb data
+.heydb/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .idea/
@@ -8,17 +14,8 @@ dist/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Local heydb data
-.heydb/
-
-# Internal docs
+# Internal docs (v1)
 heydb.md
 openspec/
-
 .atl/
-
 .windsurf/

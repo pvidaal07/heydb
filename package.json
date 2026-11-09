@@ -1,0 +1,70 @@
+{
+	"name": "heydb",
+	"version": "2.0.0-beta.0",
+	"description": "Database schema context for AI agents: introspect MySQL, MariaDB and PostgreSQL, keep a local snapshot, and share annotated knowledge through git.",
+	"license": "MIT",
+	"author": "pvidaal07",
+	"homepage": "https://github.com/pvidaal07/heydb#readme",
+	"bugs": {
+		"url": "https://github.com/pvidaal07/heydb/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/pvidaal07/heydb.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"database",
+		"schema",
+		"mysql",
+		"mariadb",
+		"postgresql",
+		"ai-agent",
+		"legacy"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"packageManager": "pnpm@11.0.9",
+	"pi": {
+		"extensions": [
+			"./extensions/heydb.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"files": [
+		"extensions",
+		"lib",
+		"skills",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"test": "node --test \"tests/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit",
+		"check": "tsc --noEmit && node --run test",
+		"db:up": "docker compose -f tests/integration/compose.yaml up -d --wait",
+		"db:down": "docker compose -f tests/integration/compose.yaml down",
+		"test:integration": "node --test --test-timeout=60000 \"tests/integration/**/*.integration.ts\""
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^1.5.0",
+		"@earendil-works/pi-tui": "^1.5.0",
+		"@types/node": "^22.19.0",
+		"@types/pg": "^8.23.1",
+		"typescript": "^5.9.3"
+	},
+	"dependencies": {
+		"mysql2": "^3.24.6",
+		"pg": "^8.23.1"
+	}
+}

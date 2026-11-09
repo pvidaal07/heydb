@@ -1,316 +1,147 @@
 # heydb
 
-Introspect MySQL databases and expose the schema to AI agents via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io).
+**Database schema context for AI agents, built for legacy databases.**
 
-heydb syncs your live database schema into a local SQLite store, lets your team annotate tables and columns with business context, and serves everything to AI tools like Claude Code and Cursor — without granting them direct database access.
+heydb reads the structure of your MySQL, MariaDB or PostgreSQL database (never its data), keeps a snapshot in your repository, and lets you and your agent write down what tables and columns really mean. Your agent understands the database without ever connecting to it, and your team gets that knowledge with a `git pull`.
 
----
+It is a [Pi](https://pi.dev) package: Pi gets agent tools, slash commands and a skill.
+
+> [!NOTE]
+> **v2 is in beta.** The previous Go CLI and MCP server (v1) are archived at tag [`v1.3.1`](https://github.com/pvidaal07/heydb/releases/tag/v1.3.1) and no longer maintained.
+
+## Why
+
+On a legacy database the agent guesses. A table called `gar` "looks like" guarantees and turns out to hold the articles; `estado = 3` means something only the team knows; half the joins have no foreign key. heydb gives the agent the evidence instead of the name:
+
+- the structure, read-only and complete, with warnings for anything your privileges hide;
+- who references each table and how those columns are commented (`ref_gar` "Artículo" ×12 says more than the name `gar`);
+- the notes your team and your agent saved, each with its author and its source.
+
+The agent is told to present inferences as inferences and ask before saving them.
 
 ## Install
 
-### Homebrew (macOS & Linux)
+```sh
+pi install npm:heydb
+```
+
+From the repository instead (latest commit): `pi install git:github.com/pvidaal07/heydb`.
+
+Requires Pi and Node.js 22.19 or later.
+
+## Quick start
+
+In Pi, from your project folder:
+
+1. `/heydb:init` creates `.heydb/`.
+2. `/heydb:connect` asks for a name, engine, host, port, user and databases, and last for the password in a masked input.
+3. `/heydb:sync` captures the schema and, if the project contains code that queries those tables, offers to let the agent read it and take notes.
+
+Then just work: ask your agent about the database. It reads the snapshot with the heydb tools and saves what it learns from you and from the code.
+
+## Supported databases
+
+| Engine | Tested in CI | Notes |
+|---|---|---|
+| MySQL | 8.0 | 5.7 used on a real 1,500-table ERP |
+| MariaDB | 10.6 | 10.2 or later expected |
+| PostgreSQL | 16 | 14 or later expected; one connection reaches one database, choose schemas inside it |
+
+Captured: databases and schemas; tables, views and materialized views with their SQL; columns (type, nullability, default, comment, collation, auto-increment or identity, generated); primary keys in key order; indexes; foreign keys, composite and across databases, with `ON DELETE`/`ON UPDATE`; triggers; routine names; approximate row counts. Never row data.
+
+Every session is read-only, even for a user with write privileges.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/heydb:init` | Create `.heydb/` in the project |
+| `/heydb:connect` | Add a connection; the password goes to `.heydb/.env` |
+| `/heydb:password [connection]` | Change a connection's password |
+| `/heydb:connections [use <name> \| remove <name>]` | List connections, set the default, remove one (its snapshot and notes stay) |
+| `/heydb:sync [connection]` | Capture the schema; the snapshot is rewritten only when the structure changed |
+| `/heydb:status [connection]` | Show whether the live database drifted from the snapshot, and what changed |
+| `/heydb:learn-code [connection] [path]` | Let the agent read the code that queries the tables and note what it shows |
+| `/heydb:about` | Show the version |
+
+## Agent tools
+
+None of them connects to the database; they read and write files in `.heydb/`.
+
+| Tool | What it does |
+|---|---|
+| `heydb_overview` | Size, comment coverage, name prefixes, most referenced tables, warnings and project notes |
+| `heydb_table` | One table: evidence of meaning first (comment, notes, who references it), then keys, relationships and up to 60 columns, with a column filter |
+| `heydb_search` | Search names, comments, view definitions and notes, ignoring case, accents and plurals; finds tables by what references them, marked as inferred |
+| `heydb_annotate` | Save a note on the project, a database, table or column |
+| `heydb_relate` | Record a join that has no foreign key, also across connections |
+| `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
+
+Notes saved by the agent are signed `<your git user.name> (via agent)` and end with their source: `(code: src/Models/Order.php)` or `(told by the user)`.
+
+## Learning from code
+
+After a sync, heydb looks for code in the project that uses the synced tables. It walks the folders, including ones git ignores (a reference copy of another repository, for example), and skips `node_modules`, `vendor`, build output, CI folders and lockfiles. It reads modern and legacy languages: PHP, TypeScript, JavaScript, Python, Java, C#, Go, Ruby, SQL, Kotlin, Scala, Harbour/Clipper, Delphi, Visual Basic, COBOL, ABL and RPG.
+
+A table only counts in database context: SQL with its statement verb (`SELECT … FROM gar`, `UPDATE gar … SET`, `INSERT INTO gar`), including SQL whose database prefix is built by code (`"FROM " + cEmp + ".gar"`), or a table declaration (`protected $table = 'gar'`, `cTabla := "gar"`, `@Table(name = "gar")`, `__tablename__`, `DB::table('gar')`…). A table called `config` is not matched by every comment that says "config".
+
+If it finds such code it asks first, because reading it costs tokens. The agent then notes only what the code makes explicit (valid values, units, joins without a foreign key), stops after about 20 notes and leaves what remains unclear as questions. `/heydb:learn-code eagle ../api-eagle` reads code that lives in another folder. The scan stops after 10 seconds or 50 MB on very large codebases.
+
+Without such code, notes come from your conversations: tell the agent what a table means and it saves it.
+
+## Several connections
+
+A project can have as many connections as it needs: `dev` and `prod`, or one per service. Commands and tools use the default unless you name one (`/heydb:sync prod`). Each connection has its own snapshot and notes.
+
+- **Across connections:** when `crm.clientes.cod_erp` holds codes of `erp`'s `gcl.cod`, the agent records it with `heydb_relate` and `to_connection: "erp"`, and `heydb_table gcl` on `erp` shows it.
+- **Project notes:** facts about the whole system ("one database per client; the central one is eagle") are saved with `scope: "project"` and shown first by `heydb_overview`.
+- **Microservices:** give each service its own `.heydb/`; heydb uses the nearest one above the folder Pi runs in.
+
+## Passwords
+
+`/heydb:connect` and `/heydb:password` save the password in `.heydb/.env` as `HEYDB_<NAME>_PASSWORD`, readable only by your user. heydb makes sure git ignores that file before writing, and refuses to write if git already tracks it. `config.json` only names the variable. You can also set it in your shell, which wins over the file:
 
 ```sh
-brew tap pvidaal07/tap
-brew install heydb
+export HEYDB_PROD_PASSWORD='…'
 ```
 
-To update:
+This keeps passwords out of git and out of the chat, not away from your own user account.
+
+## What gets committed
+
+| Path | Commit it? |
+|---|---|
+| `.heydb/config.json` | Yes: connections, with password references only |
+| `.heydb/snapshots/*.json.gz` | Yes: the schema, compressed (a 1,500-table ERP is about 470 KB) |
+| `.heydb/knowledge/` | Yes: the team's notes and relationships |
+| `.heydb/.env` | Never: local passwords |
+
+If your project's `.gitignore` excludes `.heydb/`, notes stay on your machine; heydb tells you when it saves one. To see snapshot diffs in git, add `*.json.gz diff=gzip` to `.gitattributes` and run `git config diff.gzip.textconv "gzip -dc"`.
+
+## Not yet
+
+- Running queries or reading row data.
+- Redis and other engines (Redis is next).
+- A CLI or MCP server for agents outside Pi.
+- Suggesting relationships on its own, beyond the name-pattern hints in `heydb_table`.
+- Listing orphaned notes (notes whose table or column disappeared) from a tool.
+- Storing passwords in the system keychain.
+
+Ideas and bugs are welcome in [issues](https://github.com/pvidaal07/heydb/issues).
+
+## Development
 
 ```sh
-brew upgrade heydb
+corepack enable
+pnpm install
+pnpm check                 # typecheck + unit tests
+node --run db:up           # MySQL 8.0, MariaDB 10.6 and PostgreSQL 16 in Docker
+node --run test:integration
+node --run db:down
+pi -e .                    # try the local copy in Pi
 ```
 
-### Go
-
-Requires [Go 1.21+](https://go.dev/dl/):
-
-```sh
-go install github.com/pvidaal07/heydb/cmd/heydb@latest
-```
-
-Make sure `$HOME/go/bin` is in your `$PATH`.
-
-### Download binary
-
-Grab the latest release for your platform from [GitHub Releases](https://github.com/pvidaal07/heydb/releases/latest), extract it, and move the binary to a directory in your PATH.
-
----
-
-## Quickstart
-
-### 1. Initialize
-
-Run once per project. Creates `.heydb/` in the current directory and registers the project.
-
-```sh
-heydb init
-```
-
-### 2. Add a connection
-
-Interactive form — prompts for host, port, database, username, and password.
-
-```sh
-heydb connect
-```
-
-> To list configured connections: `heydb connect --list`
-> To switch the active connection: `heydb connect --use <name>`
-
-### 3. Sync the schema
-
-Introspects the active connection and stores the schema in `~/.heydb/heydb.db`.
-
-```sh
-heydb sync
-```
-
-> List synced connections: `heydb sync --list`
-> Remove a connection's schema: `heydb sync --delete <name>`
-
-### 4. Serve the MCP server
-
-Starts the MCP server over stdio. Point your AI tool at this command.
-
-```sh
-heydb serve
-```
-
-### 5. Push / pull annotations (optional — for teams)
-
-Share annotations with teammates by committing the `.heydb/` directory to git.
-
-```sh
-heydb push     # export new annotations as a chunk into .heydb/chunks/
-heydb pull     # import chunks from .heydb/chunks/ into the local store
-```
-
-Commit `.heydb/manifest.json` and `.heydb/chunks/` to git. Each teammate runs `heydb pull` after a `git pull` to receive the latest annotations.
-
-### 6. Configure your AI assistant (optional)
-
-Inject heydb context into your AI assistant's configuration file:
-
-```sh
-heydb setup-ai
-```
-
-Auto-detects installed assistants (Claude Code, OpenCode) and writes the context block. You can also target specific assistants:
-
-```sh
-heydb setup-ai --claude      # Claude Code only
-heydb setup-ai --opencode    # OpenCode only
-heydb setup-ai --all         # all supported assistants
-```
-
-The block is idempotent — running `setup-ai` again updates it in-place without duplicating content.
-
----
-
-## Interactive TUI
-
-Run `heydb` in an interactive terminal (no arguments) to launch the visual navigator:
-
-```sh
-heydb
-```
-
-Or explicitly:
-
-```sh
-heydb tui
-```
-
-Three tabs available:
-
-| Tab | What it does |
-|-----|-------------|
-| **Connections** | Browse, add, edit, delete, and switch database connections |
-| **Schema** | Browse tables with drill-down to columns, indexes, and foreign keys |
-| **Search** | Keyword search across table and column names with cross-tab navigation |
-
-> **Tab / Shift+Tab** to switch tabs · **j/k** to navigate · **Enter** to select · **q** to quit
-
----
-
-## Query the schema
-
-Query your schema directly from the terminal without the MCP server:
-
-```sh
-heydb tables                  # list all tables
-heydb describe <table>        # columns, indexes, foreign keys
-heydb search <keyword>        # search by name or comment
-```
-
----
-
-## Schema drift detection
-
-```sh
-heydb review        # exits 0 if up to date, 1 if drifted
-heydb diff          # shows exactly what changed since last sync
-```
-
-Useful in CI to detect unapplied migrations.
-
----
-
-## Generate documentation
-
-```sh
-heydb docs                        # write .heydb/{connection}.md
-heydb docs --connection <name>    # specific connection
-heydb docs --stdout               # print to stdout
-```
-
-Generates a Markdown file with the full schema (tables, columns, indexes, foreign keys) plus all accumulated annotations, including author and date.
-
----
-
-## Collaborative annotations
-
-Annotations are accumulative — multiple annotations per table or column are allowed. Each annotation records the author and timestamp so you can see who wrote what and when.
-
-```
-> **Annotation** by pvidal (2026-05-21): This table stores user accounts
-> **Annotation** by jsmith (2026-05-20): Contains both active and deleted users
-```
-
-Annotations survive `heydb sync` runs — they are never overwritten by schema introspection.
-
-### Team workflow
-
-1. Add annotations via `heydb serve` (MCP tools) or TUI
-2. Run `heydb push` to export them as a chunk into `.heydb/chunks/`
-3. Commit `.heydb/manifest.json` and `.heydb/chunks/`
-4. Teammates run `git pull` then `heydb pull` to import the annotations
-
----
-
-## MCP tools
-
-The MCP server exposes twelve tools. All tools accept an optional `connection` parameter — when omitted, the active connection is used.
-
-| Tool | Description |
-|------|-------------|
-| `heydb_list_connections` | List all configured connections (name, active status, sync status) |
-| `heydb_list_tables` | List all tables with column count and comment |
-| `heydb_get_table` | Full details for a table (columns, indexes, FKs including implicit, annotations) |
-| `heydb_search` | Search across table/column names, annotation content, and implicit relationships |
-| `heydb_annotate` | Add an annotation for a table with business context |
-| `heydb_annotate_column` | Annotate a specific column with business context |
-| `heydb_annotate_db` | Annotate the database itself (purpose, ownership, constraints) |
-| `heydb_edit_annotation` | Edit the content of an existing annotation by UUID |
-| `heydb_delete_annotation` | Delete an annotation by UUID |
-| `heydb_add_relationship` | Document an implicit (undocumented) FK relationship between two tables |
-| `heydb_delete_relationship` | Delete an implicit relationship by UUID |
-| `heydb_list_relationships` | List all implicit relationships for the active connection |
-
----
-
-## Configure MCP in your AI tool
-
-### Claude Code
-
-**Global (recommended)** — available in every project:
-
-```sh
-claude mcp add heydb --scope user -- heydb serve
-```
-
-**Per project** — only available in the current directory:
-
-```sh
-claude mcp add heydb --scope project -- heydb serve
-```
-
-> Run `claude mcp list` to verify the server is connected. If it shows up in one
-> project but not another, it was added with `--scope project` instead of `--scope user`.
-
-Or add manually to `~/.claude/settings.json` (global) or `.claude/settings.json` (project):
-
-```json
-{
-  "mcpServers": {
-    "heydb": {
-      "command": "heydb",
-      "args": ["serve"],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
-### OpenCode
-
-Add to `~/.config/opencode/opencode.json` or `opencode.json` in your project root:
-
-```json
-{
-  "mcp": {
-    "heydb": {
-      "enabled": true,
-      "type": "local",
-      "command": ["heydb", "serve"]
-    }
-  }
-}
-```
-
-### Cursor
-
-Add to `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "heydb": {
-      "command": "heydb",
-      "args": ["serve"],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
----
-
-## Creating a read-only MySQL user
-
-heydb only needs `SELECT` on `INFORMATION_SCHEMA`. Use the interactive helper to generate the SQL — heydb never executes it:
-
-```sh
-heydb create-user
-```
-
-This prints a `CREATE USER` + `GRANT` + `FLUSH PRIVILEGES` block that you copy into your MySQL client. Three permission scopes are available:
-
-| Scope | Description |
-|-------|-------------|
-| `schema_only` | `SELECT` on `information_schema.*` only — minimum required for `heydb sync` |
-| `select_all` | `schema_only` + `SELECT` on all tables in a specific database |
-| `select_specific` | `schema_only` + `SELECT` on specific tables only |
-
----
-
-## .heydb/ directory layout
-
-```
-.heydb/
-├── manifest.json         # chunk manifest (commit this)
-├── chunks/               # annotation chunks (commit this)
-│   └── {hash}.chunk.gz   # gzipped JSONL annotation chunk
-└── .gitignore            # auto-generated
-```
-
-**Never committed** — lives in `~/.heydb/heydb.db`:
-- All connection config (host, port, credentials)
-- Schema cache (tables, columns, indexes, foreign keys)
-- Annotation store (source of truth before push)
-
----
+Releases: bump `version` in `package.json`, add the entry to `CHANGELOG.md`, and push a tag `vX.Y.Z`; the publish workflow tests, publishes to npm and creates the GitHub release.
 
 ## License
 

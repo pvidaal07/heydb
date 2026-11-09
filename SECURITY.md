@@ -18,5 +18,5 @@ We will acknowledge receipt within 48 hours and provide a timeline for remediati
 
 | Version | Supported |
 |---------|-----------|
-| 0.2.x   | Yes       |
-| < 0.2   | No        |
+| 2.x (in development) | Yes |
+| 1.x (Go, archived at `v1.3.1`) | No |
