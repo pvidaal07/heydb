@@ -416,7 +416,7 @@ function implicitRelationship(relationship: Relationship, tableName: string, con
 	return `- ${left} → ${right} · implicit, documented by ${relationship.author}${note} [id ${relationship.id}${where} · ${day(relationship.createdAt)}]`;
 }
 
-/** "erp: erp.gcl(cod)" for a side in another connection than `current`, "shop.orders(id)" otherwise. */
+/** "erp: erp.cus(cod)" for a side in another connection than `current`, "shop.orders(id)" otherwise. */
 function sideText(side: RelationshipSide, current?: string): string {
 	const prefix = side.connection === undefined || side.connection === current ? "" : `${side.connection}: `;
 	return `${prefix}${displayText(side.table)}${list(side.columns)}`;

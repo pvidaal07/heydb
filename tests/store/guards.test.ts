@@ -6,7 +6,7 @@ import { assertConnectionName, toConnectionName } from "../../lib/store/guards.t
 describe("toConnectionName", () => {
 	test("turns what a person types into a valid connection name", () => {
 		const cases: [string, string][] = [
-			["Eagle", "eagle"],
+			["Acme", "acme"],
 			["  Prod EU  ", "prod-eu"],
 			["Producción", "produccion"],
 			["db.internal", "db-internal"],

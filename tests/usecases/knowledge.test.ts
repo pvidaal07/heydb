@@ -181,9 +181,9 @@ describe("orphanedKnowledge", () => {
 	});
 });
 
-// Two connections: "local" (shop) and "erp", whose gcl table holds the customer codes.
-const gcl = { ...customersTable(), name: "gcl", columns: [column("cod", 1), column("nombre", 2)] };
-const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [gcl], routines: [] }] }] });
+// Two connections: "local" (shop) and "erp", whose cus table holds the customer codes.
+const cus = { ...customersTable(), name: "cus", columns: [column("cod", 1), column("nombre", 2)] };
+const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [cus], routines: [] }] }] });
 const connection = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "root", databases: null };
 
 function twoConnections({ erpSynced = true } = {}): string {
@@ -202,7 +202,7 @@ function twoConnections({ erpSynced = true } = {}): string {
 
 const customersToErp = {
 	from: { table: "shop.shop.customers", columns: ["id"] },
-	to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] },
+	to: { connection: "erp", table: "erp.erp.cus", columns: ["cod"] },
 	note: "Same customer code in both.",
 	author: "ana",
 };
@@ -211,7 +211,7 @@ describe("relate across connections", () => {
 	test("stores the relationship in the from connection's file, naming the other connection", () => {
 		const root = twoConnections();
 		const link = relate(root, "local", customersToErp, fixedClock());
-		assert.deepEqual(link.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.deepEqual(link.to, { connection: "erp", table: "erp.erp.cus", columns: ["cod"] });
 		assert.deepEqual(loadKnowledge(root, "local").relationships, [link]);
 		assert.deepEqual(loadKnowledge(root, "erp"), emptyKnowledge());
 	});
@@ -241,7 +241,7 @@ describe("relate across connections", () => {
 	test("checks each side against its own connection's snapshot", () => {
 		const root = twoConnections();
 		assert.throws(() => relate(root, "local", { ...customersToErp, to: { ...customersToErp.to, columns: ["codigo"] } }, fixedClock()), {
-			message: 'erp.erp.gcl.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
+			message: 'erp.erp.cus.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
 		});
 		// shop.shop.customers exists in local, not in erp.
 		assert.throws(() => relate(root, "local", { ...customersToErp, to: { ...customersToErp.from, connection: "erp" } }, fixedClock()), {
@@ -262,18 +262,18 @@ describe("relationshipsFromOtherConnections", () => {
 	test("finds relationships stored in other connections' files that point to the table", () => {
 		const root = twoConnections();
 		const link = relate(root, "local", customersToErp, fixedClock());
-		assert.deepEqual(relationshipsFromOtherConnections(root, "erp", "erp.erp.gcl"), {
+		assert.deepEqual(relationshipsFromOtherConnections(root, "erp", "erp.erp.cus"), {
 			relationships: [{ connection: "local", relationship: link }],
 			unreadable: [],
 		});
-		assert.deepEqual(relationshipsFromOtherConnections(root, "local", "erp.erp.gcl"), { relationships: [], unreadable: [] });
+		assert.deepEqual(relationshipsFromOtherConnections(root, "local", "erp.erp.cus"), { relationships: [], unreadable: [] });
 	});
 
 	test("reports an unreadable file instead of failing", () => {
 		const root = twoConnections();
 		relate(root, "local", customersToErp, fixedClock());
 		writeFileSync(knowledgePath(root, "crm"), "{");
-		const result = relationshipsFromOtherConnections(root, "erp", "erp.erp.gcl");
+		const result = relationshipsFromOtherConnections(root, "erp", "erp.erp.cus");
 		assert.equal(result.relationships.length, 1);
 		assert.deepEqual(result.unreadable, [`knowledge/crm.json is not valid JSON (${knowledgePath(root, "crm")})`]);
 	});
@@ -284,7 +284,7 @@ describe("orphanedKnowledge across connections", () => {
 		const root = twoConnections();
 		const link = relate(root, "local", customersToErp, fixedClock());
 		assert.deepEqual(orphanedKnowledge(root, "local"), { annotations: [], relationships: [] });
-		saveSnapshot(root, "erp", snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [{ ...gcl, columns: [column("id", 1)] }], routines: [] }] }] }));
+		saveSnapshot(root, "erp", snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [{ ...cus, columns: [column("id", 1)] }], routines: [] }] }] }));
 		const before = readFileSync(knowledgePath(root, "local"), "utf8");
 		assert.deepEqual(orphanedKnowledge(root, "local"), { annotations: [], relationships: [link] });
 		assert.equal(readFileSync(knowledgePath(root, "local"), "utf8"), before);
@@ -301,7 +301,7 @@ describe("orphanedKnowledge across connections", () => {
 describe("project notes", () => {
 	test("annotateProject saves a note about the whole project, without any snapshot", () => {
 		const root = projectRoot(false);
-		const note = annotateProject(root, { text: "One database per client; the central one is eagle.", author: "ana" }, fixedClock());
+		const note = annotateProject(root, { text: "One database per client; the central one is acme.", author: "ana" }, fixedClock());
 		assert.equal(note.target, "project");
 		assert.deepEqual(projectNotes(root), [note]);
 		assert.deepEqual(loadProjectKnowledge(root).annotations, [note]);

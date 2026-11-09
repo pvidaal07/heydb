@@ -13,7 +13,7 @@ import { HEYDB_DIR } from "../store/project.ts";
 // and then the notes come from conversations instead.
 //
 // This only finds candidates: a table name in database context, that is SQL
-// (`SELECT … FROM gar`) or an ORM declaration (`protected $table = 'gar'`).
+// (`SELECT … FROM art`) or an ORM declaration (`protected $table = 'art'`).
 // A name that is only mentioned (a comment, help text, a variable) does not
 // count: tables called "config" or "para" are ordinary words. It never
 // interprets the code; the agent does that, if the person agrees. The scan runs right after a sync, so it is bounded in files,
@@ -36,7 +36,7 @@ export const DEFAULT_SCAN_LIMITS: ScanLimits = {
 	maxFiles: 5000,
 	maxBytes: 50 * 1024 * 1024,
 	maxFileBytes: 512 * 1024,
-	// A large legacy codebase (900 Harbour files) needs about 9 s; progress is shown meanwhile.
+	// A large legacy codebase (about 900 source files) needs about 9 s; progress is shown meanwhile.
 	maxMillis: 10_000,
 	maxTables: 300,
 };
@@ -124,9 +124,9 @@ export interface ScanOptions {
 }
 
 export interface TableUsage {
-	/** Display name, e.g. "erp.gar"; tables with the same name in several databases are joined with " / ". */
+	/** Display name, e.g. "erp.art"; tables with the same name in several databases are joined with " / ". */
 	readonly table: string;
-	/** The table name as the schema writes it, e.g. "gar". */
+	/** The table name as the schema writes it, e.g. "art". */
 	readonly name: string;
 	/** Files that use it most, at most 5. */
 	readonly files: readonly string[];
@@ -216,21 +216,21 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 }
 
 // The patterns of database context. Each captures the table name as `name`:
-// a whole identifier (letters, digits, "_"), so "gar" never matches in
-// ref_gar or garage. Keywords are case-insensitive.
+// a whole identifier (letters, digits, "_"), so "art" never matches in
+// ref_art or article. Keywords are case-insensitive.
 
 const ID = "[\\p{L}\\p{N}_]+";
 /** A name as SQL writes it: optionally quoted (` " ' [ ]) and qualified (db.table, db.schema.table). */
 const SQL_NAME = `(?:[\`"'\\[]?${ID}[\`"'\\]]?\\.){0,2}[\`"'\\[]?(?<name>${ID})(?![\\p{L}\\p{N}_])`;
 /**
  * A database prefix built by code in front of the table, as legacy and web
- * code often write it: "FROM "+cEmp+".gar" (Harbour, JS), "FROM " . $db . ".gar"
- * (PHP), `FROM ${db}.gar` (template strings). Bounded, so it stays cheap.
+ * code often write it: "FROM "+cDb+".art" (Harbour, JS), "FROM " . $db . ".art"
+ * (PHP), `FROM ${db}.art` (template strings). Bounded, so it stays cheap.
  */
 const BUILT_PREFIX = `(?:["'\`]\\s*(?:\\+|\\.|&|\\|\\|)\\s*[^"'\`\\n]{1,60}?\\s*(?:\\+|\\.|&|\\|\\|)\\s*["'\`]\\.|\\$\\{[^}\\n]{1,60}\\}\\.)`;
 /** A table name after a SQL keyword: plain, quoted or qualified, or behind a built prefix. */
 const SQL_TARGET = `(?:${BUILT_PREFIX})?${SQL_NAME}`;
-/** A quoted string that holds only the name: 'gar', "gar", `gar`. */
+/** A quoted string that holds only the name: 'art', "art", `art`. */
 const QUOTED_NAME = `["'\`](?<name>${ID})["'\`]`;
 /** How far back, within one statement (no ";"), the verb that opens it may be. */
 const STATEMENT_CHARS = 2000;
@@ -257,7 +257,7 @@ const STATEMENT_CHARS = 2000;
  * A keyword match plus the context it needs. The keyword is searched first and
  * the context is checked only around each match, in a bounded window cut at
  * the statement end (";"). A lookbehind such as (?<=SELECT[^;]{0,2000}?) would
- * be tried at every position of the file: on a real 500 KB Harbour source that
+ * be tried at every position of the file: on a 500 KB legacy source file that
  * meant minutes per file.
  */
 interface ReferenceRule {
@@ -368,9 +368,9 @@ function tableNames(snapshot: Snapshot, maxTables: number): Map<string, TableNam
  */
 // The folders are walked directly, never listed through git: the code that
 // uses a database is often a reference copy kept in a folder the project's
-// .gitignore excludes (found on a real ERP: source-code/), and git would hide
-// it. Generated and third-party folders are skipped by name, and the walk is
-// bounded by the file and time limits.
+// .gitignore excludes, and git would hide it. Generated and third-party
+// folders are skipped by name, and the walk is bounded by the file and time
+// limits.
 async function listSources(
 	files: CodeFiles,
 	maxFiles: number,

@@ -430,7 +430,7 @@ interface CodeFolder {
 
 /**
  * Same offer as after a sync, from the stored snapshot: it never connects.
- * The code may live elsewhere (`/heydb:learn-code eagle ../api-eagle`); a
+ * The code may live elsewhere (`/heydb:learn-code acme ../legacy-app`); a
  * single argument that is not a connection but an existing folder is that
  * path, with the default connection.
  */

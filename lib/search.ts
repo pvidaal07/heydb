@@ -29,8 +29,8 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // by its note (120 as a word, 30 inside one). A table name is also an exact
 // match when only a plural differs: "cliente" finds a table called clientes.
 //
-// Inferred meaning is how "cliente" finds gcl, a table without comment that
-// fifty columns called cod_gcl describe as "Cliente Habitual". It is evidence,
+// Inferred meaning is how "cliente" finds cus, a table without comment that
+// fifty columns called cod_cus describe as "Cliente Habitual". It is evidence,
 // not a fact: such results carry `inferred` so the agent says so. The
 // evidence is the summary heydb_table shows ("Referencing columns are
 // commented as", from incomingReferences), read for the MAX_INFERRED_TABLES
@@ -78,7 +78,7 @@ export interface SearchResults {
 
 export interface SearchOptions {
 	readonly limit?: number;
-	/** Only this database: "eagle", "eagle.eagle", or in PostgreSQL "app" or "app.public". */
+	/** Only this database: "acme", "acme.acme", or in PostgreSQL "app" or "app.public". */
 	readonly database?: string;
 }
 
@@ -150,7 +150,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	};
 
 	// Per database, lowercased table name → canonical names: where a column
-	// named cod_gcl may point. Two entries when names differ only by case.
+	// named cod_cus may point. Two entries when names differ only by case.
 	const byName = new Map<string, Map<string, string[]>>();
 	const kinds = new Map<string, Table["kind"]>();
 	for (const database of snapshot.databases) {

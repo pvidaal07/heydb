@@ -123,16 +123,16 @@ describe("renderOverview", () => {
 	test("shows name prefixes and orders tables: notes, most referenced, then by name", () => {
 		const names = ["sii_a", "sii_b", "sii_c", "log1", "log2", "zeta", "alpha"];
 		const tables = names.map((name) => ({ ...customersTable(), name, columns: [column("id", 1)] }));
-		tables.push({ ...customersTable(), name: "gar", comment: "Productos", columns: [column("id", 1)] });
-		tables.push({ ...customersTable(), name: "lines", columns: [column("id", 1), column("ref_gar", 2), column("cod_zeta", 3)] });
-		tables.push({ ...customersTable(), name: "moves", columns: [column("id", 1), column("gar_id", 2)] });
+		tables.push({ ...customersTable(), name: "art", comment: "Productos", columns: [column("id", 1)] });
+		tables.push({ ...customersTable(), name: "lines", columns: [column("id", 1), column("ref_art", 2), column("cod_zeta", 3)] });
+		tables.push({ ...customersTable(), name: "moves", columns: [column("id", 1), column("art_id", 2)] });
 		const text = renderOverview(snapshot(tables), knowledge([annotation("a-1", "shop.shop.zeta", { text: "Zeta rows." })]), {
 			connection: "local",
 		});
 		assert.match(text, /\n {2}Name prefixes: sii_ ×3, log0-9 ×2\n/);
 		assert.match(
 			text,
-			/\n {2}Most referenced tables:\n {2}- shop\.gar · 2 references · ~1\.2k rows · Productos\n {2}- shop\.zeta · 1 reference · ~1\.2k rows · Zeta rows\.\n/,
+			/\n {2}Most referenced tables:\n {2}- shop\.art · 2 references · ~1\.2k rows · Productos\n {2}- shop\.zeta · 1 reference · ~1\.2k rows · Zeta rows\.\n/,
 		);
 		const order = text
 			.split("\n")
@@ -140,7 +140,7 @@ describe("renderOverview", () => {
 			.map((line) => line.split(" | ")[0]?.slice(2));
 		assert.deepEqual(order, [
 			"shop.zeta",
-			"shop.gar",
+			"shop.art",
 			"shop.alpha",
 			"shop.lines",
 			"shop.log1",
@@ -340,10 +340,10 @@ describe("renderTable", () => {
 	});
 
 	test("caps the name-pattern guesses it lists and says how many more there are", () => {
-		const gar = { ...customersTable(), name: "gar", columns: [column("id", 1)] };
-		const lines = { ...customersTable(), name: "lines", columns: Array.from({ length: 230 }, (_, index) => column(`ref${index}_gar`, index + 1)) };
-		const world = snapshot([gar, lines]);
-		const text = render(gar, world, emptyKnowledge(), "shop.shop.gar");
+		const art = { ...customersTable(), name: "art", columns: [column("id", 1)] };
+		const lines = { ...customersTable(), name: "lines", columns: Array.from({ length: 230 }, (_, index) => column(`ref${index}_art`, index + 1)) };
+		const world = snapshot([art, lines]);
+		const text = render(art, world, emptyKnowledge(), "shop.shop.art");
 		assert.equal(text.split("\n").filter((line) => line.startsWith("- shop.lines.ref")).length, 15);
 		assert.match(text, /\n… 215 more name-pattern guesses\n/);
 	});
@@ -466,7 +466,7 @@ describe("renderSearch", () => {
 	const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
 	const results: SearchResult[] = [
 		{ ...base, target: "shop.shop.orders", object: "table", matchedIn: ["name", 'columns: total ("Includes VAT.")'] },
-		{ ...base, target: "legacy.public.gcl", object: "table", matchedIn: ['referenced as "Cliente" ×3 (inferred)'], inferred: true },
+		{ ...base, target: "legacy.public.cus", object: "table", matchedIn: ['referenced as "Cliente" ×3 (inferred)'], inferred: true },
 		{ ...base, target: "shop.shop", object: "database", matchedIn: ["note: The web store."], snippet: "The web store." },
 	];
 
@@ -482,7 +482,7 @@ describe("renderSearch", () => {
 			renderSearch({ results: results.slice(1, 2), total: 1 }),
 			[
 				"1 match.",
-				'- table legacy.public.gcl · referenced as "Cliente" ×3 (inferred)',
+				'- table legacy.public.cus · referenced as "Cliente" ×3 (inferred)',
 				"(inferred): only the comments of columns that reference the table match; present that meaning as an inference and ask the user to confirm it.",
 			].join("\n"),
 		);
@@ -507,18 +507,18 @@ describe("renderSearch", () => {
 });
 
 describe("project notes and other connections", () => {
-	const gcl: Table = { ...customersTable(), name: "gcl", columns: [column("cod", 1)], primaryKey: ["cod"] };
+	const cus: Table = { ...customersTable(), name: "cus", columns: [column("cod", 1)], primaryKey: ["cod"] };
 	const clientes: Table = { ...customersTable(), name: "clientes", columns: [column("id", 1), column("cod_erp", 2)] };
-	// Stored in crm's file: crm.clientes(cod_erp) → erp:gcl(cod).
+	// Stored in crm's file: crm.clientes(cod_erp) → erp:cus(cod).
 	const toErp = {
-		...relationship("r-9", "crm.crm.clientes", ["cod_erp"], "erp.erp.gcl", ["cod"]),
-		to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] },
+		...relationship("r-9", "crm.crm.clientes", ["cod_erp"], "erp.erp.cus", ["cod"]),
+		to: { connection: "erp", table: "erp.erp.cus", columns: ["cod"] },
 		note: "Same code.",
 	};
 
 	test("the overview shows project notes first, with their ids", () => {
 		const shop = snapshot([customersTable()]);
-		const projectNotes = [annotation("p-1", "project", { text: "One database per client.\nThe central one is eagle." })];
+		const projectNotes = [annotation("p-1", "project", { text: "One database per client.\nThe central one is acme." })];
 		const text = renderOverview(shop, emptyKnowledge(), { connection: "local", projectNotes });
 		assert.deepEqual(text.split("\n").slice(0, 7), [
 			"# heydb · local",
@@ -526,14 +526,14 @@ describe("project notes and other connections", () => {
 			"",
 			"## Project notes",
 			"- One database per client.",
-			"  The central one is eagle. [id p-1 · ana · 2026-11-06]",
+			"  The central one is acme. [id p-1 · ana · 2026-11-06]",
 			"",
 		]);
 		assert.equal(renderOverview(shop, emptyKnowledge(), { connection: "local", projectNotes: [] }), renderOverview(shop, emptyKnowledge(), { connection: "local" }));
 	});
 
 	test("a table shows relationships stored in other connections that point to it, with their connection", () => {
-		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(emptyKnowledge(), "erp.erp.gcl"), undefined, {
+		const text = renderTable(cus, "erp.erp.cus", knowledgeForTable(emptyKnowledge(), "erp.erp.cus"), undefined, {
 			connection: "erp",
 			external: [{ connection: "crm", relationship: toErp }],
 		});
@@ -547,16 +547,16 @@ describe("project notes and other connections", () => {
 		const text = renderTable(clientes, "crm.crm.clientes", knowledgeForTable(knowledge([], [toErp]), "crm.crm.clientes"), undefined, {
 			connection: "crm",
 		});
-		assert.match(text, /## Relationships\n- \(cod_erp\) → erp: erp\.gcl\(cod\) · implicit, documented by ana · Same code\. \[id r-9 · 2026-11-06\]/);
+		assert.match(text, /## Relationships\n- \(cod_erp\) → erp: erp\.cus\(cod\) · implicit, documented by ana · Same code\. \[id r-9 · 2026-11-06\]/);
 	});
 
 	test("a relationship into another connection is not shown on a same-named table of this one", () => {
-		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(knowledge([], [toErp]), "erp.erp.gcl"), undefined, { connection: "crm" });
+		const text = renderTable(cus, "erp.erp.cus", knowledgeForTable(knowledge([], [toErp]), "erp.erp.cus"), undefined, { connection: "crm" });
 		assert.doesNotMatch(text, /r-9/);
 	});
 
 	test("says which knowledge files of other connections could not be read", () => {
-		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(emptyKnowledge(), "erp.erp.gcl"), undefined, {
+		const text = renderTable(cus, "erp.erp.cus", knowledgeForTable(emptyKnowledge(), "erp.erp.cus"), undefined, {
 			connection: "erp",
 			unreadable: ["knowledge/crm.json is not valid JSON"],
 		});
@@ -564,14 +564,14 @@ describe("project notes and other connections", () => {
 	});
 
 	test("search shows the connection of a relationship side in another connection", () => {
-		const relationship = { from: { table: "crm.crm.clientes", columns: ["cod_erp"] }, to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] } };
+		const relationship = { from: { table: "crm.crm.clientes", columns: ["cod_erp"] }, to: { connection: "erp", table: "erp.erp.cus", columns: ["cod"] } };
 		const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
 		assert.equal(
 			renderSearch({
 				results: [{ ...base, target: "x", object: "relationship", matchedIn: ["relationship note: code"], snippet: "code", relationship }],
 				total: 1,
 			}),
-			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.gcl(cod) · relationship note: code",
+			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.cus(cod) · relationship note: code",
 		);
 	});
 });

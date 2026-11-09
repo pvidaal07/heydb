@@ -217,7 +217,7 @@ describe("knowledge across connections", () => {
 });
 
 describe("project knowledge", () => {
-	const projectNote = annotation("p1", "project", { text: "One database per client; the central one is eagle." });
+	const projectNote = annotation("p1", "project", { text: "One database per client; the central one is acme." });
 
 	test("lives in .heydb/knowledge/_project.json and round-trips", () => {
 		const root = projectRoot();

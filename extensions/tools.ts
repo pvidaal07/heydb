@@ -245,7 +245,7 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 		promptSnippet: "Record a join between tables that has no foreign key",
 		promptGuidelines: [
 			"When you find tables joined without a foreign key (in code, queries or data), record it with heydb_relate and say how you know in the note.",
-			"When the referenced table is in another connection of the project (crm.clientes.cod_erp → erp's gcl.cod), call heydb_relate from the referencing connection with to_connection.",
+			"When the referenced table is in another connection of the project (crm.clientes.cod_erp → erp's cus.cod), call heydb_relate from the referencing connection with to_connection.",
 		],
 		parameters: RELATE_PARAMETERS,
 		executionMode: "sequential",

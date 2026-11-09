@@ -12,11 +12,12 @@ import { HEYDB_DIR } from "./project.ts";
 // Snapshots live in <project>/.heydb/snapshots/<connection>.json.gz and are
 // meant to be committed: teammates without database credentials still get the
 // schema. The content is the same stable JSON earlier builds wrote as plain
-// <connection>.json, gzip-compressed: a 1,500-table ERP was 395,460 lines of
-// JSON, which nobody reviews in a pull request. Reading decompresses on every
-// load: on 1,500 tables × 60 columns that is ~13 ms of the ~75 ms a load
-// takes (JSON.parse and validation are the rest), so a decompressed local
-// copy would save little and add a second file to keep in step.
+// <connection>.json, gzip-compressed: a schema with about 1,500 tables was
+// about 400,000 lines of JSON, which nobody reviews in a pull request.
+// Reading decompresses on every load: on 1,500 tables × 60 columns that is
+// ~13 ms of the ~75 ms a load takes (JSON.parse and validation are the rest),
+// so a decompressed local copy would save little and add a second file to
+// keep in step.
 
 const SUPPORTED_FORMAT_VERSION = 1;
 
