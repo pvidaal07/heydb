@@ -48,6 +48,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           version="$(node -p "require('./package.json').version")"
+          # Already published (for example a first release made by hand): only the GitHub release is left.
+          if npm view "heydb@${version}" version >/dev/null 2>&1; then
+            echo "heydb@${version} is already on npm; skipping publish"
+            exit 0
+          fi
           tag="latest"
           case "${version}" in *-*) tag="beta" ;; esac
           # The first publish has no "latest" yet; npm needs one, so a first
@@ -59,6 +64,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists"
+            exit 0
+          fi
           prerelease=""
           case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
           gh release create "${GITHUB_REF_NAME}" --title "heydb ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md ${prerelease}
