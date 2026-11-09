@@ -1,12 +1,24 @@
+# Monthly and grouped: at most one pull request per ecosystem each month, after
+# new versions have aged a little (cooldown), so updates are reviewed in one go.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     target-branch: main
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
+      interval: monthly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      npm:
+        patterns: ["*"]
+    ignore:
+      # heydb supports Node.js 22: newer @types/node would allow APIs it lacks.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "type:chore"]
     commit-message:
       prefix: "chore(deps):"
 
@@ -14,6 +26,13 @@ updates:
     directory: /
     target-branch: main
     schedule:
-      interval: weekly
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "type:chore"]
     commit-message:
       prefix: "chore(ci):"

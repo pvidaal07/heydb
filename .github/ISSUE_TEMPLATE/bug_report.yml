@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in heydb does not work as documented.
+labels: ["type:bug", "status:needs-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Never paste passwords, connection strings with credentials, `.heydb/.env`, or real customer data.** Security problems go to a [private security advisory](https://github.com/pvidaal07/heydb/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. /heydb:connect …
+        2. /heydb:sync
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error or output
+      description: Copy the message heydb showed. Remove hostnames, user names or table names you cannot share.
+      render: text
+  - type: input
+    id: heydb
+    attributes:
+      label: heydb version
+      description: Shown by /heydb:about.
+      placeholder: 2.0.0-beta.0
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      options: [MySQL, MariaDB, PostgreSQL, Not related to a database]
+    validations:
+      required: true
+  - type: input
+    id: engine-version
+    attributes:
+      label: Database version
+      placeholder: "MySQL 5.7.27, MariaDB 10.6, PostgreSQL 16…"
+  - type: input
+    id: environment
+    attributes:
+      label: Pi version, Node.js version and OS
+      placeholder: "Pi 1.5.0, Node 22.19, macOS 15"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: I removed passwords, credentials and private data from this report.
+          required: true

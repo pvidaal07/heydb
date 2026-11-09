@@ -1,22 +1,24 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-**Please do NOT open a public issue for security vulnerabilities.**
+**Do not open a public issue.** Report it privately through GitHub: [new security advisory](https://github.com/pvidaal07/heydb/security/advisories/new).
 
-Email security concerns to: **pvidaal07@gmail.com**
+Include what you found, how to reproduce it, and its impact. Do not include real credentials or data. You will get an answer within a few days, and credit in the advisory if you want it.
 
-Include:
-- Description of the vulnerability
-- Steps to reproduce
-- Impact assessment
-- Proposed fix (if any)
+## What matters most
 
-We will acknowledge receipt within 48 hours and provide a timeline for remediation.
+heydb handles database credentials and reads production schemas, so these are in scope:
 
-## Supported Versions
+- passwords or other secrets leaking into files git can see, chat output, logs or error messages;
+- any way to write to a database through heydb (sessions are read-only);
+- agent tools reaching a database or files outside the project's `.heydb/`;
+- path traversal or symlink tricks in `.heydb/` (connection names, snapshots, knowledge files);
+- the release pipeline (workflows, npm publishing).
+
+## Supported versions
 
 | Version | Supported |
-|---------|-----------|
-| 2.x (in development) | Yes |
+|---|---|
+| 2.x (beta) | Yes |
 | 1.x (Go, archived at `v1.3.1`) | No |
