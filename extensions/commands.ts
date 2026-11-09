@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
 import { aboutMessage } from "../lib/about.ts";
+import { addConnection, removeConnection } from "../lib/config/operations.ts";
+import { loadConfig } from "../lib/config/store.ts";
 import type { ConnectionConfig } from "../lib/config/types.ts";
 import { validateConnection } from "../lib/config/validate.ts";
 import type { Snapshot } from "../lib/model/snapshot.ts";
@@ -9,22 +11,32 @@ import { toConnectionName } from "../lib/store/guards.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
 import { initProject } from "../lib/usecases/init.ts";
 import {
+	type ConnectionSummary,
 	type OpenedConnection,
 	ProjectError,
 	buildConnection,
 	captureLive,
+	chooseDefaultConnection,
+	forgetConnection,
+	listConnections,
 	openConnection,
 	projectConnections,
 	saveNewConnection,
+	savePassword,
 } from "../lib/usecases/project.ts";
 import { checkStatus } from "../lib/usecases/status.ts";
 import { syncSnapshot } from "../lib/usecases/sync.ts";
 import type { HeydbDeps } from "./deps.ts";
+import { askSecret } from "./secret-input.ts";
 
 // Commands are what a person types. Unlike tools, /heydb:sync and
 // /heydb:status connect to the database: a person chose to run them, and
 // their own environment holds the password. Results are notifications;
 // errors are notifications with level "error", never thrown at Pi.
+//
+// A password a person types (/heydb:connect, /heydb:password) goes from the
+// masked input straight to .heydb/.env: never into a notification, a message,
+// the session or an error.
 
 type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
@@ -72,7 +84,10 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 		["heydb:init", { description: "Make this folder a heydb project (.heydb/)", handler: async (_args, ctx) => init(ctx) }],
 		[
 			"heydb:connect",
-			{ description: "Add a database connection (the password stays in your environment)", handler: (_args, ctx) => connect(ctx) },
+			{
+				description: "Add a database connection (a typed password is kept in .heydb/.env, ignored by git)",
+				handler: (_args, ctx) => connect(deps, ctx),
+			},
 		],
 		[
 			"heydb:sync",
@@ -88,6 +103,22 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 				description: "Compare the live schema with the stored snapshot: /heydb:status [connection]",
 				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
 				handler: (args, ctx) => oneAtATime(() => status(deps, args, ctx)),
+			},
+		],
+		[
+			"heydb:password",
+			{
+				description: "Type a connection's password, kept in .heydb/.env (ignored by git): /heydb:password [connection]",
+				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
+				handler: (args, ctx) => password(deps, args, ctx),
+			},
+		],
+		[
+			"heydb:connections",
+			{
+				description: "List connections, change the default or remove one: /heydb:connections [list | use <name> | remove <name>]",
+				getArgumentCompletions: (prefix) => completeConnections(deps, prefix),
+				handler: (args, ctx) => connections(deps, args, ctx),
 			},
 		],
 	];
@@ -107,7 +138,7 @@ function init(ctx: ExtensionCommandContext): void {
 	});
 }
 
-async function connect(ctx: ExtensionCommandContext): Promise<void> {
+async function connect(deps: HeydbDeps, ctx: ExtensionCommandContext): Promise<void> {
 	const root = findProjectRoot(ctx.cwd);
 	if (root === null) return failed(ctx, new ProjectError("not_initialized", ""));
 	if (!ctx.hasUI) {
@@ -123,8 +154,8 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 		return;
 	}
 
-	// The password is never asked: anything typed here could end up in a log,
-	// and config.json only holds the name of the variable that has it.
+	// The password is asked last, with the masked input: ctx.ui.input shows
+	// what is typed. config.json only holds the name of the variable that has it.
 	const name = await ctx.ui.input("Connection name", "local");
 	const engine = name === undefined ? undefined : await ctx.ui.select("Engine", ENGINES);
 	const defaults = ENGINE_DEFAULTS[engine ?? "mysql"] ?? { port: "3306", user: "root" };
@@ -157,7 +188,9 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 		return;
 	}
 
-	attempt(ctx, () => {
+	// Everything is checked before the password is asked, so nobody types one for nothing.
+	let prepared: { connectionName: string; entry: ConnectionConfig; renamed: string };
+	try {
 		const typed = name.trim() === "" ? "local" : name.trim();
 		const connectionName = toConnectionName(typed);
 		if (connectionName === null) {
@@ -173,13 +206,42 @@ async function connect(ctx: ExtensionCommandContext): Promise<void> {
 		const answers = { engine, host, port: port.trim() === "" ? defaults.port : port, user, databases };
 		const built = buildConnection(connectionName, answers);
 		const entry = postgres ? validateConnection({ ...built, schemas: list(schemas) }, connectionName) : built;
+		addConnection(loadConfig(root), connectionName, entry); // only to refuse a taken name now
+		prepared = { connectionName, entry, renamed };
+	} catch (error) {
+		return failed(ctx, error);
+	}
+	const { connectionName, entry, renamed } = prepared;
+	const variable = variableOf(entry);
+
+	const typedPassword = await askSecret(
+		ctx,
+		`Password for ${connectionName} (stored in .heydb/.env, ignored by git; leave empty to set ${variable} yourself)`,
+	);
+	if (typedPassword === undefined) {
+		ctx.ui.notify("heydb:connect cancelled; nothing was saved.", "info");
+		return;
+	}
+
+	attempt(ctx, () => {
 		const { isDefault } = saveNewConnection(root, connectionName, entry);
-		const variable = entry.password.slice("env:".length);
+		const saved = `Saved connection "${connectionName}" (${describe(entry)})${isDefault ? " as the default" : ""}.\n${renamed}`;
+		// null: no terminal to type it in (RPC); empty: the person sets it themselves.
+		if (typedPassword === null || typedPassword === "") {
+			return ctx.ui.notify(
+				`${saved}heydb never stores passwords: set ${variable} in your shell or in .heydb/.env (ignored by git), ` +
+					`then run /heydb:sync ${connectionName}.`,
+				"info",
+			);
+		}
+		try {
+			savePassword(root, entry.password, typedPassword);
+		} catch (error) {
+			throw new Error(`${saved}The password was not saved: ${message(error)}`, { cause: error });
+		}
 		ctx.ui.notify(
-			`Saved connection "${connectionName}" (${describe(entry)})${isDefault ? " as the default" : ""}.\n` +
-				renamed +
-				`heydb never stores passwords: set ${variable} in your shell or in .heydb/.env (ignored by git), ` +
-				`then run /heydb:sync ${connectionName}.`,
+			`${saved}Password saved in .heydb/.env as ${variable} (ignored by git). Next: /heydb:sync ${connectionName}.` +
+				environmentNote(deps, variable),
 			"info",
 		);
 	});
@@ -192,6 +254,108 @@ function list(text: string): string[] | null {
 		.map((item) => item.trim())
 		.filter((item) => item !== "");
 	return items.length === 0 ? null : items;
+}
+
+async function password(deps: HeydbDeps, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const words = argumentWords(args);
+	if (words.length > 1) return ctx.ui.notify("Usage: /heydb:password [connection]", "error");
+	let opened: OpenedConnection;
+	try {
+		opened = openConnection(ctx.cwd, words[0]);
+	} catch (error) {
+		return failed(ctx, error);
+	}
+	const variable = variableOf(opened.connection);
+	const typed = await askSecret(ctx, `Password for ${opened.name} (stored in .heydb/.env, ignored by git; leave empty to keep it as it is)`);
+	if (typed === null) {
+		return ctx.ui.notify(
+			`Typing a password needs Pi's interactive terminal. Set ${variable} in your shell or in .heydb/.env (ignored by git).`,
+			"info",
+		);
+	}
+	if (typed === undefined) return ctx.ui.notify("heydb:password cancelled; nothing was saved.", "info");
+	if (typed === "") return ctx.ui.notify(`Nothing changed: the password for "${opened.name}" was left as it is.`, "info");
+	attempt(ctx, () => {
+		savePassword(opened.root, opened.connection.password, typed);
+		ctx.ui.notify(
+			`Password for "${opened.name}" saved in .heydb/.env as ${variable} (ignored by git). Next: /heydb:sync ${opened.name}.` +
+				environmentNote(deps, variable),
+			"info",
+		);
+	});
+}
+
+/** The environment wins over .heydb/.env, so a value saved there would otherwise be ignored without a word. */
+function environmentNote(deps: HeydbDeps, variable: string): string {
+	if (deps.env[variable] === undefined) return "";
+	return `\nNote: ${variable} is also set in your environment, and that value wins over .heydb/.env.`;
+}
+
+const CONNECTIONS_USAGE = "Usage: /heydb:connections [list | use <name> | remove <name>]";
+const SUBCOMMANDS = ["list", "use", "remove"];
+
+async function connections(deps: HeydbDeps, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const [action = "list", name, ...extra] = argumentWords(args);
+	const takesName = action === "use" || action === "remove";
+	if (!SUBCOMMANDS.includes(action) || extra.length > 0 || takesName !== (name !== undefined)) {
+		return ctx.ui.notify(CONNECTIONS_USAGE, "error");
+	}
+	try {
+		const { root, connections: listed } = listConnections(ctx.cwd, deps.env);
+		if (name === undefined) {
+			const lines = [
+				`heydb connections in ${root}:`,
+				...listed.map(summaryLine),
+				"Change the default with /heydb:connections use <name>; set a password with /heydb:password <name>.",
+			];
+			return ctx.ui.notify(lines.join("\n"), "info");
+		}
+		if (action === "use") {
+			chooseDefaultConnection(root, name);
+			return ctx.ui.notify(`Default connection is now "${name}".`, "info");
+		}
+		await remove(root, name, ctx);
+	} catch (error) {
+		failed(ctx, error);
+	}
+}
+
+async function remove(root: string, name: string, ctx: ExtensionCommandContext): Promise<void> {
+	// Checked before asking: nobody should confirm the removal of a connection that does not exist.
+	removeConnection(loadConfig(root), name);
+	if (!ctx.hasUI) {
+		return ctx.ui.notify("Removing a connection needs an interactive session to confirm it; edit .heydb/config.json instead.", "error");
+	}
+	const confirmed = await ctx.ui.confirm(
+		`Remove connection "${name}"?`,
+		"It is removed from .heydb/config.json and its password from .heydb/.env. Its snapshot and notes stay on disk.",
+	);
+	if (!confirmed) return ctx.ui.notify("heydb:connections remove cancelled; nothing was changed.", "info");
+	const { passwordRemoved, kept } = forgetConnection(root, name);
+	const lines = [`Removed connection "${name}"${passwordRemoved ? " and its password line in .heydb/.env" : ""}.`];
+	if (kept.length > 0) {
+		lines.push(`Kept on disk, so no notes are lost: ${kept.join(", ")}. Delete them yourself if you no longer need them.`);
+	}
+	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+const PASSWORD_STATES: Readonly<Record<ConnectionSummary["password"], string>> = {
+	environment: "set in your environment",
+	"env-file": "in .heydb/.env",
+	missing: "not set",
+	unreadable: ".heydb/.env is unreadable",
+};
+
+function summaryLine(item: ConnectionSummary): string {
+	return (
+		`- ${item.name}${item.isDefault ? " (default)" : ""}: ${describe(item.connection)} · ` +
+		`password ${variableOf(item.connection)}: ${PASSWORD_STATES[item.password]} · ${item.synced ? "synced" : "never synced"}`
+	);
+}
+
+/** "env:HEYDB_LOCAL_PASSWORD" → "HEYDB_LOCAL_PASSWORD"; config validation guarantees the prefix. */
+function variableOf(entry: ConnectionConfig): string {
+	return entry.password.slice("env:".length);
 }
 
 async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -234,9 +398,11 @@ async function withLive(
 	action: string,
 	work: (opened: OpenedConnection, live: Snapshot) => Promise<void>,
 ): Promise<void> {
-	const name = args.trim().split(/\s+/)[0] || undefined;
+	// A second word is a mistake (two connections, a typo): better said than silently dropped.
+	const words = argumentWords(args);
+	if (words.length > 1) return ctx.ui.notify(`Usage: /heydb:${action} [connection]`, "error");
 	try {
-		const opened = openConnection(ctx.cwd, name);
+		const opened = openConnection(ctx.cwd, words[0]);
 		// Config and password errors explain themselves; a driver error such as
 		// "connect ECONNREFUSED" also needs to say what was being attempted.
 		const introspect: HeydbDeps["introspect"] = async (entry, password) => {
@@ -252,16 +418,53 @@ async function withLive(
 	}
 }
 
+/** The words of a command's arguments; none for an empty or blank string. */
+function argumentWords(args: string): string[] {
+	return args
+		.trim()
+		.split(/\s+/)
+		.filter((word) => word !== "");
+}
+
+type Completion = { value: string; label: string };
+
 /** Connection names of the project in the current folder; nothing when there is none or its config is broken. */
-function completeConnection(deps: HeydbDeps, prefix: string): { value: string; label: string }[] | null {
-	let names: string[];
-	try {
-		names = projectConnections(deps.cwd())?.names ?? [];
-	} catch {
-		return null; // completion must never fail loudly; /heydb:sync will report the broken config
-	}
-	const items = names.filter((name) => name.startsWith(prefix)).map((name) => ({ value: name, label: name }));
+function completeConnection(deps: HeydbDeps, prefix: string): Completion[] | null {
+	const items = connectionNames(deps)
+		.filter((name) => name.startsWith(prefix))
+		.map((name) => ({ value: name, label: name }));
 	return items.length > 0 ? items : null;
+}
+
+/**
+ * The subcommand first, then a connection name for "use" and "remove". Pi
+ * replaces everything typed after the command with the chosen value, so each
+ * value repeats the subcommand.
+ */
+function completeConnections(deps: HeydbDeps, prefix: string): Completion[] | null {
+	const [action = "", name, ...extra] = prefix.split(" ");
+	let items: Completion[];
+	if (name === undefined) {
+		items = SUBCOMMANDS.filter((item) => item.startsWith(action)).map((item) => ({
+			value: item === "list" ? item : `${item} `,
+			label: item,
+		}));
+	} else if ((action === "use" || action === "remove") && extra.length === 0) {
+		items = connectionNames(deps)
+			.filter((item) => item.startsWith(name))
+			.map((item) => ({ value: `${action} ${item}`, label: item }));
+	} else {
+		items = [];
+	}
+	return items.length > 0 ? items : null;
+}
+
+function connectionNames(deps: HeydbDeps): string[] {
+	try {
+		return projectConnections(deps.cwd())?.names ?? [];
+	} catch {
+		return []; // completion must never fail loudly; the command itself will report the broken config
+	}
 }
 
 function attempt(ctx: ExtensionCommandContext, work: () => void): void {

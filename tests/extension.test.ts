@@ -10,7 +10,10 @@ import { fakeContext, fakePi, runCommand } from "./extension/fake-pi.ts";
 test("the default export registers the heydb commands, tools and prompt context", () => {
 	const pi = fakePi();
 	heydb(pi.api);
-	assert.deepEqual([...pi.commands.keys()], ["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status"]);
+	assert.deepEqual(
+		[...pi.commands.keys()],
+		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections"],
+	);
 	assert.equal(pi.tools.size, 7);
 	assert.deepEqual([...pi.handlers.keys()], ["before_agent_start"]);
 });

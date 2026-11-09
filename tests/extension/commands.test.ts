@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { describe, test } from "node:test";
 
 import { loadConfig, saveConfig } from "../../lib/config/store.ts";
 import { renderChanges } from "../../lib/render/markdown.ts";
+import { loadKnowledge } from "../../lib/store/knowledge.ts";
 import { loadSnapshot, saveSnapshot } from "../../lib/store/snapshots.ts";
 import { initProject } from "../../lib/usecases/init.ts";
+import { annotate } from "../../lib/usecases/knowledge.ts";
+import { fixedClock } from "../knowledge/fixtures.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 import { fakeContext, fakeIntrospect, loadHeydb, runCommand, tempDirs } from "./fake-pi.ts";
 
@@ -25,6 +28,11 @@ const live = snapshot([customersTable(), ordersTable()], {
 	warnings: [{ code: "triggers_hidden", message: "Triggers are not visible to this user", target: "shop" }],
 });
 
+const PASSWORD_LOCAL =
+	"Password for local (stored in .heydb/.env, ignored by git; leave empty to set HEYDB_LOCAL_PASSWORD yourself)";
+/** What the masked input shows under its title before anything is typed. */
+const SECRET_HINT = "> \nenter saves · esc cancels";
+
 function project(): string {
 	const root = tempDir();
 	initProject(root);
@@ -34,7 +42,10 @@ function project(): string {
 
 test("registers the human commands", () => {
 	const pi = loadHeydb();
-	assert.deepEqual([...pi.commands.keys()], ["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status"]);
+	assert.deepEqual(
+		[...pi.commands.keys()],
+		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections"],
+	);
 	for (const command of pi.commands.values()) assert.ok(command.description, "every command has a description");
 });
 
@@ -63,11 +74,11 @@ describe("/heydb:init", () => {
 });
 
 describe("/heydb:connect", () => {
-	test("asks for everything but the password and saves the first connection as the default", async () => {
+	test("asks for the connection, then for the password hidden, and saves the first connection as the default", async () => {
 		const pi = loadHeydb();
 		const root = tempDir();
 		initProject(root);
-		const ctx = fakeContext(root, { answers: ["local", "mariadb", "", "3307", "root", "shop, crm"] });
+		const ctx = fakeContext(root, { answers: ["local", "mariadb", "", "3307", "root", "shop, crm", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
 
 		assert.deepEqual(
@@ -79,9 +90,14 @@ describe("/heydb:connect", () => {
 				["input", "Port"],
 				["input", "User"],
 				["input", "Databases (comma-separated, empty for all)"],
+				["secret", PASSWORD_LOCAL],
 			],
 		);
-		for (const dialog of ctx.dialogs) assert.doesNotMatch(`${dialog.title} ${dialog.hint}`, /password|secret/i);
+		// Only the masked input asks for it: anything typed in a plain input is shown on screen.
+		for (const dialog of ctx.dialogs.filter((dialog) => dialog.kind !== "secret")) {
+			assert.doesNotMatch(`${dialog.title} ${dialog.hint}`, /password|secret/i);
+		}
+		assert.equal(existsSync(join(root, ".heydb", ".env")), false, "an empty answer stores nothing");
 
 		assert.deepEqual(loadConfig(root), {
 			formatVersion: 1,
@@ -111,7 +127,7 @@ describe("/heydb:connect", () => {
 	test("a second connection does not take the default", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		const ctx = fakeContext(root, { answers: ["prod", "mysql", "db.internal", "", "reader", ""] });
+		const ctx = fakeContext(root, { answers: ["prod", "mysql", "db.internal", "", "reader", "", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
 		assert.deepEqual(
 			ctx.dialogs.map((dialog) => [dialog.title, dialog.hint]),
@@ -122,6 +138,10 @@ describe("/heydb:connect", () => {
 				["Port", "3306"],
 				["User", "root"],
 				["Databases (comma-separated, empty for all)", "shop, crm"],
+				[
+					"Password for prod (stored in .heydb/.env, ignored by git; leave empty to set HEYDB_PROD_PASSWORD yourself)",
+					SECRET_HINT,
+				],
 			],
 			"MySQL keeps its questions and hints",
 		);
@@ -138,7 +158,7 @@ describe("/heydb:connect", () => {
 	test("turns a typed name like Eagle into a valid one and says so", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		const ctx = fakeContext(root, { answers: ["Eagle", "mysql", "db.internal", "", "reader", ""] });
+		const ctx = fakeContext(root, { answers: ["Eagle", "mysql", "db.internal", "", "reader", "", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
 		assert.ok(loadConfig(root).connections.eagle, "saved as eagle");
 		assert.equal(
@@ -154,7 +174,7 @@ describe("/heydb:connect", () => {
 		const pi = loadHeydb();
 		const root = tempDir();
 		initProject(root);
-		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "", "", "reader", " legacy ", "public, billing"] });
+		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "", "", "reader", " legacy ", "public, billing", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
 
 		assert.deepEqual(ctx.dialogs, [
@@ -165,6 +185,11 @@ describe("/heydb:connect", () => {
 			{ kind: "input", title: "User", hint: "postgres" },
 			{ kind: "input", title: "Database (exactly one: a PostgreSQL connection reaches one database)", hint: "postgres" },
 			{ kind: "input", title: "Schemas (comma-separated, empty for all non-system schemas)", hint: "public" },
+			{
+				kind: "secret",
+				title: "Password for pg (stored in .heydb/.env, ignored by git; leave empty to set HEYDB_PG_PASSWORD yourself)",
+				hint: SECRET_HINT,
+			},
 		]);
 		assert.deepEqual(loadConfig(root).connections.pg, {
 			engine: "postgresql",
@@ -186,7 +211,7 @@ describe("/heydb:connect", () => {
 	test("PostgreSQL: empty schemas capture every non-system schema", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "pg.internal", "5433", "reader", "legacy", ""] });
+		const ctx = fakeContext(root, { answers: ["pg", "postgresql", "pg.internal", "5433", "reader", "legacy", "", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
 		assert.equal(loadConfig(root).connections.pg?.schemas, null);
 		assert.match(ctx.notifications[0]?.message ?? "", /^Saved connection "pg" \(postgresql reader@pg\.internal:5433, database legacy, all schemas\)\.\n/);
@@ -248,6 +273,351 @@ describe("/heydb:connect", () => {
 		await runCommand(pi, "heydb:connect", "", ctx);
 		assert.deepEqual(ctx.dialogs, []);
 		assert.deepEqual(ctx.notifications, [{ message: "No heydb project here: run /heydb:init first.", level: "error" }]);
+	});
+});
+
+describe("/heydb:connect password", () => {
+	const answers = (password: string | undefined) => ["local", "mysql", "", "", "root", "", password];
+	const envFile = (root: string) => readFileSync(join(root, ".heydb", ".env"), "utf8");
+
+	test("saves a typed password in .heydb/.env, owner-only and ignored by git", async () => {
+		const pi = loadHeydb();
+		const root = tempDir();
+		initProject(root);
+		const ctx = fakeContext(root, { answers: answers("p4ss word") });
+		await runCommand(pi, "heydb:connect", "", ctx);
+
+		assert.equal(envFile(root), "HEYDB_LOCAL_PASSWORD=p4ss word\n");
+		if (process.platform !== "win32") assert.equal(statSync(join(root, ".heydb", ".env")).mode & 0o777, 0o600);
+		assert.match(readFileSync(join(root, ".heydb", ".gitignore"), "utf8"), /^\.env$/m);
+		assert.equal(loadConfig(root).connections.local?.password, "env:HEYDB_LOCAL_PASSWORD");
+		assert.deepEqual(ctx.notifications, [
+			{
+				message:
+					'Saved connection "local" (mysql root@127.0.0.1:3306, all databases) as the default.\n' +
+					"Password saved in .heydb/.env as HEYDB_LOCAL_PASSWORD (ignored by git). Next: /heydb:sync local.",
+				level: "info",
+			},
+		]);
+	});
+
+	test("says when the environment already sets the variable, because that value wins", async () => {
+		const pi = loadHeydb({ env: { HEYDB_LOCAL_PASSWORD: "old" } });
+		const root = tempDir();
+		initProject(root);
+		const ctx = fakeContext(root, { answers: answers("new") });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.match(
+			ctx.notifications[0]?.message ?? "",
+			/\nNote: HEYDB_LOCAL_PASSWORD is also set in your environment, and that value wins over \.heydb\/\.env\.$/,
+		);
+	});
+
+	test("escape at the password cancels everything", async () => {
+		const pi = loadHeydb();
+		const root = tempDir();
+		initProject(root);
+		const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
+		const ctx = fakeContext(root, { answers: answers(undefined) });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.equal(readFileSync(join(root, ".heydb", "config.json"), "utf8"), before);
+		assert.equal(existsSync(join(root, ".heydb", ".env")), false);
+		assert.deepEqual(ctx.notifications, [{ message: "heydb:connect cancelled; nothing was saved.", level: "info" }]);
+	});
+
+	test("an existing name is reported before the password is asked", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const ctx = fakeContext(root, { answers: answers("never-asked") });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.equal(ctx.dialogs.some((dialog) => dialog.kind === "secret"), false);
+		assert.deepEqual(ctx.notifications, [
+			{ message: 'connection "local" already exists; update or remove it instead', level: "error" },
+		]);
+	});
+
+	test("without Pi's terminal (RPC), skips the password and explains how to set it", async () => {
+		const pi = loadHeydb();
+		const root = tempDir();
+		initProject(root);
+		const ctx = fakeContext(root, { mode: "rpc", answers: answers("unused") });
+		await runCommand(pi, "heydb:connect", "", ctx);
+		assert.equal(ctx.dialogs.some((dialog) => dialog.kind === "secret"), false);
+		assert.ok(loadConfig(root).connections.local);
+		assert.match(ctx.notifications[0]?.message ?? "", /heydb never stores passwords: set HEYDB_LOCAL_PASSWORD in your shell/);
+	});
+
+	// The one place the password may live is .heydb/.env. Everything else a
+	// person, the model or git can see is searched for it after a full run.
+	test("the typed password ends up in .heydb/.env and nowhere else", async () => {
+		const password = "Zq9!leak#Pass 'w\"rd";
+		const { introspect, passwords } = fakeIntrospect(live);
+		const pi = loadHeydb({ introspect });
+		const root = tempDir();
+		initProject(root);
+		const connect = fakeContext(root, { answers: answers(password) });
+		await runCommand(pi, "heydb:connect", "", connect);
+		const sync = fakeContext(root);
+		await runCommand(pi, "heydb:sync", "", sync);
+		annotate(root, "local", { target: "shop.shop.orders", text: "One per checkout.", author: "Ana" }, fixedClock());
+		const list = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "", list);
+		const again = fakeContext(root, { answers: [password] });
+		await runCommand(pi, "heydb:password", "", again);
+
+		assert.deepEqual(passwords, [password], "the engine got it, read back from .heydb/.env");
+		const seen = JSON.stringify([
+			[connect, sync, list, again].map((ctx) => [ctx.notifications, ctx.dialogs, ctx.screens]),
+			pi.messages,
+			loadKnowledge(root, "local"),
+		]);
+		assert.equal(seen.includes(password), false, "shown to a person or the model");
+		const files = filesUnder(root);
+		assert.ok(files.includes(".heydb/snapshots/local.json"), "the search covers the snapshot");
+		assert.ok(files.includes(".heydb/knowledge/local.json"), "the search covers the notes");
+		for (const file of files) {
+			const found = readFileSync(join(root, file), "utf8").includes(password);
+			assert.equal(found, file === ".heydb/.env", file);
+		}
+	});
+});
+
+function filesUnder(root: string): string[] {
+	return readdirSync(root, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile())
+		.map((entry) => relative(root, join(entry.parentPath, entry.name)).replaceAll("\\", "/"));
+}
+
+describe("/heydb:password", () => {
+	const TITLE = "Password for local (stored in .heydb/.env, ignored by git; leave empty to keep it as it is)";
+
+	test("asks for the default connection's password hidden and replaces it in .heydb/.env", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		writeFileSync(join(root, ".heydb", ".env"), "# mine\nHEYDB_LOCAL_PASSWORD=old\n");
+		const ctx = fakeContext(root, { answers: ["n3w"] });
+		await runCommand(pi, "heydb:password", "", ctx);
+		assert.deepEqual(ctx.dialogs, [{ kind: "secret", title: TITLE, hint: SECRET_HINT }]);
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "# mine\nHEYDB_LOCAL_PASSWORD=n3w\n");
+		assert.deepEqual(ctx.notifications, [
+			{
+				message: 'Password for "local" saved in .heydb/.env as HEYDB_LOCAL_PASSWORD (ignored by git). Next: /heydb:sync local.',
+				level: "info",
+			},
+		]);
+		assert.doesNotMatch(ctx.screens.join("\n"), /n3w/);
+	});
+
+	test("uses the variable the connection names, for the connection in the arguments", async () => {
+		const pi = loadHeydb({ env: { HEYDB_SHARED: "x" } });
+		const root = project();
+		saveConfig(root, {
+			formatVersion: 1,
+			defaultConnection: "local",
+			connections: { local, prod: { ...local, password: "env:HEYDB_SHARED" } },
+		});
+		const ctx = fakeContext(root, { answers: ["p"] });
+		await runCommand(pi, "heydb:password", " prod ", ctx);
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_SHARED=p\n");
+		assert.equal(
+			ctx.notifications[0]?.message,
+			'Password for "prod" saved in .heydb/.env as HEYDB_SHARED (ignored by git). Next: /heydb:sync prod.\n' +
+				"Note: HEYDB_SHARED is also set in your environment, and that value wins over .heydb/.env.",
+		);
+	});
+
+	test("an empty answer or escape changes nothing", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const empty = fakeContext(root, { answers: [""] });
+		await runCommand(pi, "heydb:password", "", empty);
+		assert.deepEqual(empty.notifications, [{ message: 'Nothing changed: the password for "local" was left as it is.', level: "info" }]);
+		const escape = fakeContext(root, { answers: [undefined] });
+		await runCommand(pi, "heydb:password", "", escape);
+		assert.deepEqual(escape.notifications, [{ message: "heydb:password cancelled; nothing was saved.", level: "info" }]);
+		assert.equal(existsSync(join(root, ".heydb", ".env")), false);
+	});
+
+	test("without Pi's terminal, explains where to set the variable", async () => {
+		for (const options of [{ mode: "rpc" as const }, { hasUI: false }]) {
+			const pi = loadHeydb();
+			const ctx = fakeContext(project(), { ...options, answers: ["unused"] });
+			await runCommand(pi, "heydb:password", "", ctx);
+			assert.deepEqual(ctx.dialogs, []);
+			assert.deepEqual(ctx.notifications, [
+				{
+					message:
+						"Typing a password needs Pi's interactive terminal. " +
+						"Set HEYDB_LOCAL_PASSWORD in your shell or in .heydb/.env (ignored by git).",
+					level: "info",
+				},
+			]);
+		}
+	});
+
+	test("reports unknown connections, missing projects and extra arguments", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const cases: [cwd: string, args: string, message: string][] = [
+			[root, "qa", 'unknown connection "qa"; configured: local'],
+			[root, "local extra", "Usage: /heydb:password [connection]"],
+			[tempDir(), "", "No heydb project here: run /heydb:init first."],
+		];
+		for (const [cwd, args, message] of cases) {
+			const ctx = fakeContext(cwd, { answers: ["unused"] });
+			await runCommand(pi, "heydb:password", args, ctx);
+			assert.deepEqual(ctx.dialogs, []);
+			assert.deepEqual(ctx.notifications, [{ message, level: "error" }]);
+		}
+	});
+});
+
+describe("/heydb:connections", () => {
+	const prod = { ...local, host: "db.internal", user: "reader", password: "env:HEYDB_PROD_PASSWORD", databases: ["shop"] };
+
+	function twoConnections(): string {
+		const root = project();
+		saveConfig(root, { formatVersion: 1, defaultConnection: "local", connections: { local, prod } });
+		return root;
+	}
+
+	test("lists the connections, the default, whether each password is set and whether it was synced", async () => {
+		const pi = loadHeydb({ env: { HEYDB_PROD_PASSWORD: "x" } });
+		const root = twoConnections();
+		writeFileSync(join(root, ".heydb", ".env"), "HEYDB_LOCAL_PASSWORD=s3cret\n");
+		saveSnapshot(root, "local", live);
+		for (const args of ["", " list "]) {
+			const ctx = fakeContext(root);
+			await runCommand(pi, "heydb:connections", args, ctx);
+			assert.deepEqual(ctx.notifications, [
+				{
+					message:
+						`heydb connections in ${root}:\n` +
+						"- local (default): mysql root@127.0.0.1:3306, all databases · password HEYDB_LOCAL_PASSWORD: in .heydb/.env · synced\n" +
+						"- prod: mysql reader@db.internal:3306, databases shop · password HEYDB_PROD_PASSWORD: set in your environment · never synced\n" +
+						"Change the default with /heydb:connections use <name>; set a password with /heydb:password <name>.",
+					level: "info",
+				},
+			]);
+		}
+	});
+
+	test("shows a missing or unreadable password without failing", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const missing = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "", missing);
+		assert.match(missing.notifications[0]?.message ?? "", /password HEYDB_LOCAL_PASSWORD: not set · never synced/);
+		writeFileSync(join(root, ".heydb", ".env"), "broken s3cret\n");
+		const unreadable = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "", unreadable);
+		assert.match(unreadable.notifications[0]?.message ?? "", /password HEYDB_LOCAL_PASSWORD: \.heydb\/\.env is unreadable · never synced/);
+		assert.doesNotMatch(unreadable.notifications[0]?.message ?? "", /s3cret/);
+	});
+
+	test("use makes a connection the default", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		const ctx = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "use prod", ctx);
+		assert.equal(loadConfig(root).defaultConnection, "prod");
+		assert.deepEqual(ctx.notifications, [{ message: 'Default connection is now "prod".', level: "info" }]);
+	});
+
+	test("remove asks first, then drops the entry and its password, and keeps snapshot and notes on disk", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		writeFileSync(join(root, ".heydb", ".env"), "HEYDB_LOCAL_PASSWORD=a\nHEYDB_PROD_PASSWORD=b\n");
+		saveSnapshot(root, "prod", live);
+		annotate(root, "prod", { target: "shop.shop.orders", text: "One per checkout.", author: "Ana" }, fixedClock());
+
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:connections", "remove prod", ctx);
+		assert.deepEqual(ctx.dialogs, [
+			{
+				kind: "confirm",
+				title: 'Remove connection "prod"?',
+				hint: "It is removed from .heydb/config.json and its password from .heydb/.env. Its snapshot and notes stay on disk.",
+			},
+		]);
+		assert.deepEqual(Object.keys(loadConfig(root).connections), ["local"]);
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
+		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json")));
+		assert.equal(loadKnowledge(root, "prod").annotations.length, 1);
+		assert.deepEqual(ctx.notifications, [
+			{
+				message:
+					'Removed connection "prod" and its password line in .heydb/.env.\n' +
+					"Kept on disk, so no notes are lost: .heydb/snapshots/prod.json, .heydb/knowledge/prod.json. " +
+					"Delete them yourself if you no longer need them.",
+				level: "info",
+			},
+		]);
+	});
+
+	test("remove changes nothing unless confirmed, and needs a UI to confirm", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
+		const declined = fakeContext(root, { answers: ["no"] });
+		await runCommand(pi, "heydb:connections", "remove prod", declined);
+		assert.deepEqual(declined.notifications, [
+			{ message: "heydb:connections remove cancelled; nothing was changed.", level: "info" },
+		]);
+		const headless = fakeContext(root, { hasUI: false });
+		await runCommand(pi, "heydb:connections", "remove prod", headless);
+		assert.deepEqual(headless.notifications, [
+			{
+				message: "Removing a connection needs an interactive session to confirm it; edit .heydb/config.json instead.",
+				level: "error",
+			},
+		]);
+		assert.equal(readFileSync(join(root, ".heydb", "config.json"), "utf8"), before);
+	});
+
+	test("reports unknown names, wrong arguments and missing projects", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		const usage = "Usage: /heydb:connections [list | use <name> | remove <name>]";
+		const empty = tempDir();
+		initProject(empty);
+		const cases: [cwd: string, args: string, message: string][] = [
+			[root, "use qa", 'unknown connection "qa"; configured: local, prod'],
+			[root, "remove qa", 'unknown connection "qa"; configured: local, prod'],
+			[root, "use", usage],
+			[root, "use local prod", usage],
+			[root, "list all", usage],
+			[root, "delete prod", usage],
+			[tempDir(), "", "No heydb project here: run /heydb:init first."],
+			[empty, "", "No connections yet: run /heydb:connect first."],
+		];
+		for (const [cwd, args, message] of cases) {
+			const ctx = fakeContext(cwd, { answers: ["yes"] });
+			await runCommand(pi, "heydb:connections", args, ctx);
+			assert.deepEqual(ctx.notifications, [{ message, level: "error" }], args);
+			assert.deepEqual(ctx.dialogs, []);
+		}
+		assert.deepEqual(Object.keys(loadConfig(root).connections), ["local", "prod"]);
+	});
+});
+
+describe("extra arguments", () => {
+	test("/heydb:sync and /heydb:status take one connection at most and never connect otherwise", async () => {
+		let connected = false;
+		const pi = loadHeydb({
+			env: { HEYDB_LOCAL_PASSWORD: "x" },
+			introspect: async () => {
+				connected = true;
+				return live;
+			},
+		});
+		const root = project();
+		for (const name of ["sync", "status"]) {
+			const ctx = fakeContext(root);
+			await runCommand(pi, `heydb:${name}`, "local prod", ctx);
+			assert.deepEqual(ctx.notifications, [{ message: `Usage: /heydb:${name} [connection]`, level: "error" }]);
+		}
+		assert.equal(connected, false);
 	});
 });
 
@@ -442,7 +812,7 @@ describe("argument completion", () => {
 			connections: { local, prod: { ...local, password: "env:HEYDB_PROD_PASSWORD" } },
 		});
 		const pi = loadHeydb({ cwd: () => root });
-		for (const name of ["heydb:sync", "heydb:status"]) {
+		for (const name of ["heydb:sync", "heydb:status", "heydb:password"]) {
 			const complete = pi.commands.get(name)?.getArgumentCompletions;
 			assert.ok(complete, name);
 			assert.deepEqual(await complete("p"), [{ value: "prod", label: "prod" }]);
@@ -452,6 +822,32 @@ describe("argument completion", () => {
 			]);
 			assert.equal(await complete("x"), null);
 		}
+	});
+
+	test("completes /heydb:connections subcommands, then connection names", async () => {
+		const root = project();
+		saveConfig(root, {
+			formatVersion: 1,
+			defaultConnection: "local",
+			connections: { local, prod: { ...local, password: "env:HEYDB_PROD_PASSWORD" } },
+		});
+		const complete = loadHeydb({ cwd: () => root }).commands.get("heydb:connections")?.getArgumentCompletions;
+		assert.ok(complete);
+		assert.deepEqual(await complete(""), [
+			{ value: "list", label: "list" },
+			{ value: "use ", label: "use" },
+			{ value: "remove ", label: "remove" },
+		]);
+		assert.deepEqual(await complete("r"), [{ value: "remove ", label: "remove" }]);
+		// Pi replaces everything typed after the command, so each value repeats the subcommand.
+		assert.deepEqual(await complete("use "), [
+			{ value: "use local", label: "local" },
+			{ value: "use prod", label: "prod" },
+		]);
+		assert.deepEqual(await complete("remove p"), [{ value: "remove prod", label: "prod" }]);
+		assert.equal(await complete("list "), null);
+		assert.equal(await complete("use prod "), null);
+		assert.equal(await complete("x"), null);
 	});
 
 	test("offers nothing outside a project or with a broken config", async () => {

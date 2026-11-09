@@ -17,20 +17,21 @@ test("init → connect → sync → overview, table, search and annotate via too
 	mkdirSync(app);
 	const live = snapshot([customersTable(), ordersTable()]);
 	const { introspect, passwords } = fakeIntrospect(live);
-	const pi = loadHeydb({ introspect, env: { HEYDB_LOCAL_PASSWORD: "from-env" } });
+	const pi = loadHeydb({ introspect });
 
 	const init = fakeContext(root);
 	await runCommand(pi, "heydb:init", "", init);
 	assert.match(init.notifications[0]?.message ?? "", /^heydb project ready/);
 
-	const connect = fakeContext(app, { answers: ["local", "mysql", "", "", "root", "shop"] });
+	// The password is typed once, in the masked input, and read back by the sync.
+	const connect = fakeContext(app, { answers: ["local", "mysql", "", "", "root", "shop", "typed pass"] });
 	await runCommand(pi, "heydb:connect", "", connect);
-	assert.match(connect.notifications[0]?.message ?? "", /set HEYDB_LOCAL_PASSWORD/);
+	assert.match(connect.notifications[0]?.message ?? "", /Password saved in \.heydb\/\.env as HEYDB_LOCAL_PASSWORD/);
 
 	const sync = fakeContext(app);
 	await runCommand(pi, "heydb:sync", "", sync);
 	assert.equal(sync.notifications[0]?.level, "info");
-	assert.deepEqual(passwords, ["from-env"]);
+	assert.deepEqual(passwords, ["typed pass"]);
 
 	const overview = await runTool(pi, "heydb_overview", {}, app);
 	assert.equal(overview.isError, false);
