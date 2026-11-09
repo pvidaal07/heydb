@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.0-beta.1]
+
+- Documentation, the bundled skill and tests use generic examples only.
+- Releases are published from GitHub Actions through npm trusted publishing.
+
 ## [2.0.0-beta.0]
 
 heydb is rebuilt from scratch in TypeScript as a [Pi](https://pi.dev) package. The Go CLI and MCP server (v1) are archived at tag `v1.3.1`.

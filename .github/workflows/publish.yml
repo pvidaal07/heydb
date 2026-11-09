@@ -75,11 +75,13 @@ jobs:
             echo "${name}@${version} is already on npm; skipping publish"
             exit 0
           fi
+          # A prerelease goes to "beta" only once a stable version owns "latest";
+          # until then each beta becomes "latest", so npm shows its README.
           tag="latest"
-          case "${version}" in *-*) tag="beta" ;; esac
-          # The first publish has no "latest" yet; npm needs one, so a first
-          # prerelease is published as latest too.
-          if ! npm view "${name}" version >/dev/null 2>&1; then tag="latest"; fi
+          current="$(npm view "${name}" dist-tags.latest 2>/dev/null || true)"
+          case "${version}" in
+            *-*) case "${current}" in "" | *-*) ;; *) tag="beta" ;; esac ;;
+          esac
           npm publish --provenance --access public --tag "${tag}"
 
       - name: GitHub release
