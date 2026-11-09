@@ -19,6 +19,7 @@ import {
 } from "../../lib/render/markdown.ts";
 import type { SearchResult } from "../../lib/search.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
+import { smallAppSnapshot } from "../../bench/small-app.ts";
 import { annotation, knowledge, relationship } from "../knowledge/fixtures.ts";
 
 const ordersView = ordersTable({
@@ -75,8 +76,7 @@ describe("renderOverview", () => {
 				"## Databases",
 				"- shop: 2 tables, 1 view · Main store.",
 				"  Comment coverage: 0% of 2 tables, 0% of 5 columns",
-				"  Most referenced tables:",
-				"  - shop.customers · 1 reference · ~1.2k rows · no comment",
+				"  Most referenced tables: customers ×1",
 				"  Most tables have no comment: do not infer meaning from table names alone.",
 				"",
 				"## Warnings",
@@ -132,7 +132,7 @@ describe("renderOverview", () => {
 		assert.match(text, /\n {2}Name prefixes: sii_ ×3, log0-9 ×2\n/);
 		assert.match(
 			text,
-			/\n {2}Most referenced tables:\n {2}- shop\.art · 2 references · ~1\.2k rows · Productos\n {2}- shop\.zeta · 1 reference · ~1\.2k rows · Zeta rows\.\n/,
+			/\n {2}Most referenced tables: art ×2, zeta ×1\n/,
 		);
 		const order = text
 			.split("\n")
@@ -152,7 +152,7 @@ describe("renderOverview", () => {
 		]);
 	});
 
-	test("keeps every level of a PostgreSQL name and says when rows are unknown", () => {
+	test("keeps every level of a PostgreSQL name and leaves unknown rows empty", () => {
 		const postgres = snapshot([], {
 			engine: { kind: "postgresql", version: "16.4" },
 			databases: [
@@ -183,7 +183,8 @@ describe("renderOverview", () => {
 		});
 		const text = renderOverview(postgres, emptyKnowledge(), { connection: "pg" });
 		assert.match(text, /\n## Databases\n- app\.public: 2 tables\n/);
-		assert.match(text, /\n {2}- app\.public\.customers · 1 reference · rows unknown · People\n/);
+		assert.match(text, /\n {2}Most referenced tables: customers ×1\n/);
+		assert.match(text, /\n\| app\.public\.customers \| table \|  \| People \|/);
 		assert.match(text, /\n\| app\.public\.orders \| table \|  \| Checkouts \|/);
 		assert.doesNotMatch(text, /do not infer meaning/);
 	});
@@ -667,5 +668,110 @@ describe("project notes and other connections", () => {
 			}),
 			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.cus(cod) — code",
 		);
+	});
+});
+
+describe("overview of a server with many databases", () => {
+	const art = (): Table => ({ ...customersTable(), name: "art", comment: "Artículos", columns: [column("id", 1), column("nombre", 2)] });
+	const lines = (): Table => ({ ...customersTable(), name: "lin", columns: [column("id", 1), column("ref_art", 2)] });
+	function company(name: string, tables: Table[] = [art(), lines()]) {
+		return { name, schemas: [{ name, tables, routines: [] }] };
+	}
+	function server(databases: ReturnType<typeof company>[]): Snapshot {
+		return snapshot([], { databases });
+	}
+	const names = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `emp_${String(i + from).padStart(3, "0")}`);
+
+	test("collapses databases with the same tables and columns into one block, naming the first few", () => {
+		const other = company("central", [{ ...art(), columns: [column("id", 1), column("nombre", 2), column("precio", 3)] }]);
+		const text = renderOverview(server([...names(5).map((name) => company(name)), other]), emptyKnowledge(), { connection: "erp" });
+		const databases = text.split("\n## ")[1]?.split("\n") ?? [];
+		assert.deepEqual(
+			databases.filter((line) => line.startsWith("- ")),
+			["- emp_001 (+4 with the same structure: emp_002, emp_003, emp_004, …): 2 tables", "- central: 1 table"],
+		);
+		assert.match(text, /\n {2}Most referenced tables: art ×1\n/);
+		assert.match(text, /\n {2}Comment coverage: 50% of 2 tables, 0% of 4 columns\n/);
+		assert.doesNotMatch(text, /emp_00[2-5]\.(art|lin)/);
+		assert.match(text, /\nTables with notes first, then the most referenced, then by name; rows are engine estimates\. Databases with the same structure are listed once\.\n/);
+		assert.match(text, /\n\| emp_001\.art \| table \| ~1\.2k \| Artículos \|\n/);
+		assert.match(text, /\n\| central\.art \| table \| ~1\.2k \| Artículos \|\n/);
+	});
+
+	test("two identical databases name the other one whole, without …", () => {
+		const text = renderOverview(server(names(2).map((name) => company(name))), emptyKnowledge(), { connection: "erp" });
+		assert.match(text, /\n- emp_001 \(\+1 with the same structure: emp_002\): 2 tables\n/);
+	});
+
+	test("a copy with its own note, or a noted table in a copy, keeps what the note says", () => {
+		const notes = knowledge([
+			annotation("a-db", "emp_003.emp_003", { text: "Closed company." }),
+			annotation("a-t", "emp_002.emp_002.lin", { text: "Lines of emp_002." }),
+		]);
+		const text = renderOverview(server(names(3).map((name) => company(name))), notes, { connection: "erp" });
+		assert.match(text, /\n- emp_001 \(\+1 with the same structure: emp_002\): 2 tables\n/);
+		assert.match(text, /\n- emp_003: 2 tables · Closed company\.\n/);
+		assert.match(text, /\n\| emp_002\.lin \| table \| ~1\.2k \| Lines of emp_002\. \|\n/);
+	});
+
+	test("lists at most 20 database blocks and points to search for the rest", () => {
+		// Every database has its own table, so none collapses.
+		const databases = names(25).map((name) => company(name, [{ ...customersTable(), name: `t_${name}` }]));
+		const text = renderOverview(server(databases), emptyKnowledge(), { connection: "erp" });
+		const blocks = text.split("\n").filter((line) => /^- emp_\d+/.test(line));
+		assert.equal(blocks.length, 20);
+		assert.match(text, /\n- emp_020: 1 table\n(?: {2}[^\n]+\n)+… 5 more databases — use heydb_search with database\n\n## Tables\n/);
+	});
+
+	test("the cap counts the collapsed copies among the databases left out", () => {
+		const distinct = names(20).map((name) => company(name, [{ ...customersTable(), name: `t_${name}` }]));
+		const copies = names(3, 21).map((name) => company(name));
+		const text = renderOverview(server([...distinct, ...copies]), emptyKnowledge(), { connection: "erp" });
+		assert.match(text, /\n… 3 more databases — use heydb_search with database\n/);
+	});
+
+	test("lists no table twice: the database block names its core, the table list describes it", () => {
+		const shop = snapshot([ordersTable({ comment: "Checkouts" }), customersTable()]);
+		const text = renderOverview(shop, emptyKnowledge(), { connection: "local" });
+		for (const name of ["shop.orders", "shop.customers"]) {
+			assert.equal(text.split(name).length - 1, 1, `${name} once in\n${text}`);
+		}
+		assert.match(text, /\n {2}Most referenced tables: customers ×1\n/);
+		assert.match(text, /\n\| shop\.customers \| table \| ~1\.2k \|  \|\n/);
+	});
+
+	test("shows at most 20 project notes, cut when long, and says where the rest are", () => {
+		const projectNotes = Array.from({ length: 23 }, (_, i) =>
+			annotation(`p-${i + 1}`, "project", { text: i === 0 ? `${"y".repeat(450)} end` : `Fact ${i + 1}.` }),
+		);
+		const text = renderOverview(snapshot([customersTable()]), emptyKnowledge(), { connection: "local", projectNotes });
+		const notes = text.split("\n\n")[1]?.split("\n") ?? [];
+		assert.equal(notes[0], "## Project notes");
+		assert.equal(notes[1], `- ${"y".repeat(299)}… [id p-1 · ana · 2026-11-06]`);
+		assert.equal(notes[20], "- Fact 20. [id p-20 · ana · 2026-11-06]");
+		assert.equal(notes[21], "… 3 more project notes; every note, whole, is in .heydb/knowledge/_project.json");
+		assert.equal(notes.length, 22);
+		assert.ok(text.indexOf("## Project notes") < text.indexOf("## Databases"));
+	});
+
+	test("a long project note alone is cut and points to the file", () => {
+		const projectNotes = [annotation("p-1", "project", { text: "z".repeat(400) })];
+		const text = renderOverview(snapshot([customersTable()]), emptyKnowledge(), { connection: "local", projectNotes });
+		assert.match(text, /\n- z{299}… \[id p-1 · ana · 2026-11-06\]\nLong notes are cut; every note, whole, is in \.heydb\/knowledge\/_project\.json\n/);
+	});
+});
+
+describe("overview of a small schema", () => {
+	test("one call is a full map: every table, with its comment, in a compact overview", () => {
+		const small = smallAppSnapshot();
+		const text = renderOverview(small, emptyKnowledge(), { connection: "app" });
+		const tables = small.databases.flatMap((database) => database.schemas.flatMap((schema) => schema.tables));
+		assert.ok(tables.length >= 10);
+		for (const table of tables) {
+			const comment = table.comment.trim() === "" ? "" : ` ${escapeCell(table.comment)}`;
+			assert.ok(text.includes(`| shop.${table.name} | ${table.kind} | `) && text.includes(`${comment} |`), `${table.name} in\n${text}`);
+		}
+		assert.doesNotMatch(text, /more tables/);
+		assert.ok(text.length <= 1_300, `small overview has ${text.length} characters`);
 	});
 });

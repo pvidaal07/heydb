@@ -91,6 +91,28 @@ describe("schemaStats", () => {
 			columnsWithComment: 0,
 			prefixes: [],
 			mainTables: [],
+			structure: schemaStats(snapshot([]), emptyKnowledge())[0]?.structure,
 		});
+	});
+
+	test("structure is equal for databases with the same tables and columns, whatever their comments or rows", () => {
+		const copy = (name: string, tables: Table[]) => ({ name, schemas: [{ name, tables, routines: [] }] });
+		const base = [table("art", ["id", "nombre"]), table("lin", ["id", "ref_art"])];
+		const stats = schemaStats(
+			snapshot([], {
+				databases: [
+					copy("emp_001", base),
+					copy("emp_002", base.map((item) => ({ ...item, comment: "Otro", rowEstimate: 5 }))),
+					copy("emp_003", [base[0] as Table, { ...(base[1] as Table), columns: [column("id", 1), column("ref_art", 2, { type: "bigint" })] }]),
+					copy("emp_004", [base[0] as Table]),
+				],
+			}),
+			emptyKnowledge(),
+		);
+		const [first, second, otherType, fewer] = stats.map((item) => item.structure);
+		assert.equal(typeof first, "string");
+		assert.equal(first, second);
+		assert.notEqual(first, otherType);
+		assert.notEqual(first, fewer);
 	});
 });

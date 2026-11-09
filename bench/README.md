@@ -87,7 +87,7 @@ Each strategy is a module under `strategies/` with one interface,
 What the columns of the comparison mean:
 
 - **≈tokens**: characters returned to the model / 4, every call of every
-  question. heydb's tool definitions (≈1.6k tokens, sent every turn) are not
+  question. heydb's tool definitions (≈1.1k tokens, sent every turn) are not
   in it; grep, read and bash come with any agent, and a database MCP server's
   tool definitions cost their own, also not counted.
 - **calls**: tool calls, each one a model round trip.
@@ -319,6 +319,32 @@ against 4 to 8, and tables whose name is not the word asked: `reviews` for
 "product rating" (a column) and `audit_log` for "cambios panel administracion"
 (its comment), which a pick from the names misses. Notes add a little text
 here instead of saving it: there was little left to find.
+
+## After overview and fixed-text trims (synthetic)
+
+`heydb_overview` shows databases with the same tables and columns once
+(`emp_001 (+49 with the same structure: emp_002, emp_003, emp_004, …)`) and
+lists their tables once, stops at 20 database blocks with "… N more
+databases", names the most referenced tables in one line (their rows and
+comments are already in the table list) and caps project notes at 20 of up to
+300 characters. The tool definitions say less: long explanations (note
+sources, project scope, cross-connection joins, what search matches) live in
+the skill, and `connection` has no description. Same questions and policy;
+`node bench/run.ts [--companies N]` and `--scenario small`:
+
+| scenario | heydb_overview | fixed tool text, every turn | heydb, 10 questions |
+|---|---|---|---|
+| ERP, 1 company | ≈679 tokens (was ≈763) | ≈1,093 (was ≈1,656) | ≈4.5k (was ≈4.7k) |
+| ERP, 10 companies | ≈706 (was ≈2,132) | ≈1,093 | ≈4.7k (was ≈7.6k) |
+| ERP, 50 companies | ≈707 (was ≈8,623) | ≈1,093 | ≈4.8k (was ≈20.6k) |
+| small app | ≈269 (was ≈362) | ≈1,093 | ≈2.9k (no question needs the overview) |
+
+The overview no longer grows with the number of identical company databases,
+so the 50-company total falls back to the 1-company one. Found tables and
+ranks are unchanged (9 of 11 on the ERP, 11 of 11 on the small app). On the
+small app one overview call lists all 15 tables with their comments: a full
+map for ≈270 tokens. The fixed text is not in the totals; it is paid on every
+turn of every conversation, ≈560 tokens less now.
 
 ## Real-agent benchmark
 
