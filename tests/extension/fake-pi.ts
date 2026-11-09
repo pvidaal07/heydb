@@ -76,6 +76,8 @@ type Mode = "tui" | "rpc" | "print";
  * a person pressing Escape. Every dialog is recorded, so a test can check
  * what was (and was not) asked.
  *
+ * `idle` is what ctx.isIdle() answers: false plays an agent still working.
+ *
  * `mode` is Pi's run mode: in "tui" (the default with a UI) custom components
  * such as the masked password input are typed into key by key with Pi's real
  * key table, and every frame they draw is kept in `screens`. In "rpc" custom()
@@ -83,7 +85,7 @@ type Mode = "tui" | "rpc" | "print";
  */
 export function fakeContext(
 	cwd: string,
-	{ hasUI = true, mode = (hasUI ? "tui" : "print") as Mode, answers = [] as (string | undefined)[] } = {},
+	{ hasUI = true, mode = (hasUI ? "tui" : "print") as Mode, answers = [] as (string | undefined)[], idle = true } = {},
 ) {
 	const notifications: Notification[] = [];
 	const dialogs: Dialog[] = [];
@@ -95,6 +97,7 @@ export function fakeContext(
 		cwd,
 		hasUI,
 		mode,
+		isIdle: () => idle,
 		ui: {
 			notify(message: string, level = "info") {
 				notifications.push({ message, level });

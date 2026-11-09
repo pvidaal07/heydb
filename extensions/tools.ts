@@ -187,6 +187,7 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 		promptGuidelines: [
 			"When you learn what a table or column means (valid values, units, legacy quirks), save it with heydb_annotate: one or two factual sentences, never invent or guess.",
 			"Before heydb_annotate, read the existing notes with heydb_table; fix a wrong note with heydb_edit_note instead of adding a contradicting one.",
+			'End a heydb_annotate note with its source: "(code: src/Models/Order.php)" when code shows it, "(told by the user)" when the user said it. Save an inference only after the user confirms it.',
 		],
 		parameters: ANNOTATE_PARAMETERS,
 		executionMode: "sequential",

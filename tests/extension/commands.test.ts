@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
@@ -35,6 +35,9 @@ const PASSWORD_LOCAL =
 /** What the masked input shows under its title before anything is typed. */
 const SECRET_HINT = "> \nenter saves · esc cancels";
 
+/** The summary line of a sync when the project has no code that uses the tables. */
+const NO_CODE = "\nNo code using these tables was found here; heydb will learn from your conversations (the agent annotates what you explain).";
+
 function project(): string {
 	const root = tempDir();
 	initProject(root);
@@ -46,7 +49,16 @@ test("registers the human commands", () => {
 	const pi = loadHeydb();
 	assert.deepEqual(
 		[...pi.commands.keys()],
-		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections"],
+		[
+			"heydb:about",
+			"heydb:init",
+			"heydb:connect",
+			"heydb:sync",
+			"heydb:status",
+			"heydb:password",
+			"heydb:connections",
+			"heydb:learn-code",
+		],
 	);
 	for (const command of pi.commands.values()) assert.ok(command.description, "every command has a description");
 });
@@ -657,7 +669,7 @@ describe("/heydb:sync", () => {
 		assert.deepEqual(passwords, ["s3cret"]);
 		assert.deepEqual(loadSnapshot(root, "local"), live);
 		assert.deepEqual(ctx.notifications, [
-			{ message: "heydb sync local: snapshot written · 1 database, 2 tables · 1 warning · 1 change.", level: "info" },
+			{ message: `heydb sync local: snapshot written · 1 database, 2 tables · 1 warning · 1 change.${NO_CODE}`, level: "info" },
 		]);
 		assert.equal(pi.messages.length, 1);
 		assert.equal(pi.messages[0]?.message.customType, "heydb");
@@ -673,7 +685,7 @@ describe("/heydb:sync", () => {
 		const ctx = fakeContext(root);
 		await runCommand(pi, "heydb:sync", "", ctx);
 		assert.deepEqual(ctx.notifications, [
-			{ message: "heydb sync local: unchanged · 1 database, 2 tables · 1 warning.", level: "info" },
+			{ message: `heydb sync local: unchanged · 1 database, 2 tables · 1 warning.${NO_CODE}`, level: "info" },
 		]);
 		assert.deepEqual(pi.messages, []);
 	});
@@ -690,7 +702,7 @@ describe("/heydb:sync", () => {
 		saveSnapshot(root, "prod", live);
 		const ctx = fakeContext(root);
 		await runCommand(pi, "heydb:sync", " prod ", ctx);
-		assert.equal(ctx.notifications[0]?.message, "heydb sync prod: snapshot written · 1 database, 2 tables · 1 change.");
+		assert.equal(ctx.notifications[0]?.message, `heydb sync prod: snapshot written · 1 database, 2 tables · 1 change.${NO_CODE}`);
 		assert.equal(String(pi.messages[0]?.message.content), `heydb sync prod changed the stored snapshot:\n\n${renderChanges([
 			{ kind: "added", object: "column", target: "shop.shop.orders.status", details: [] },
 		])}`);
@@ -766,7 +778,7 @@ describe("commands that connect", () => {
 		const runs = ["heydb:sync", "heydb:status", "heydb:sync"].map(async (name) => {
 			const ctx = fakeContext(root);
 			await runCommand(pi, name, "", ctx);
-			order.push(`${name} ${ctx.notifications[0]?.message.split(":")[1]?.trim()}`);
+			order.push(`${name} ${ctx.notifications[0]?.message.split("\n")[0]?.split(":")[1]?.trim()}`);
 		});
 		await Promise.all(runs);
 		assert.equal(most, 1);
@@ -837,7 +849,7 @@ describe("argument completion", () => {
 			connections: { local, prod: { ...local, password: "env:HEYDB_PROD_PASSWORD" } },
 		});
 		const pi = loadHeydb({ cwd: () => root });
-		for (const name of ["heydb:sync", "heydb:status", "heydb:password"]) {
+		for (const name of ["heydb:sync", "heydb:status", "heydb:password", "heydb:learn-code"]) {
 			const complete = pi.commands.get(name)?.getArgumentCompletions;
 			assert.ok(complete, name);
 			assert.deepEqual(await complete("p"), [{ value: "prod", label: "prod" }]);
@@ -882,5 +894,170 @@ describe("argument completion", () => {
 		initProject(broken);
 		writeFileSync(join(broken, ".heydb", "config.json"), "{");
 		assert.equal(await loadHeydb({ cwd: () => broken }).commands.get("heydb:sync")?.getArgumentCompletions?.(""), null);
+	});
+});
+
+/** Writes `files` (path → content) into the project at `root`. */
+function writeCode(root: string, files: Record<string, string>): void {
+	for (const [path, content] of Object.entries(files)) {
+		mkdirSync(dirname(join(root, path)), { recursive: true });
+		writeFileSync(join(root, path), content);
+	}
+}
+
+const CODE = {
+	"src/Models/Customer.php": "class Customer extends Model { protected $table = 'customers'; }\n",
+	"src/Repo/orders.sql": "SELECT * FROM orders JOIN customers ON customers.id = orders.customer_id\n",
+	"vendor/acme/Orders.php": "orders orders orders",
+};
+
+const LEARN_TITLE = "Learn from this project's code?";
+const LEARN_BODY =
+	"Found 2 files that use 2 tables (e.g. customers, orders). " +
+	"heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.";
+const LEARN_MESSAGE =
+	'heydb: the user agreed that you learn about the database of connection "local" from this project\'s code.\n\n' +
+	"Files that use its tables, most used first:\n" +
+	"- shop.customers (3 uses): src/Repo/orders.sql, src/Models/Customer.php\n" +
+	"- shop.orders (2 uses): src/Repo/orders.sql\n\n" +
+	"Rules:\n" +
+	"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.\n" +
+	"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
+	"Record joins the code makes without a foreign key with heydb_relate.\n" +
+	'- End every note with its source, like "(code: src/Repo/orders.sql)".\n' +
+	"- Never invent or guess: what the code does not make clear is not saved.\n" +
+	"- A few valuable notes beat many; stop after about 20.\n" +
+	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.";
+
+describe("learning from code", () => {
+	function codeProject(): string {
+		const root = project();
+		writeCode(root, CODE);
+		return root;
+	}
+
+	test("after a sync, offers to read the code that uses the tables and, if accepted, starts one agent turn", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+
+		assert.deepEqual(ctx.dialogs, [{ kind: "confirm", title: LEARN_TITLE, hint: LEARN_BODY }]);
+		assert.deepEqual(ctx.notifications, [
+			{ message: "heydb sync local: unchanged · 1 database, 2 tables · 1 warning.", level: "info" },
+			{ message: "Asked the agent to read the code and note what it shows.", level: "info" },
+		]);
+		assert.deepEqual(pi.messages, [
+			{
+				message: { customType: "heydb", content: LEARN_MESSAGE, display: true },
+				options: { triggerTurn: true, deliverAs: "followUp" },
+			},
+		]);
+	});
+
+	test("comes after the message with the changes when the sync wrote the snapshot", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const ctx = fakeContext(codeProject(), { answers: ["yes"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.equal(pi.messages.length, 2);
+		assert.match(String(pi.messages[0]?.message.content), /^heydb sync local changed the stored snapshot/);
+		assert.equal(pi.messages[1]?.message.content, LEARN_MESSAGE);
+	});
+
+	test("declined, sends nothing and says how to do it later", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["no"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.equal(ctx.dialogs.length, 1);
+		assert.deepEqual(pi.messages, []);
+		assert.deepEqual(ctx.notifications[1], {
+			message: "Nothing was sent. Run /heydb:learn-code local whenever you want the agent to read it.",
+			level: "info",
+		});
+	});
+
+	test("while the agent is working, the request waits for it to finish", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["yes"], idle: false });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.deepEqual(pi.messages[0]?.options, { triggerTurn: true, deliverAs: "followUp" });
+		assert.deepEqual(ctx.notifications[1], {
+			message: "The agent is busy: it will read the code and note what it shows when it finishes its current work.",
+			level: "info",
+		});
+	});
+
+	test("without code that uses the tables, asks nothing and says notes will come from conversations", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = project();
+		saveSnapshot(root, "local", live);
+		writeCode(root, { "src/app.ts": "export const answer = 42;\n", "vendor/x/Orders.php": "orders" });
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.deepEqual(ctx.dialogs, []);
+		assert.deepEqual(ctx.notifications, [{ message: `heydb sync local: unchanged · 1 database, 2 tables · 1 warning.${NO_CODE}`, level: "info" }]);
+		assert.deepEqual(pi.messages, []);
+	});
+
+	test("without an interactive session, a sync asks nothing and sends nothing", async () => {
+		const pi = loadHeydb({ introspect: fakeIntrospect(live).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { hasUI: false, answers: ["yes"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.deepEqual(ctx.dialogs, []);
+		assert.deepEqual(ctx.notifications, [{ message: "heydb sync local: unchanged · 1 database, 2 tables · 1 warning.", level: "info" }]);
+		assert.deepEqual(pi.messages, []);
+	});
+
+	test("/heydb:learn-code offers the same from the stored snapshot, without connecting", async () => {
+		const pi = loadHeydb({
+			introspect: async () => {
+				throw new Error("must not connect");
+			},
+		});
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-code", " local ", ctx);
+		assert.deepEqual(ctx.dialogs, [{ kind: "confirm", title: LEARN_TITLE, hint: LEARN_BODY }]);
+		assert.deepEqual(ctx.notifications, [{ message: "Asked the agent to read the code and note what it shows.", level: "info" }]);
+		assert.deepEqual(pi.messages, [
+			{
+				message: { customType: "heydb", content: LEARN_MESSAGE, display: true },
+				options: { triggerTurn: true, deliverAs: "followUp" },
+			},
+		]);
+	});
+
+	test("/heydb:learn-code says when there is no code, no UI, no snapshot or too many arguments", async () => {
+		const pi = loadHeydb();
+		const empty = project();
+		saveSnapshot(empty, "local", live);
+		const none = fakeContext(empty);
+		await runCommand(pi, "heydb:learn-code", "", none);
+		assert.deepEqual(none.notifications, [{ message: `heydb learn-code local: ${NO_CODE.trim()}`, level: "info" }]);
+
+		const code = codeProject();
+		saveSnapshot(code, "local", live);
+		const headless = fakeContext(code, { hasUI: false });
+		await runCommand(pi, "heydb:learn-code", "", headless);
+		assert.deepEqual(headless.notifications, [
+			{ message: "/heydb:learn-code needs an interactive session to ask before the agent spends tokens.", level: "error" },
+		]);
+
+		const unsynced = fakeContext(codeProject());
+		await runCommand(pi, "heydb:learn-code", "", unsynced);
+		assert.deepEqual(unsynced.notifications, [{ message: 'Connection "local" was never synced: run /heydb:sync local.', level: "error" }]);
+
+		const extra = fakeContext(code);
+		await runCommand(pi, "heydb:learn-code", "local prod", extra);
+		assert.deepEqual(extra.notifications, [{ message: "Usage: /heydb:learn-code [connection]", level: "error" }]);
+		assert.deepEqual(pi.messages, []);
 	});
 });

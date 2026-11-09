@@ -41,13 +41,15 @@ When the conversation or the code teaches you something the schema does not say,
 - `heydb_relate` for joins without a foreign key: `orders.customer_id → customers.id`. Say how you know in `note`.
 - A name without a dot is a table: `heydb_annotate` with `gar` notes the table even if some column is also called `gar`; write `postv.gar` for the column.
 - If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
+- End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
+- After `/heydb:sync` (or `/heydb:learn-code`) the user may ask you to read the project's code: follow the rules in that message and stop after about 20 notes.
 - Read the existing notes first (`heydb_table`). Fix a wrong note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that contradicts the first.
 
 Good notes are short, factual and verifiable:
 
 | Good | Bad |
 |---|---|
-| `status: 0 draft, 1 paid, 2 refunded (see OrderStatus.php).` | `Status of the order.` (the name already says it) |
+| `status: 0 draft, 1 paid, 2 refunded (code: src/OrderStatus.php)` | `Status of the order.` (the name already says it) |
 | `Amount in cents, VAT included.` | `Probably the price.` (a guess) |
 | `Legacy: 0000-00-00 means "never". Filter it out.` | A paragraph retelling the conversation |
 | `Joined to customers.id by app code; no FK because the table is MyISAM.` | `I think this links to users.` |

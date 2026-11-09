@@ -62,6 +62,10 @@ Microservices with a database each: give every service its own `.heydb/` (run `/
 | `heydb_relate` | Record a join that has no foreign key |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
 
+### Learning from code
+
+After `/heydb:sync`, heydb looks for source files in the project that name the synced tables (`git ls-files`, or a walk that skips `node_modules`, `vendor`, `.heydb` and build output; at most 5,000 files, 50 MB and 3 seconds). If it finds some, it asks whether the agent should read them and note what the code makes explicit: valid values, units, joins without a foreign key. Each note cites its file, like `(code: src/Models/Order.php)`. It costs tokens, so it only starts when you say yes; `/heydb:learn-code [connection]` asks again later. Without such code nothing is asked, and the notes come from your conversations instead, marked `(told by the user)`.
+
 The tools only read and write files in `.heydb/`; they never connect to the database. Notes written by the agent are signed `<your git user.name> (via agent)`. A bundled skill tells the agent when to check heydb and how to write useful notes.
 
 ## What gets committed

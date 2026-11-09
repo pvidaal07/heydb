@@ -29,5 +29,5 @@ test("loading and registering the extension does not load mysql2", () => {
 	`;
 	const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { encoding: "utf8" });
 	assert.equal(child.status, 0, child.stderr);
-	assert.equal(child.stdout, "15 registered, mysql2 not loaded");
+	assert.equal(child.stdout, "16 registered, mysql2 not loaded");
 });

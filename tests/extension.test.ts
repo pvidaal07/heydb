@@ -12,7 +12,7 @@ test("the default export registers the heydb commands, tools and prompt context"
 	heydb(pi.api);
 	assert.deepEqual(
 		[...pi.commands.keys()],
-		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections"],
+		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections", "heydb:learn-code"],
 	);
 	assert.equal(pi.tools.size, 7);
 	assert.deepEqual([...pi.handlers.keys()], ["before_agent_start"]);

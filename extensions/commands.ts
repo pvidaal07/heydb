@@ -9,6 +9,7 @@ import type { Snapshot } from "../lib/model/snapshot.ts";
 import { renderChanges, renderStatus } from "../lib/render/markdown.ts";
 import { toConnectionName } from "../lib/store/guards.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
+import { type SchemaUsage, findSchemaUsage } from "../lib/usecases/code-scan.ts";
 import { initProject } from "../lib/usecases/init.ts";
 import {
 	type ConnectionSummary,
@@ -20,6 +21,7 @@ import {
 	forgetConnection,
 	listConnections,
 	openConnection,
+	openSnapshot,
 	projectConnections,
 	saveNewConnection,
 	savePassword,
@@ -120,6 +122,14 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 				description: "List connections, change the default or remove one: /heydb:connections [list | use <name> | remove <name>]",
 				getArgumentCompletions: (prefix) => completeConnections(deps, prefix),
 				handler: (args, ctx) => connections(deps, args, ctx),
+			},
+		],
+		[
+			"heydb:learn-code",
+			{
+				description: "Offer the agent this project's code that uses the tables, to note what it shows: /heydb:learn-code [connection]",
+				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
+				handler: (args, ctx) => learnCode(sendMessage, args, ctx),
 			},
 		],
 	];
@@ -387,7 +397,10 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 		const result = syncSnapshot(opened.root, opened.name, live);
 		const facts = [result.written ? "snapshot written" : "unchanged", ...summary(live)];
 		if (result.written) facts.push(count(result.changes.length, "change"));
-		ctx.ui.notify(`heydb sync ${opened.name}: ${facts.join(" · ")}.`, "info");
+		// A failing scan must not turn a good sync into an error: it only loses the offer.
+		const usage = await findSchemaUsage(opened.root, live).catch(() => null);
+		const noCode = usage !== null && usage.matches.length === 0 ? `\n${NO_CODE}` : "";
+		ctx.ui.notify(`heydb sync ${opened.name}: ${facts.join(" · ")}.${noCode}`, "info");
 		// The changes also go into the session, so the model knows the schema it reads just moved.
 		if (result.written && result.changes.length > 0) {
 			await sendMessage({
@@ -396,7 +409,78 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 				display: true,
 			});
 		}
+		if (usage !== null && usage.matches.length > 0 && ctx.hasUI) await offerCode(sendMessage, opened.name, usage, ctx);
 	});
+}
+
+// Many heydb projects have no code at all (one made only to explore a
+// database); there, the notes come from what the person explains.
+const NO_CODE =
+	"No code using these tables was found here; heydb will learn from your conversations (the agent annotates what you explain).";
+
+/** Same offer as after a sync, from the stored snapshot: it never connects. */
+async function learnCode(sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const words = argumentWords(args);
+	if (words.length > 1) return ctx.ui.notify("Usage: /heydb:learn-code [connection]", "error");
+	try {
+		const opened = openSnapshot(ctx.cwd, words[0]);
+		const usage = await findSchemaUsage(opened.root, opened.snapshot);
+		if (usage.matches.length === 0) return ctx.ui.notify(`heydb learn-code ${opened.name}: ${NO_CODE}`, "info");
+		if (!ctx.hasUI) {
+			return ctx.ui.notify("/heydb:learn-code needs an interactive session to ask before the agent spends tokens.", "error");
+		}
+		await offerCode(sendMessage, opened.name, usage, ctx);
+	} catch (error) {
+		failed(ctx, error);
+	}
+}
+
+/**
+ * Asks before the agent reads code: that costs tokens, and the person may
+ * rather do it later. Accepted, one message starts an agent turn; while the
+ * agent works it waits as a follow-up instead of interrupting it.
+ */
+async function offerCode(sendMessage: SendMessage, connection: string, usage: SchemaUsage, ctx: ExtensionCommandContext): Promise<void> {
+	const examples = usage.matches.slice(0, 3).map((match) => match.name);
+	const confirmed = await ctx.ui.confirm(
+		"Learn from this project's code?",
+		`Found ${usage.truncated ? "at least " : ""}${count(usage.filesMatched, "file")} that use ${count(usage.tablesMatched, "table")} ` +
+			`(e.g. ${examples.join(", ")}). heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.`,
+	);
+	if (!confirmed) {
+		return ctx.ui.notify(`Nothing was sent. Run /heydb:learn-code ${connection} whenever you want the agent to read it.`, "info");
+	}
+	const idle = ctx.isIdle();
+	await sendMessage(
+		{ customType: "heydb", content: learnMessage(connection, usage), display: true },
+		{ triggerTurn: true, deliverAs: "followUp" },
+	);
+	ctx.ui.notify(
+		idle
+			? "Asked the agent to read the code and note what it shows."
+			: "The agent is busy: it will read the code and note what it shows when it finishes its current work.",
+		"info",
+	);
+}
+
+/** The agent's instructions: which files, and what is worth a note. Bounded by the scan's top 30 tables. */
+function learnMessage(connection: string, usage: SchemaUsage): string {
+	const example = usage.matches[0]?.files[0] ?? "src/Models/Order.php";
+	return [
+		`heydb: the user agreed that you learn about the database of connection "${connection}" from this project's code.`,
+		"",
+		"Files that use its tables, most used first:",
+		...usage.matches.map((match) => `- ${match.table} (${count(match.hits, "use")}): ${match.files.join(", ")}`),
+		"",
+		"Rules:",
+		"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.",
+		"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
+			"Record joins the code makes without a foreign key with heydb_relate.",
+		`- End every note with its source, like "(code: ${example})".`,
+		"- Never invent or guess: what the code does not make clear is not saved.",
+		"- A few valuable notes beat many; stop after about 20.",
+		"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.",
+	].join("\n");
 }
 
 async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContext): Promise<void> {

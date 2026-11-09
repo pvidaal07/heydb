@@ -82,6 +82,13 @@ describe("tool registration", () => {
 		assert.match(all, /never invent/i);
 		assert.match(all, /heydb_relate/);
 	});
+
+	test("heydb_annotate says where a note comes from: the code file, or the user", () => {
+		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
+		assert.match(guidelines, /\(code: [^)]+\)/);
+		assert.match(guidelines, /\(told by the user\)/);
+		assert.match(guidelines, /inference.*confirm/i);
+	});
 });
 
 describe("tools outside a usable project", () => {
