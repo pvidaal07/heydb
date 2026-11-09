@@ -49,6 +49,10 @@ A project can have as many connections as it needs, for example `dev` and `prod`
 
 Each connection has its own snapshot and its own notes, also `dev` and `prod` of the same application: a note is about the database you looked at.
 
+Two connections can be related: when `crm.clientes.cod_erp` holds codes of `erp`'s `gcl.cod`, the agent records it with `heydb_relate` and `to_connection: "erp"`. The relationship is stored with the `crm` notes, and `heydb_table gcl` on `erp` lists it as `crm: crm.clientes(cod_erp) → (cod)`. If `erp` is removed, unsynced or drops the column, heydb treats the relationship as an orphan; it is never deleted.
+
+Some facts are about the whole project, not one database: "the ERP uses one database per client; the central one is eagle". Those are project notes, saved with `heydb_annotate` and `scope: "project"` in `.heydb/knowledge/_project.json`, and shown first by `heydb_overview`.
+
 Microservices with a database each: give every service its own `.heydb/` (run `/heydb:init` in its folder). heydb uses the `.heydb/` nearest to the folder Pi runs in, going up, so starting Pi in a service picks that service's connections. A single `.heydb/` at the repository root with one connection per service also works.
 
 ## What your agent gets
@@ -58,8 +62,8 @@ Microservices with a database each: give every service its own `.heydb/` (run `/
 | `heydb_overview` | Databases, warnings and tables, with notes |
 | `heydb_table` | One table: columns, keys, indexes, relationships and notes |
 | `heydb_search` | Search names, comments, view definitions and notes, ignoring case and accents |
-| `heydb_annotate` | Save a note on a database, table or column |
-| `heydb_relate` | Record a join that has no foreign key |
+| `heydb_annotate` | Save a note on the project, a database, table or column |
+| `heydb_relate` | Record a join that has no foreign key, also across connections |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
 
 ### Learning from code

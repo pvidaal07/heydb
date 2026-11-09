@@ -1,13 +1,14 @@
 import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { knowledgeForTable } from "../lib/knowledge/query.ts";
-import type { RelationshipSide } from "../lib/knowledge/types.ts";
+import type { Annotation, RelationshipSide } from "../lib/knowledge/types.ts";
 import { displayNameOf } from "../lib/model/names.ts";
 import { incomingReferences } from "../lib/model/references.ts";
 import { renderOverview, renderSearch, renderTable } from "../lib/render/markdown.ts";
 import { searchSchema } from "../lib/search.ts";
-import { annotate, editNote, relate } from "../lib/usecases/knowledge.ts";
-import { ProjectError, forgetById, openConnection, openSnapshot, resolveTarget } from "../lib/usecases/project.ts";
+import { PROJECT_TARGET } from "../lib/knowledge/types.ts";
+import { annotate, annotateProject, editNote, projectNotes, relate, relationshipsFromOtherConnections } from "../lib/usecases/knowledge.ts";
+import { ProjectError, forgetById, openConnection, openProjectRoot, openSnapshot, resolveTarget } from "../lib/usecases/project.ts";
 import { resolveTable } from "../lib/usecases/resolve.ts";
 import { SHARE_NOTES_HINT, knowledgeSharing } from "../lib/usecases/sharing.ts";
 import type { HeydbDeps } from "./deps.ts";
@@ -58,7 +59,7 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 		name: "heydb_overview",
 		label: "heydb overview",
 		description:
-			"Summary of the project's schema snapshot: per database comment coverage, name prefixes and most referenced tables; warnings; tables with notes.",
+			"Project notes, then a summary of the schema snapshot: per database comment coverage, name prefixes, most referenced tables; warnings; noted tables.",
 		promptSnippet: "Summarize the database schema of this project (stored snapshot)",
 		promptGuidelines: ["Use heydb_overview first when you do not know the database schema of a heydb project."],
 		parameters: OVERVIEW_PARAMETERS,
@@ -66,7 +67,8 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return guarded(() => {
 				const opened = openSnapshot(ctx.cwd, params.connection);
-				return ok(renderOverview(opened.snapshot, opened.knowledge, { connection: opened.name }), opened.name);
+				const options = { connection: opened.name, projectNotes: projectNotes(opened.root) };
+				return ok(renderOverview(opened.snapshot, opened.knowledge, options), opened.name);
 			});
 		},
 	};
@@ -111,9 +113,13 @@ export function createTableTool(): ToolDefinition<typeof TABLE_PARAMETERS, ToolD
 				const resolved = resolveTable(opened.snapshot, params.table);
 				const knowledge = knowledgeForTable(opened.knowledge, resolved.name);
 				const incoming = incomingReferences(opened.snapshot, opened.knowledge, resolved.name);
+				const other = relationshipsFromOtherConnections(opened.root, opened.name, resolved.name);
 				const options = {
 					...(columns !== undefined && { columns }),
 					...(params.column_filter !== undefined && { columnFilter: params.column_filter }),
+					connection: opened.name,
+					external: other.relationships,
+					unreadable: other.unreadable,
 				};
 				return ok(renderTable(resolved.table, resolved.name, knowledge, incoming, options), opened.name);
 			});
@@ -168,12 +174,13 @@ const ANNOTATE_PARAMETERS = {
 	properties: {
 		target: {
 			type: "string",
-			description: 'Database ("shop"), table ("orders", "shop.orders") or column ("orders.status").',
+			description: 'Database ("shop"), table ("orders", "shop.orders") or column ("orders.status"). Omit with scope "project".',
 		},
+		scope: { type: "string", const: "project", description: 'Set to "project", without target, for a note about the whole project.' },
 		text: { type: "string", description: "Short, factual note." },
 		connection: CONNECTION,
 	},
-	required: ["target", "text"],
+	required: ["text"],
 	additionalProperties: false,
 } as const;
 
@@ -182,19 +189,28 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 		name: "heydb_annotate",
 		label: "heydb annotate",
 		description:
-			"Save a note on a database, table or column in .heydb/knowledge; the team gets it when the project commits .heydb/.",
+			"Save a note on the project, a database, table or column in .heydb/knowledge; the team gets it when the project commits .heydb/.",
 		promptSnippet: "Record what a database, table or column means, for the whole team",
 		promptGuidelines: [
 			"When you learn what a table or column means (valid values, units, legacy quirks), save it with heydb_annotate: one or two factual sentences, never invent or guess.",
 			"Before heydb_annotate, read the existing notes with heydb_table; fix a wrong note with heydb_edit_note instead of adding a contradicting one.",
 			'End a heydb_annotate note with its source: "(code: src/Models/Order.php)" when code shows it, "(told by the user)" when the user said it. Save an inference only after the user confirms it.',
+			'For a fact about the whole project rather than one database (one database per client, which connection is central), use heydb_annotate with scope: "project" and no target.',
 		],
 		parameters: ANNOTATE_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return guarded(async () => {
+				// A separate scope, not a magic target: a table called "project" must stay reachable as target "project".
+				if (params.scope === "project") {
+					if (params.target !== undefined) throw new Error('a project note has no target: omit target with scope "project"');
+					const root = openProjectRoot(ctx.cwd);
+					const note = annotateProject(root, { text: params.text, author: await agentAuthor(deps, ctx.cwd) }, deps.knowledge);
+					return ok(`Saved project note ${note.id} (author: ${note.author}).${await sharingWarning(root, PROJECT_FILE_SHARING)}`, null);
+				}
+				if (params.target === undefined) throw new Error('target is required, unless scope is "project"');
 				const opened = openSnapshot(ctx.cwd, params.connection);
-				const target = resolveTarget(opened.snapshot, params.target);
+				const target = resolveProjectHint(params.target, () => resolveTarget(opened.snapshot, params.target as string));
 				const author = await agentAuthor(deps, ctx.cwd);
 				const note = annotate(opened.root, opened.name, { target: target.name, text: params.text, author }, deps.knowledge);
 				const saved = `Saved note ${note.id} on ${target.kind} ${displayNameOf(note.target)} (author: ${note.author}).`;
@@ -213,6 +229,7 @@ const RELATE_PARAMETERS = {
 		from_columns: { ...COLUMNS, description: "Referencing columns, in order." },
 		to_table: { type: "string", description: "Referenced table, e.g. customers." },
 		to_columns: { ...COLUMNS, description: "Referenced columns, same order and count." },
+		to_connection: { type: "string", description: "Connection of to_table when it is not the from connection." },
 		note: { type: "string", description: "How you know, briefly." },
 		connection: CONNECTION,
 	},
@@ -228,6 +245,7 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 		promptSnippet: "Record a join between tables that has no foreign key",
 		promptGuidelines: [
 			"When you find tables joined without a foreign key (in code, queries or data), record it with heydb_relate and say how you know in the note.",
+			"When the referenced table is in another connection of the project (crm.clientes.cod_erp → erp's gcl.cod), call heydb_relate from the referencing connection with to_connection.",
 		],
 		parameters: RELATE_PARAMETERS,
 		executionMode: "sequential",
@@ -235,7 +253,13 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 			return guarded(async () => {
 				const opened = openSnapshot(ctx.cwd, params.connection);
 				const from = { table: resolveTable(opened.snapshot, params.from_table).name, columns: params.from_columns };
-				const to = { table: resolveTable(opened.snapshot, params.to_table).name, columns: params.to_columns };
+				// The to side is resolved in its own connection's snapshot; a stored side names its connection only when it differs.
+				const target = params.to_connection === undefined ? opened : openSnapshot(ctx.cwd, params.to_connection);
+				const to = {
+					...(target.name !== opened.name && { connection: target.name }),
+					table: resolveTable(target.snapshot, params.to_table).name,
+					columns: params.to_columns,
+				};
 				const author = await agentAuthor(deps, ctx.cwd);
 				const link = relate(opened.root, opened.name, { from, to, note: params.note ?? "", author }, deps.knowledge);
 				const saved = `Saved relationship ${link.id}: ${side(link.from)} → ${side(link.to)} (author: ${link.author}).`;
@@ -248,7 +272,7 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 const EDIT_PARAMETERS = {
 	type: "object",
 	properties: {
-		id: { type: "string", description: "Note id, as shown by heydb_table." },
+		id: { type: "string", description: "Note id, as shown by heydb_table or heydb_overview." },
 		text: { type: "string", description: "The new text, replacing the old one." },
 		connection: CONNECTION,
 	},
@@ -268,7 +292,7 @@ export function createEditNoteTool(deps: HeydbDeps): ToolDefinition<typeof EDIT_
 			return guarded(() => {
 				const opened = openConnection(ctx.cwd, params.connection);
 				const note = editNote(opened.root, opened.name, { id: params.id, text: params.text }, deps.knowledge);
-				return ok(`Updated note ${note.id} on ${displayNameOf(note.target)}.`, opened.name);
+				return ok(isProjectNote(note) ? `Updated project note ${note.id}.` : `Updated note ${note.id} on ${displayNameOf(note.target)}.`, opened.name);
 			});
 		},
 	};
@@ -277,7 +301,7 @@ export function createEditNoteTool(deps: HeydbDeps): ToolDefinition<typeof EDIT_
 const FORGET_PARAMETERS = {
 	type: "object",
 	properties: {
-		id: { type: "string", description: "Id of a note or relationship, as shown by heydb_table." },
+		id: { type: "string", description: "Id of a note or relationship, as shown by heydb_table or heydb_overview." },
 		connection: CONNECTION,
 	},
 	required: ["id"],
@@ -299,7 +323,9 @@ export function createForgetTool(): ToolDefinition<typeof FORGET_PARAMETERS, Too
 				const forgotten = forgetById(opened.root, opened.name, params.id);
 				const text =
 					forgotten.kind === "annotation"
-						? `Forgot note ${forgotten.annotation.id} on ${displayNameOf(forgotten.annotation.target)}.`
+						? isProjectNote(forgotten.annotation)
+							? `Forgot project note ${forgotten.annotation.id}.`
+							: `Forgot note ${forgotten.annotation.id} on ${displayNameOf(forgotten.annotation.target)}.`
 						: `Forgot relationship ${forgotten.relationship.id}: ${side(forgotten.relationship.from)} → ${side(forgotten.relationship.to)}.`;
 				return ok(text, opened.name);
 			});
@@ -322,15 +348,33 @@ async function sharingWarning(root: string, connection: string): Promise<string>
 	}
 }
 
+/** What knowledgeSharing checks for project notes: .heydb/knowledge/_project.json. */
+const PROJECT_FILE_SHARING = "_project";
+
+/** An agent that writes target "project" for a project note gets told about scope when nothing is called project. */
+function resolveProjectHint<T>(target: string, resolve: () => T): T {
+	try {
+		return resolve();
+	} catch (error) {
+		if (target.trim().toLowerCase() !== PROJECT_TARGET || !(error instanceof Error)) throw error;
+		throw new Error(`${error.message}\nFor a note about the whole project, use scope: "project" without a target.`, { cause: error });
+	}
+}
+
+function isProjectNote(note: Annotation): boolean {
+	return note.target === PROJECT_TARGET;
+}
+
 async function agentAuthor(deps: HeydbDeps, cwd: string): Promise<string> {
 	return `${await deps.author(cwd)}${AGENT_AUTHOR_SUFFIX}`;
 }
 
 function side(value: RelationshipSide): string {
-	return `${displayNameOf(value.table)}(${value.columns.join(", ")})`;
+	const connection = value.connection === undefined ? "" : `${value.connection}: `;
+	return `${connection}${displayNameOf(value.table)}(${value.columns.join(", ")})`;
 }
 
-function ok(text: string, connection: string): Result {
+function ok(text: string, connection: string | null): Result {
 	return { content: [{ type: "text", text }], details: { connection } };
 }
 

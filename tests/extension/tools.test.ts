@@ -467,3 +467,119 @@ describe("writing tools", () => {
 		});
 	});
 });
+
+describe("relationships across connections", () => {
+	const gcl = { ...customersTable(), name: "gcl", columns: [column("cod", 1), column("nombre", 2)] };
+	const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [gcl], routines: [] }] }] });
+
+	/** "local" (shop, the default) and "erp"; erp synced unless told otherwise. */
+	function twoConnections({ erpSynced = true } = {}): string {
+		const root = project();
+		saveConfig(root, { formatVersion: 1, defaultConnection: "local", connections: { local, erp: { ...local, password: "env:HEYDB_ERP_PASSWORD" } } });
+		if (erpSynced) saveSnapshot(root, "erp", erpSnapshot);
+		return root;
+	}
+
+	const toErp = { from_table: "customers", from_columns: ["id"], to_table: "gcl", to_columns: ["cod"], to_connection: "erp", note: "Same code." };
+
+	test("heydb_relate with to_connection resolves the to side in that connection and stores it with the from side", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		assert.deepEqual(await runTool(pi, "heydb_relate", toErp, root), {
+			isError: false,
+			text: "Saved relationship id-001: shop.customers(id) → erp: erp.gcl(cod) (author: Ana (via agent)).",
+		});
+		assert.deepEqual(loadKnowledge(root, "local").relationships[0]?.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.deepEqual(loadKnowledge(root, "erp").relationships, []);
+	});
+
+	test("heydb_relate refuses an unknown or never synced to_connection and a missing column", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections({ erpSynced: false });
+		assert.deepEqual(await runTool(pi, "heydb_relate", { ...toErp, to_connection: "crm" }, root), {
+			isError: true,
+			text: 'unknown connection "crm"; configured: erp, local',
+		});
+		assert.deepEqual(await runTool(pi, "heydb_relate", toErp, root), {
+			isError: true,
+			text: 'Connection "erp" was never synced, so there is no schema snapshot yet. Ask the user to run /heydb:sync erp.',
+		});
+		saveSnapshot(root, "erp", erpSnapshot);
+		assert.deepEqual(await runTool(pi, "heydb_relate", { ...toErp, to_columns: ["codigo"] }, root), {
+			isError: true,
+			text: 'erp.erp.gcl.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
+		});
+		assert.deepEqual(loadKnowledge(root, "local").relationships, []);
+	});
+
+	test("heydb_table on the target shows the relationship stored in the other connection", async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		await runTool(pi, "heydb_relate", toErp, root);
+		const result = await runTool(pi, "heydb_table", { table: "gcl", connection: "erp" }, root);
+		assert.equal(result.isError, false);
+		assert.match(
+			result.text,
+			/## Referenced by\n- local: shop\.customers\(id\) → \(cod\) · implicit, documented by Ana \(via agent\) · Same code\. \[id id-001 · connection local · 2026-11-06\]/,
+		);
+		const from = await runTool(pi, "heydb_table", { table: "customers" }, root);
+		assert.match(from.text, /- \(id\) → erp: erp\.gcl\(cod\) · implicit/);
+	});
+});
+
+describe("project notes", () => {
+	test("heydb_annotate with scope project saves a project note; the overview shows it first", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { scope: "project", text: "One database per client; the central one is eagle." }, root), {
+			isError: false,
+			text: "Saved project note id-001 (author: Ana (via agent)).",
+		});
+		assert.deepEqual(loadKnowledge(root, "local").annotations, []);
+		const overview = await runTool(pi, "heydb_overview", {}, root);
+		assert.match(overview.text, /^# heydb · local\n.*\n\n## Project notes\n- One database per client; the central one is eagle\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]\n\n## Databases/);
+	});
+
+	test("heydb_edit_note and heydb_forget find project notes by id", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		await runTool(pi, "heydb_annotate", { scope: "project", text: "Old." }, root);
+		assert.deepEqual(await runTool(pi, "heydb_edit_note", { id: "id-001", text: "New." }, root), {
+			isError: false,
+			text: "Updated project note id-001.",
+		});
+		assert.match((await runTool(pi, "heydb_overview", {}, root)).text, /- New\. \[id id-001/);
+		assert.deepEqual(await runTool(pi, "heydb_forget", { id: "id-001" }, root), { isError: false, text: "Forgot project note id-001." });
+		assert.doesNotMatch((await runTool(pi, "heydb_overview", {}, root)).text, /Project notes/);
+	});
+
+	test("a table named project is still annotated with target project", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", snapshot([{ ...customersTable(), name: "project" }]));
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "project", text: "One row per job." }, root), {
+			isError: false,
+			text: "Saved note id-001 on table shop.project (author: Ana (via agent)).",
+		});
+		assert.deepEqual(
+			loadKnowledge(root, "local").annotations.map((note) => note.target),
+			["shop.shop.project"],
+		);
+	});
+
+	test("target and scope project are not combined; a missing target says how to write a project note", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { scope: "project", target: "orders", text: "x" }, root), {
+			isError: true,
+			text: 'a project note has no target: omit target with scope "project"',
+		});
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { text: "x" }, root), {
+			isError: true,
+			text: 'target is required, unless scope is "project"',
+		});
+		const missing = await runTool(pi, "heydb_annotate", { target: "project", text: "x" }, root);
+		assert.equal(missing.isError, true);
+		assert.match(missing.text, /\nFor a note about the whole project, use scope: "project" without a target\.$/);
+	});
+});

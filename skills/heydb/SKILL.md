@@ -39,6 +39,8 @@ When the conversation or the code teaches you something the schema does not say,
 
 - `heydb_annotate` for meaning: valid values, units, encodings, who writes the column, legacy quirks.
 - `heydb_relate` for joins without a foreign key: `orders.customer_id → customers.id`. Say how you know in `note`.
+- `heydb_annotate` with `scope: "project"` and no `target` for facts above any one database: "the ERP uses one database per client; the central one is eagle". `heydb_overview` shows them first. A table called `project` is still `target: "project"`.
+- `heydb_relate` with `to_connection` when the referenced table is in another connection of the project (`crm.clientes.cod_erp → erp`'s `gcl.cod`). Call it from the referencing connection; `heydb_table` on the other side shows it too, prefixed with the connection.
 - A name without a dot is a table: `heydb_annotate` with `gar` notes the table even if some column is also called `gar`; write `postv.gar` for the column.
 - If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
 - End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
