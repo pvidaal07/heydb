@@ -5,15 +5,25 @@ description: Consult and enrich the database schema of a heydb project (.heydb/ 
 
 # heydb
 
-heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`) and the team's notes about it (`.heydb/knowledge/`), both committed to git. The tools read those files; they never connect to the database.
+heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`) and the team's notes about it (`.heydb/knowledge/`). The team shares them only if the project commits `.heydb/`; some projects ignore it, so do not promise that a note reaches anyone else. The tools read those files; they never connect to the database.
 
 ## Read before you write SQL
 
-1. Unknown schema: `heydb_overview` once.
+1. Unknown schema: `heydb_overview` once. It shows, per database, how many tables have comments and which tables the rest point to (the core).
 2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case and accents.
-3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes.
+3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes. On wide tables it lists the 60 most telling columns; ask for `columns: "all"` or a `column_filter` when you need the rest.
 
 Never guess table or column names from memory when heydb can answer.
+
+## Never guess a meaning from a table name
+
+Legacy names lie. In one ERP, `gar` looked like "garantías"; it holds the articles. Before you say what a table is, read the `heydb_table` header, strongest evidence first:
+
+1. Team notes and the table comment.
+2. Who points to it ("Referenced by"): foreign keys, documented relationships and the comments of columns like `ref_gar`, `cod_gar`. `Referencing columns are commented as: "Artículo" ×12` is strong evidence. Name-pattern guesses are not enforced; treat them as clues.
+3. Its own columns.
+
+When the meaning comes from 2 or 3, say it is an inference and ask the user to confirm. Once confirmed, save it with `heydb_annotate` so nobody has to guess again. When the overview says most tables have no comment, do not infer anything from names alone.
 
 ## Warnings mean the picture is incomplete
 

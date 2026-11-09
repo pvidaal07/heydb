@@ -36,16 +36,18 @@ test("init → connect → sync → overview, table, search and annotate via too
 	const overview = await runTool(pi, "heydb_overview", {}, app);
 	assert.equal(overview.isError, false);
 	assert.match(overview.text, /^# heydb · local/);
-	assert.match(overview.text, /shop\.shop\.orders/);
+	assert.match(overview.text, /\| shop\.orders \| table \|/);
 
 	const annotated = await runTool(pi, "heydb_annotate", { target: "orders.total", text: "Includes VAT, in euros." }, app);
 	assert.equal(annotated.isError, false);
 
-	const table = await runTool(pi, "heydb_table", { table: "orders" }, app);
+	// What the tools print is accepted back: the short name from the overview.
+	const table = await runTool(pi, "heydb_table", { table: "shop.orders" }, app);
+	assert.match(table.text, /^# table shop\.orders\n/);
 	assert.match(table.text, /Includes VAT, in euros\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]/);
 
 	const search = await runTool(pi, "heydb_search", { query: "euros" }, app);
-	assert.equal(search.text, "1 match.\n- column shop.shop.orders.total · annotation: Includes VAT, in euros.");
+	assert.equal(search.text, "1 match.\n- column shop.orders.total · annotation: Includes VAT, in euros.");
 
 	assert.equal(loadKnowledge(root, "local").annotations[0]?.author, "Ana (via agent)");
 });

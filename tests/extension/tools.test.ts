@@ -5,6 +5,7 @@ import { describe, test } from "node:test";
 
 import { saveConfig } from "../../lib/config/store.ts";
 import { knowledgeForTable } from "../../lib/knowledge/query.ts";
+import { incomingReferences } from "../../lib/model/references.ts";
 import { renderOverview, renderSearch, renderTable } from "../../lib/render/markdown.ts";
 import { searchSchema } from "../../lib/search.ts";
 import { loadKnowledge } from "../../lib/store/knowledge.ts";
@@ -59,6 +60,13 @@ describe("tool registration", () => {
 		}
 	});
 
+	test("no description claims notes are shared by themselves", () => {
+		const pi = loadHeydb();
+		const texts = [...pi.tools.values()].flatMap((tool) => [tool.description, tool.promptSnippet ?? "", ...(tool.promptGuidelines ?? [])]);
+		for (const text of texts) assert.doesNotMatch(text, /committed/i, text);
+		assert.match(pi.tools.get("heydb_annotate")?.description ?? "", /\.heydb\/knowledge.*commits \.heydb\//);
+	});
+
 	test("every prompt guideline names the tool it is about", () => {
 		const pi = loadHeydb();
 		const guidelines = [...pi.tools.values()].flatMap((tool) => tool.promptGuidelines ?? []);
@@ -66,6 +74,8 @@ describe("tool registration", () => {
 		for (const line of guidelines) assert.match(line, /heydb_[a-z_]+/, line);
 		const all = guidelines.join("\n");
 		assert.match(all, /before writing/i);
+		assert.match(all, /heydb_table header .* before concluding what a table is/);
+		assert.match(all, /inference/);
 		assert.match(all, /never invent/i);
 		assert.match(all, /heydb_relate/);
 	});
@@ -172,9 +182,45 @@ describe("reading tools", () => {
 		for (const input of ["orders", "shop.orders", "shop.shop.orders", "Orders"]) {
 			assert.deepEqual(
 				await runTool(pi, "heydb_table", { table: input }, root),
-				{ isError: false, text: renderTable(table, "shop.shop.orders", knowledgeForTable(knowledge, "shop.shop.orders")) },
+				{
+					isError: false,
+					text: renderTable(
+						table,
+						"shop.shop.orders",
+						knowledgeForTable(knowledge, "shop.shop.orders"),
+						incomingReferences(stored, knowledge, "shop.shop.orders"),
+					),
+				},
 				input,
 			);
+		}
+	});
+
+	test("heydb_table passes columns and column_filter, and rejects a bad columns value", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const knowledge = loadKnowledge(root, "local");
+		const table = stored.databases[0]?.schemas[0]?.tables[1];
+		assert.ok(table !== undefined);
+		const expected = (options: { columns?: "all" | number; columnFilter?: string }) =>
+			renderTable(
+				table,
+				"shop.shop.orders",
+				knowledgeForTable(knowledge, "shop.shop.orders"),
+				incomingReferences(stored, knowledge, "shop.shop.orders"),
+				options,
+			);
+		assert.deepEqual(await runTool(pi, "heydb_table", { table: "orders", columns: 1 }, root), { isError: false, text: expected({ columns: 1 }) });
+		assert.deepEqual(await runTool(pi, "heydb_table", { table: "orders", columns: "all", column_filter: "tot" }, root), {
+			isError: false,
+			text: expected({ columns: "all", columnFilter: "tot" }),
+		});
+		assert.match(expected({ columns: 1 }), /## Columns \(1 of 3;/);
+		for (const columns of [0, 2.5, "some"]) {
+			assert.deepEqual(await runTool(pi, "heydb_table", { table: "orders", columns }, root), {
+				isError: true,
+				text: 'columns must be "all" or an integer of at least 1',
+			});
 		}
 	});
 
@@ -229,9 +275,9 @@ describe("writing tools", () => {
 			await runTool(pi, "heydb_annotate", { target: "shop", text: "The web store." }, root),
 		];
 		assert.deepEqual(results, [
-			{ isError: false, text: "Saved note id-001 on column shop.shop.orders.total (author: Ana (via agent))." },
-			{ isError: false, text: "Saved note id-002 on table shop.shop.orders (author: Ana (via agent))." },
-			{ isError: false, text: "Saved note id-003 on database shop.shop (author: Ana (via agent))." },
+			{ isError: false, text: "Saved note id-001 on column shop.orders.total (author: Ana (via agent))." },
+			{ isError: false, text: "Saved note id-002 on table shop.orders (author: Ana (via agent))." },
+			{ isError: false, text: "Saved note id-003 on database shop (author: Ana (via agent))." },
 		]);
 		const notes = loadKnowledge(root, "local").annotations;
 		assert.deepEqual(
@@ -282,7 +328,7 @@ describe("writing tools", () => {
 		);
 		assert.deepEqual(result, {
 			isError: false,
-			text: "Saved relationship id-001: shop.shop.orders(customer_id) → shop.shop.customers(id) (author: Ana (via agent)).",
+			text: "Saved relationship id-001: shop.orders(customer_id) → shop.customers(id) (author: Ana (via agent)).",
 		});
 		assert.deepEqual(loadKnowledge(root, "local").relationships, [
 			{
@@ -315,7 +361,7 @@ describe("writing tools", () => {
 		const note = annotate(root, "local", { target: "shop.shop.orders", text: "Old.", author: "bea" }, fixedClock());
 		assert.deepEqual(await runTool(pi, "heydb_edit_note", { id: note.id, text: "New." }, root), {
 			isError: false,
-			text: `Updated note ${note.id} on shop.shop.orders.`,
+			text: `Updated note ${note.id} on shop.orders.`,
 		});
 		const [edited] = loadKnowledge(root, "local").annotations;
 		assert.equal(edited?.text, "New.");
@@ -344,11 +390,11 @@ describe("writing tools", () => {
 		);
 		assert.deepEqual(await runTool(pi, "heydb_forget", { id: note.id }, root), {
 			isError: false,
-			text: `Forgot note ${note.id} on shop.shop.orders.`,
+			text: `Forgot note ${note.id} on shop.orders.`,
 		});
 		assert.deepEqual(await runTool(pi, "heydb_forget", { id: link.id }, root), {
 			isError: false,
-			text: `Forgot relationship ${link.id}: shop.shop.orders(customer_id) → shop.shop.customers(id).`,
+			text: `Forgot relationship ${link.id}: shop.orders(customer_id) → shop.customers(id).`,
 		});
 		assert.deepEqual(await runTool(pi, "heydb_forget", { id: note.id }, root), {
 			isError: true,

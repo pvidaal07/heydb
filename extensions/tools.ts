@@ -2,6 +2,8 @@ import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-wo
 
 import { knowledgeForTable } from "../lib/knowledge/query.ts";
 import type { RelationshipSide } from "../lib/knowledge/types.ts";
+import { displayNameOf } from "../lib/model/names.ts";
+import { incomingReferences } from "../lib/model/references.ts";
 import { renderOverview, renderSearch, renderTable } from "../lib/render/markdown.ts";
 import { searchSchema } from "../lib/search.ts";
 import { annotate, editNote, relate } from "../lib/usecases/knowledge.ts";
@@ -54,7 +56,8 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 	return {
 		name: "heydb_overview",
 		label: "heydb overview",
-		description: "Summary of the project's database schema snapshot: databases, warnings, tables with notes.",
+		description:
+			"Summary of the project's schema snapshot: per database comment coverage, name prefixes and most referenced tables; warnings; tables with notes.",
 		promptSnippet: "Summarize the database schema of this project (stored snapshot)",
 		promptGuidelines: ["Use heydb_overview first when you do not know the database schema of a heydb project."],
 		parameters: OVERVIEW_PARAMETERS,
@@ -72,6 +75,11 @@ const TABLE_PARAMETERS = {
 	type: "object",
 	properties: {
 		table: { type: "string", description: 'Table or view: "orders", "shop.orders" or "shop.shop.orders".' },
+		columns: {
+			anyOf: [{ type: "string", const: "all" }, { type: "integer", minimum: 1 }],
+			description: 'How many columns to list (default 60, most telling first), or "all".',
+		},
+		column_filter: { type: "string", description: "Only columns whose name or comment contains this text; ignores case and accents." },
 		connection: CONNECTION,
 	},
 	required: ["table"],
@@ -82,19 +90,31 @@ export function createTableTool(): ToolDefinition<typeof TABLE_PARAMETERS, ToolD
 	return {
 		name: "heydb_table",
 		label: "heydb table",
-		description: "One table or view: columns, keys, indexes, foreign keys, implicit relationships and team notes (with ids).",
-		promptSnippet: "Show columns, keys, relationships and notes of one database table",
+		description:
+			"One table or view: comment, team notes (with ids), keys, relationships both ways (who references it), then its most relevant columns.",
+		promptSnippet: "Show what one database table means and its columns, keys, relationships and notes",
 		promptGuidelines: [
 			"Before writing or changing SQL in a heydb project, check heydb_table (or heydb_search) for the tables involved instead of guessing names, columns or joins.",
+			"Read the heydb_table header (comment, notes, referenced by) before concluding what a table is; when its meaning comes from inference (columns, references, name), say it is an inference and ask the user before saving it with heydb_annotate.",
 		],
 		parameters: TABLE_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			return guarded(() => {
+				// Pi validates the schema, but the check is repeated so no other caller can pass 0 or 2.5.
+				const { columns } = params;
+				if (columns !== undefined && columns !== "all" && !(Number.isInteger(columns) && columns >= 1)) {
+					throw new Error('columns must be "all" or an integer of at least 1');
+				}
 				const opened = openSnapshot(ctx.cwd, params.connection);
 				const resolved = resolveTable(opened.snapshot, params.table);
 				const knowledge = knowledgeForTable(opened.knowledge, resolved.name);
-				return ok(renderTable(resolved.table, resolved.name, knowledge), opened.name);
+				const incoming = incomingReferences(opened.snapshot, opened.knowledge, resolved.name);
+				const options = {
+					...(columns !== undefined && { columns }),
+					...(params.column_filter !== undefined && { columnFilter: params.column_filter }),
+				};
+				return ok(renderTable(resolved.table, resolved.name, knowledge, incoming, options), opened.name);
 			});
 		},
 	};
@@ -154,7 +174,8 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 	return {
 		name: "heydb_annotate",
 		label: "heydb annotate",
-		description: "Save a note on a database, table or column; it is committed and shared with the team.",
+		description:
+			"Save a note on a database, table or column in .heydb/knowledge; the team gets it when the project commits .heydb/.",
 		promptSnippet: "Record what a database, table or column means, for the whole team",
 		promptGuidelines: [
 			"When you learn what a table or column means (valid values, units, legacy quirks), save it with heydb_annotate: one or two factual sentences, never invent or guess.",
@@ -168,7 +189,7 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 				const target = resolveTarget(opened.snapshot, params.target);
 				const author = await agentAuthor(deps, ctx.cwd);
 				const note = annotate(opened.root, opened.name, { target: target.name, text: params.text, author }, deps.knowledge);
-				return ok(`Saved note ${note.id} on ${target.kind} ${note.target} (author: ${note.author}).`, opened.name);
+				return ok(`Saved note ${note.id} on ${target.kind} ${displayNameOf(note.target)} (author: ${note.author}).`, opened.name);
 			});
 		},
 	};
@@ -237,7 +258,7 @@ export function createEditNoteTool(deps: HeydbDeps): ToolDefinition<typeof EDIT_
 			return guarded(() => {
 				const opened = openConnection(ctx.cwd, params.connection);
 				const note = editNote(opened.root, opened.name, { id: params.id, text: params.text }, deps.knowledge);
-				return ok(`Updated note ${note.id} on ${note.target}.`, opened.name);
+				return ok(`Updated note ${note.id} on ${displayNameOf(note.target)}.`, opened.name);
 			});
 		},
 	};
@@ -268,7 +289,7 @@ export function createForgetTool(): ToolDefinition<typeof FORGET_PARAMETERS, Too
 				const forgotten = forgetById(opened.root, opened.name, params.id);
 				const text =
 					forgotten.kind === "annotation"
-						? `Forgot note ${forgotten.annotation.id} on ${forgotten.annotation.target}.`
+						? `Forgot note ${forgotten.annotation.id} on ${displayNameOf(forgotten.annotation.target)}.`
 						: `Forgot relationship ${forgotten.relationship.id}: ${side(forgotten.relationship.from)} → ${side(forgotten.relationship.to)}.`;
 				return ok(text, opened.name);
 			});
@@ -281,7 +302,7 @@ async function agentAuthor(deps: HeydbDeps, cwd: string): Promise<string> {
 }
 
 function side(value: RelationshipSide): string {
-	return `${value.table}(${value.columns.join(", ")})`;
+	return `${displayNameOf(value.table)}(${value.columns.join(", ")})`;
 }
 
 function ok(text: string, connection: string): Result {

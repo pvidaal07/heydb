@@ -1,16 +1,20 @@
 import type { TableKnowledge } from "../knowledge/query.ts";
 import type { Annotation, Knowledge, Relationship } from "../knowledge/types.ts";
 import type { Change } from "../model/diff.ts";
-import { formatDatabaseName, formatName, parseName } from "../model/names.ts";
+import { displayName, displayNameOf, formatName, parseName } from "../model/names.ts";
+import type { IncomingReferences } from "../model/references.ts";
 import type { Column, Snapshot, Table } from "../model/snapshot.ts";
-import type { SearchResults } from "../search.ts";
+import { type SchemaStats, schemaStats } from "../model/stats.ts";
+import { normalizeText, type SearchResults } from "../search.ts";
 import type { StatusResult } from "../usecases/status.ts";
 
 // Markdown written for agents. Every character returned here is read by a
 // model and paid for in its context window, so the format is a budget:
 // - sections and table columns that would be empty are left out;
 // - long lists stop at a limit and say how many were left and how to find them;
-// - every note carries its id, because editing or forgetting one needs it.
+// - every note carries its id, because editing or forgetting one needs it;
+// - names are display names ("shop.orders" for MySQL's "shop.shop.orders"):
+//   shorter to read and still accepted back by every tool.
 // The output is plain markdown, readable by a person too, with no trailing
 // newline: callers join pieces as they like.
 
@@ -45,32 +49,29 @@ export interface OverviewOptions {
 	readonly maxTables?: number;
 }
 
+/** Under this share of commented tables, comments are not a reliable map of the schema. */
+const LOW_COMMENT_COVERAGE = 0.2;
+
 export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options: OverviewOptions): string {
 	const { connection, maxTables = 50 } = options;
 	const firstNote = firstNotes(knowledge);
+	const stats = schemaStats(snapshot, knowledge);
 	const blocks: string[][] = [
 		[`# heydb · ${connection}`, `${snapshot.engine.kind} ${snapshot.engine.version} · captured ${snapshot.capturedAt}`],
 	];
 
-	const databases = snapshot.databases.flatMap((database) =>
-		database.schemas.map((schema) => {
-			const name =
-				schema.name === database.name ? formatDatabaseName(database.name) : formatName({ database: database.name, schema: schema.name });
-			const views = schema.tables.filter((table) => table.kind === "view").length;
-			const counts = [count(schema.tables.length - views, "table"), ...(views > 0 ? [count(views, "view")] : [])].join(", ");
-			const note = firstNote.get(formatName({ database: database.name, schema: schema.name }));
-			return `- ${name}: ${counts}${note === undefined ? "" : ` · ${note}`}`;
-		}),
-	);
-	if (databases.length > 0) blocks.push(["## Databases", ...databases]);
+	if (stats.length > 0) blocks.push(["## Databases", ...stats.flatMap((schema) => databaseLines(schema, firstNote))]);
 
 	if (snapshot.warnings.length > 0) {
 		const shown = snapshot.warnings
 			.slice(0, MAX_WARNINGS)
-			.map((warning) => `- ${warning.message}${warning.target === undefined ? "" : ` (${warning.target})`}`);
+			.map((warning) => `- ${warning.message}${warning.target === undefined ? "" : ` (${displayText(warning.target)})`}`);
 		blocks.push(["## Warnings", ...shown, ...more(snapshot.warnings.length - MAX_WARNINGS, "warning")]);
 	}
 
+	// Notes first (the team already explained them), then the core of each
+	// database, then the rest by name: when the list is cut, what is cut is
+	// what says least.
 	const tables = snapshot.databases
 		.flatMap((database) =>
 			database.schemas.flatMap((schema) =>
@@ -78,63 +79,186 @@ export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options
 			),
 		)
 		.sort((a, b) => compareText(a.name, b.name));
+	const main = new Map(stats.flatMap((schema) => schema.mainTables).map((item, index) => [item.name, index]));
+	const group = (name: string) => (firstNote.has(name) ? 0 : main.has(name) ? 1 : 2);
+	tables.sort((a, b) => group(a.name) - group(b.name) || (main.get(a.name) ?? 0) - (main.get(b.name) ?? 0) || compareText(a.name, b.name));
 	if (tables.length > 0) {
 		const rows = tables.slice(0, maxTables).map(({ name, table }) => {
 			const note = firstNote.get(name) ?? preview(table.comment);
-			return row([name, table.kind, tableRows(table), note]);
+			return row([displayNameOf(name), table.kind, tableRows(table), note]);
 		});
 		const rest = more(tables.length - maxTables, "table").map((line) => `${line} — use heydb_search`);
-		blocks.push(["## Tables", row(["table", "kind", "rows", "note"]), "|---|---|---|---|", ...rows, ...rest]);
+		blocks.push([
+			"## Tables",
+			"Tables with notes first, then the most referenced, then by name; rows are engine estimates.",
+			row(["table", "kind", "rows", "note"]),
+			"|---|---|---|---|",
+			...rows,
+			...rest,
+		]);
 	}
 	return render(blocks);
 }
 
-export function renderTable(table: Table, canonicalName: string, knowledge: TableKnowledge): string {
-	const header = [`# ${table.kind} ${canonicalName}`];
-	const facts = [table.storageEngine, table.rowEstimate === null ? null : `${approximateRows(table.rowEstimate)} rows`].filter(
-		(fact) => fact !== null,
-	);
-	if (facts.length > 0) header.push(facts.join(" · "));
-	if (table.comment !== "") header.push(`Comment: ${oneLine(table.comment)}`);
-	const blocks: string[][] = [header, columnsBlock(table.columns, knowledge.columns)];
-
-	if (table.kind === "table") {
-		blocks.push([`Primary key: ${table.primaryKey.length === 0 ? "none" : list(table.primaryKey)}`]);
-	}
-	if (table.indexes.length > 0) {
-		blocks.push([
-			"## Indexes",
-			...table.indexes.map((index) => `- ${index.name} ${list(index.columns)}${index.unique ? " unique" : ""} ${index.method}`),
-		]);
-	}
-
-	const relationships = [
-		...table.foreignKeys.map((key) => {
-			const { database, schema, table: target, columns } = key.references;
-			const to = `${formatName({ database, schema, table: target })}${list(columns)}`;
-			return `- ${key.name}: ${list(key.columns)} → ${to} · on delete ${key.onDelete} · on update ${key.onUpdate}`;
-		}),
-		...knowledge.relationships.map((relationship) => implicitRelationship(relationship, canonicalName)),
-	];
-	if (relationships.length > 0) blocks.push(["## Relationships", ...relationships]);
-
-	if (table.triggers.length > 0) {
-		blocks.push(["## Triggers", ...table.triggers.map((trigger) => `- ${trigger.name}: ${trigger.timing} ${trigger.events.join(", ")}`)]);
-	}
-	if (table.kind === "view") {
-		blocks.push(
-			table.viewDefinition === null
-				? ["## Definition", "not visible to this user (see the snapshot warnings)"]
-				: ["## Definition", "```sql", table.viewDefinition, "```"],
+// One list item per database, its details indented below it. Comment coverage
+// says how far comments can be trusted as a map; the most referenced tables
+// are the core of the database, whatever their names.
+function databaseLines(stats: SchemaStats, firstNote: ReadonlyMap<string, string>): string[] {
+	const ref = { database: stats.database, schema: stats.schema };
+	const counts = [count(stats.tables, "table"), ...(stats.views > 0 ? [count(stats.views, "view")] : [])].join(", ");
+	const note = firstNote.get(formatName(ref));
+	const lines: string[] = [];
+	if (stats.tables > 0) {
+		lines.push(
+			`Comment coverage: ${percent(stats.tablesWithComment, stats.tables)} of ${count(stats.tables, "table")}, ${percent(stats.columnsWithComment, stats.columns)} of ${count(stats.columns, "column")}`,
 		);
 	}
+	if (stats.prefixes.length > 0) {
+		lines.push(`Name prefixes: ${stats.prefixes.map(({ prefix, count: n }) => `${prefix} ×${n}`).join(", ")}`);
+	}
+	if (stats.mainTables.length > 0) {
+		lines.push(
+			"Most referenced tables:",
+			...stats.mainTables.map(({ name, table, incoming }) => {
+				const rows = table.rowEstimate === null ? "rows unknown" : `${approximateRows(table.rowEstimate)} rows`;
+				const about = firstNote.get(name) ?? (preview(table.comment) || "no comment");
+				return `- ${displayNameOf(name)} · ${count(incoming, "reference")} · ${rows} · ${about}`;
+			}),
+		);
+	}
+	if (stats.tables > 0 && stats.tablesWithComment / stats.tables < LOW_COMMENT_COVERAGE) {
+		lines.push("Most tables have no comment: do not infer meaning from table names alone.");
+	}
+	return [`- ${displayName(ref)}: ${counts}${note === undefined ? "" : ` · ${note}`}`, ...lines.map((line) => `  ${line}`)];
+}
+
+export interface TableOptions {
+	/** How many columns to list: a number, or "all". Default DEFAULT_COLUMN_LIMIT. */
+	readonly columns?: "all" | number;
+	/** Only columns whose name or comment contains this text, ignoring case and accents. */
+	readonly columnFilter?: string;
+}
+
+/** Enough for a normal table whole; a 540-column legacy table shows its most telling 60. */
+export const DEFAULT_COLUMN_LIMIT = 60;
+const MAX_DEFINITION_LENGTH = 3000;
+const MAX_INCOMING = 20;
+const MAX_GUESSES_SHOWN = 15;
+
+const NO_EVIDENCE =
+	"No table comment or team note: meaning must be inferred from columns and references; say it is an inference and ask the user to confirm.";
+
+/**
+ * One table, in the order an agent should read it: first what says what the
+ * table is (comment, notes, who points to it), then its shape. On a huge
+ * legacy table the columns come last and are cut, so the evidence of meaning
+ * is never what gets lost.
+ */
+export function renderTable(
+	table: Table,
+	canonicalName: string,
+	knowledge: TableKnowledge,
+	incoming: IncomingReferences = documentedOnly(knowledge, canonicalName),
+	options: TableOptions = {},
+): string {
+	const header = [`# ${table.kind} ${displayNameOf(canonicalName)}`];
+	const rows = table.kind === "view" ? null : table.rowEstimate === null ? "rows unknown" : `${approximateRows(table.rowEstimate)} rows (engine estimate)`;
+	const facts = [table.storageEngine, rows].filter((fact) => fact !== null);
+	if (facts.length > 0) header.push(facts.join(" · "));
+	if (table.comment.trim() !== "") header.push(`Comment: ${oneLine(table.comment)}`);
+	else header.push(knowledge.table.length > 0 ? "No table comment." : NO_EVIDENCE);
+	if (table.kind === "table") header.push(`Primary key: ${table.primaryKey.length === 0 ? "none" : list(table.primaryKey)}`);
+	const blocks: string[][] = [header];
 
 	const notes = [
 		...knowledge.database.map((note) => noteLine("database", note)),
 		...knowledge.table.map((note) => noteLine("table", note)),
 	];
 	if (notes.length > 0) blocks.push(["## Notes", ...notes]);
+
+	const outgoing = knowledge.relationships.filter((relationship) => relationship.from.table === canonicalName);
+	const relationships = [
+		...table.foreignKeys.map((key) => {
+			const { database, schema, table: target, columns } = key.references;
+			const to = `${displayName({ database, schema, table: target })}${list(columns)}`;
+			return `- ${key.name}: ${list(key.columns)} → ${to} · on delete ${key.onDelete} · on update ${key.onUpdate}`;
+		}),
+		...outgoing.map((relationship) => implicitRelationship(relationship, canonicalName)),
+	];
+	if (relationships.length > 0) blocks.push(["## Relationships", ...relationships]);
+
+	const referencedBy = incomingBlock(incoming, canonicalName);
+	if (referencedBy.length > 0) blocks.push(["## Referenced by", ...referencedBy]);
+
+	if (table.triggers.length > 0) {
+		blocks.push(["## Triggers", ...table.triggers.map((trigger) => `- ${trigger.name}: ${trigger.timing} ${trigger.events.join(", ")}`)]);
+	}
+	if (table.kind === "view") blocks.push(definitionBlock(table.viewDefinition));
+
+	// Columns a key or a relationship uses rank right after the primary key.
+	const related = new Set([
+		...table.foreignKeys.flatMap((key) => key.columns),
+		...outgoing.flatMap((relationship) => relationship.from.columns),
+		...knowledge.relationships.filter((relationship) => relationship.to.table === canonicalName).flatMap((relationship) => relationship.to.columns),
+		...incoming.declared.flatMap((reference) => reference.toColumns),
+	]);
+	blocks.push(columnsBlock(table, knowledge.columns, related, options));
+
+	if (table.indexes.length > 0) {
+		blocks.push([
+			"## Indexes",
+			...table.indexes.map((index) => `- ${index.name} ${list(index.columns)}${index.unique ? " unique" : ""} ${index.method}`),
+		]);
+	}
 	return render(blocks);
+}
+
+// The comments of the columns that point here come first: on a table without
+// comment, "Artículo" ×12 says more than any name.
+function incomingBlock(incoming: IncomingReferences, canonicalName: string): string[] {
+	const lines: string[] = [];
+	if (incoming.summary.length > 0) {
+		lines.push(`Referencing columns are commented as: ${incoming.summary.map(({ comment, count: n }) => `"${comment}" ×${n}`).join(", ")}`);
+	}
+	lines.push(
+		...incoming.declared
+			.slice(0, MAX_INCOMING)
+			.map((reference) => `- ${displayNameOf(reference.table)}${list(reference.columns)} → ${list(reference.toColumns)} · foreign key ${reference.name}`),
+		...more(incoming.declared.length - MAX_INCOMING, "foreign key"),
+		...incoming.implicit.slice(0, MAX_INCOMING).map(({ relationship }) => implicitRelationship(relationship, canonicalName)),
+		...more(incoming.implicit.length - MAX_INCOMING, "implicit relationship"),
+	);
+	if (incoming.guesses.length > 0) {
+		lines.push(
+			"Name pattern, not enforced (guesses):",
+			...incoming.guesses.slice(0, MAX_GUESSES_SHOWN).map((guess) => {
+				const name = displayName({ ...parseName(guess.table), column: guess.column });
+				return guess.comment.trim() === "" ? `- ${name}` : `- ${name} · "${oneLine(guess.comment)}"`;
+			}),
+			...more(incoming.guesses.length + incoming.moreGuesses - MAX_GUESSES_SHOWN, "name-pattern guess"),
+		);
+	}
+	return lines;
+}
+
+// Without the snapshot, only what the team documented can point here.
+function documentedOnly(knowledge: TableKnowledge, canonicalName: string): IncomingReferences {
+	const implicit = knowledge.relationships
+		.filter((relationship) => relationship.to.table === canonicalName && relationship.from.table !== canonicalName)
+		.map((relationship) => ({ relationship, comment: "" }));
+	return { declared: [], implicit, guesses: [], moreGuesses: 0, summary: [] };
+}
+
+function definitionBlock(definition: string | null): string[] {
+	if (definition === null) return ["## Definition", "not visible to this user (see the snapshot warnings)"];
+	if (definition.length <= MAX_DEFINITION_LENGTH) return ["## Definition", "```sql", definition, "```"];
+	return [
+		"## Definition",
+		"```sql",
+		definition.slice(0, MAX_DEFINITION_LENGTH),
+		"```",
+		`… definition cut at ${MAX_DEFINITION_LENGTH} of ${definition.length} characters; the full text is in the stored snapshot (.heydb/snapshots/)`,
+	];
 }
 
 export function renderStatus(status: StatusResult): string {
@@ -166,20 +290,56 @@ export function renderSearch(search: SearchResults): string {
 			: `${count(search.total, "match")}.`;
 	const lines = search.results.map((result) => {
 		const where = result.matchedIn === "name" ? "" : ` · ${result.matchedIn}: ${result.snippet}`;
-		return `- ${result.object} ${result.target}${where}`;
+		// A relationship target is "from(columns) → to(columns)", not a name: kept as written.
+		const target = result.object === "relationship" ? result.target : displayText(result.target);
+		return `- ${result.object} ${target}${where}`;
 	});
 	return [header, ...lines].join("\n");
 }
 
-// Notes go in the "notes" cell of their column; comment and notes columns are
-// only printed when at least one column has something in them.
-function columnsBlock(columns: readonly Column[], notes: TableKnowledge["columns"]): string[] {
+// Which columns, and in which order: the filter first; then, when there are
+// more than the limit, the ones that say most about the table (primary key,
+// keys and relationships, commented or noted), shown in table order with
+// their position so gaps are visible. Comment and notes columns are only
+// printed when a shown column has something in them.
+function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: ReadonlySet<string>, options: TableOptions): string[] {
 	const notesOf = (column: Column) => (Object.hasOwn(notes, column.name) ? (notes[column.name] ?? []) : []);
-	const withComments = columns.some((column) => column.comment !== "");
-	const withNotes = columns.some((column) => notesOf(column).length > 0);
-	const headers = ["column", "type", "null", "default", ...(withComments ? ["comment"] : []), ...(withNotes ? ["notes"] : [])];
-	const rows = columns.map((column) =>
+	const total = table.columns.length;
+	const filter = options.columnFilter?.trim() ?? "";
+	const needle = normalizeText(filter);
+	const matching =
+		filter === ""
+			? table.columns
+			: table.columns.filter((column) => normalizeText(column.name).includes(needle) || normalizeText(column.comment).includes(needle));
+	const limit = options.columns === "all" ? Number.POSITIVE_INFINITY : (options.columns ?? DEFAULT_COLUMN_LIMIT);
+
+	let shown = matching;
+	if (matching.length > limit) {
+		const keys = new Set(table.primaryKey);
+		const rank = (column: Column) =>
+			keys.has(column.name) ? 0 : related.has(column.name) ? 1 : column.comment.trim() !== "" || notesOf(column).length > 0 ? 2 : 3;
+		shown = [...matching]
+			.sort((a, b) => rank(a) - rank(b) || a.position - b.position)
+			.slice(0, limit)
+			.sort((a, b) => a.position - b.position);
+	}
+
+	const heading =
+		filter !== ""
+			? `## Columns matching "${filter}" (${matching.length} of ${total})`
+			: shown.length < total
+				? `## Columns (${shown.length} of ${total}; keys, relationships and commented first)`
+				: "## Columns";
+	if (shown.length === 0) {
+		return [heading, filter === "" ? "none" : 'No column matches; try another column_filter or columns: "all".'];
+	}
+
+	const withComments = shown.some((column) => column.comment !== "");
+	const withNotes = shown.some((column) => notesOf(column).length > 0);
+	const headers = ["#", "column", "type", "null", "default", ...(withComments ? ["comment"] : []), ...(withNotes ? ["notes"] : [])];
+	const rows = shown.map((column) =>
 		row([
+			String(column.position),
 			column.name,
 			columnType(column),
 			column.nullable ? "yes" : "no",
@@ -189,7 +349,9 @@ function columnsBlock(columns: readonly Column[], notes: TableKnowledge["columns
 			...(withNotes ? [notesOf(column).map((note) => `${note.text} ${noteTag(note)}`).join("\n")] : []),
 		]),
 	);
-	return ["## Columns", row(headers), `|${headers.map(() => "---").join("|")}|`, ...rows];
+	const hidden = matching.length - shown.length;
+	const footer = hidden > 0 ? [`… ${count(hidden, "more column")} — call heydb_table with columns: "all" or a column_filter`] : [];
+	return [heading, row(headers), `|${headers.map(() => "---").join("|")}|`, ...rows, ...footer];
 }
 
 function columnType(column: Column): string {
@@ -204,8 +366,8 @@ function columnType(column: Column): string {
 // Seen from this table: its own side is written without the table name.
 function implicitRelationship(relationship: Relationship, tableName: string): string {
 	const { from, to } = relationship;
-	const left = from.table === tableName ? list(from.columns) : `${from.table}${list(from.columns)}`;
-	const right = to.table === tableName && from.table !== tableName ? list(to.columns) : `${to.table}${list(to.columns)}`;
+	const left = from.table === tableName ? list(from.columns) : `${displayText(from.table)}${list(from.columns)}`;
+	const right = to.table === tableName && from.table !== tableName ? list(to.columns) : `${displayText(to.table)}${list(to.columns)}`;
 	const note = relationship.note === "" ? "" : ` · ${oneLine(relationship.note)}`;
 	return `- ${left} → ${right} · implicit, documented by ${relationship.author}${note} [id ${relationship.id} · ${day(relationship.createdAt)}]`;
 }
@@ -235,6 +397,19 @@ function preview(text: string): string {
 	return characters.length <= NOTE_PREVIEW_LENGTH ? line : `${characters.slice(0, NOTE_PREVIEW_LENGTH - 1).join("")}…`;
 }
 
+/** The display name of a canonical name; text that is not one is returned as it is. */
+function displayText(name: string): string {
+	try {
+		return displayNameOf(name);
+	} catch {
+		return name;
+	}
+}
+
+function percent(part: number, whole: number): string {
+	return `${whole === 0 ? 0 : Math.round((100 * part) / whole)}%`;
+}
+
 function tableRows(table: Table): string {
 	if (table.kind === "view" || table.rowEstimate === null) return "";
 	return approximateRows(table.rowEstimate);
@@ -262,7 +437,7 @@ function count(n: number, noun: string): string {
 
 function plural(n: number, noun: string): string {
 	if (n === 1) return noun;
-	return noun.endsWith("ch") ? `${noun}es` : `${noun}s`;
+	return noun.endsWith("ch") || noun.endsWith("s") ? `${noun}es` : `${noun}s`;
 }
 
 /** "… 3 more tables" when a list was cut, nothing when it was not. */
