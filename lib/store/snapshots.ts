@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { constants, gunzipSync, gzipSync } from "node:zlib";
 
@@ -65,13 +65,35 @@ function gzipStable(text: string): Buffer {
 	return bytes;
 }
 
+// Every agent tool call loads the snapshot, and on a 1,500-table schema
+// unzipping and validating it costs more than the search itself. The last
+// snapshot read from each file is kept while the file's identity (inode, size,
+// modification time) stays the same; a sync writes a new file by rename, so
+// it always gets a new inode. Snapshots are read-only, so sharing one is safe.
+const loaded = new Map<string, { readonly identity: string; readonly snapshot: Snapshot }>();
+
+function identityOf(path: string): string | null {
+	try {
+		const stat = statSync(path, { bigint: true });
+		return `${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+	} catch (error) {
+		if (isMissingFile(error)) return null;
+		throw error;
+	}
+}
+
 /** Returns the stored snapshot, or null when this connection was never synced. */
 export function loadSnapshot(projectRoot: string, connection: string): Snapshot | null {
 	const path = snapshotPath(projectRoot, connection);
 	const legacyPath = legacySnapshotPath(projectRoot, connection);
 	assertNoSymlinks(projectRoot, "snapshots");
 
-	const compressed = readIfExists(path);
+	const identity = identityOf(path);
+	const cached = loaded.get(path);
+	if (identity !== null && cached?.identity === identity) return cached.snapshot;
+	loaded.delete(path);
+
+	const compressed = identity === null ? null : readIfExists(path);
 	if (compressed !== null) {
 		const fileName = `${connection}.json.gz`;
 		let text: string;
@@ -80,7 +102,9 @@ export function loadSnapshot(projectRoot: string, connection: string): Snapshot 
 		} catch {
 			throw new Error(`${fileName} is not a valid gzip file (${path})`);
 		}
-		return parseSnapshot(text, fileName, path);
+		const snapshot = parseSnapshot(text, fileName, path);
+		if (identity !== null) loaded.set(path, { identity, snapshot });
+		return snapshot;
 	}
 	const plain = readIfExists(legacyPath);
 	if (plain === null) return null;

@@ -324,3 +324,46 @@ describe("reading damaged or foreign files", () => {
 		assert.throws(() => loadSnapshot(root, "local"), /tables\[0\]\.viewDefinition is missing$/);
 	});
 });
+
+describe("loading the same snapshot again", () => {
+	// Every agent tool call loads the snapshot: on a 1,500-table schema
+	// unzipping and validating it again each time costs more than the search.
+	test("returns the already loaded snapshot while the file is unchanged", () => {
+		const root = projectRoot();
+		saveSnapshot(root, "local", snapshot([ordersTable()]));
+		const first = loadSnapshot(root, "local");
+		assert.equal(loadSnapshot(root, "local"), first);
+	});
+
+	test("reads the file again once a sync rewrote it", () => {
+		const root = projectRoot();
+		saveSnapshot(root, "local", snapshot([ordersTable()]));
+		const first = loadSnapshot(root, "local");
+		saveSnapshot(root, "local", snapshot([ordersTable(), customersTable()]));
+		const second = loadSnapshot(root, "local");
+		assert.notEqual(second, first);
+		assert.deepEqual(
+			second?.databases[0]?.schemas[0]?.tables.map((table) => table.name),
+			["customers", "orders"],
+		);
+	});
+
+	test("reads the file again when it was replaced by hand, even with the same size", () => {
+		const root = projectRoot();
+		saveSnapshot(root, "local", snapshot([ordersTable({ comment: "aaaa" })]));
+		const first = loadSnapshot(root, "local");
+		const path = snapshotPath(root, "local");
+		const text = gunzipSync(readFileSync(path)).toString("utf8").replace("aaaa", "bbbb");
+		writeFileSync(path, gzipSync(text));
+		assert.equal(loadSnapshot(root, "local")?.databases[0]?.schemas[0]?.tables[0]?.comment, "bbbb");
+		assert.notEqual(loadSnapshot(root, "local"), first);
+	});
+
+	test("says never synced once the file is gone", () => {
+		const root = projectRoot();
+		saveSnapshot(root, "local", snapshot([ordersTable()]));
+		loadSnapshot(root, "local");
+		rmSync(snapshotPath(root, "local"));
+		assert.equal(loadSnapshot(root, "local"), null);
+	});
+});
