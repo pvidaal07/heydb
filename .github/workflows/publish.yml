@@ -47,17 +47,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
           # Already published (for example a first release made by hand): only the GitHub release is left.
-          if npm view "heydb@${version}" version >/dev/null 2>&1; then
-            echo "heydb@${version} is already on npm; skipping publish"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; skipping publish"
             exit 0
           fi
           tag="latest"
           case "${version}" in *-*) tag="beta" ;; esac
           # The first publish has no "latest" yet; npm needs one, so a first
           # prerelease is published as latest too.
-          if ! npm view heydb version >/dev/null 2>&1; then tag="latest"; fi
+          if ! npm view "${name}" version >/dev/null 2>&1; then tag="latest"; fi
           npm publish --provenance --access public --tag "${tag}"
 
       - name: GitHub release
