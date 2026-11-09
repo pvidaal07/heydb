@@ -146,7 +146,7 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 		name: "heydb_search",
 		label: "heydb search",
 		description:
-			"Search tables by name, comment, team notes and columns, plus tables whose meaning is inferred from the columns that reference them; ignores case, accents and plurals.",
+			"Search tables by name, comment, notes, columns and meaning inferred from the columns that reference them. Words match in any order, abbreviations too (fac_cab); ignores case, accents, plurals.",
 		promptSnippet: "Search the database schema and its notes by keyword",
 		promptGuidelines: [
 			"Use heydb_search to find which tables or columns hold a concept before writing SQL.",

@@ -311,22 +311,44 @@ export function renderChanges(changes: readonly Change[], { max = 50 }: { readon
 }
 
 export function renderSearch(search: SearchResults): string {
-	if (search.total === 0) return "No matches.";
+	const unmatched = (search.unmatched ?? []).map((word) => `"${word}"`).join(", ");
+	if (search.total === 0) {
+		return unmatched === "" ? "No matches." : `No matches for ${unmatched}. Try synonyms, another language (English or Spanish) or single words.`;
+	}
 	const header =
 		search.results.length < search.total
 			? `Showing ${search.results.length} of ${search.total} matches; refine the query to narrow them.`
 			: `${count(search.total, "match")}.`;
+	const partial = unmatched === "" ? [] : [`Nothing matches ${unmatched}; these results match the other words.`];
+	const named = new Set<string>();
 	const lines = search.results.map((result) => {
 		const { relationship } = result;
 		const target =
 			relationship === undefined
 				? displayText(result.target)
 				: `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
-		return [`- ${result.object} ${target}`, ...result.matchedIn].join(" · ");
+		return [`- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}`, ...result.matchedIn].join(" · ");
 	});
 	const inferred = search.results.some((result) => result.inferred) ? [INFERRED_NOTE] : [];
-	return [header, ...lines, ...inferred].join("\n");
+	return [header, ...partial, ...lines, ...inferred].join("\n");
 }
+
+/**
+ * " (+9 identical: emp_002, emp_003, emp_004, …)": the other databases of a
+ * repeated table, the first few named. One database per company repeats
+ * every table in the same databases, so a list already named is not named
+ * again: " (+9 identical)".
+ */
+function copies(alsoIn: readonly string[], named: Set<string>): string {
+	if (alsoIn.length === 0) return "";
+	const key = alsoIn.join("\u0000");
+	if (named.has(key)) return ` (+${alsoIn.length} identical)`;
+	named.add(key);
+	const names = alsoIn.slice(0, IDENTICAL_NAMED).join(", ");
+	return ` (+${alsoIn.length} identical: ${names}${alsoIn.length > IDENTICAL_NAMED ? ", …" : ""})`;
+}
+
+const IDENTICAL_NAMED = 3;
 
 // Said once under the results, only when one of them is inferred.
 const INFERRED_NOTE =

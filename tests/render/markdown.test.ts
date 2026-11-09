@@ -504,6 +504,31 @@ describe("renderSearch", () => {
 		assert.equal(renderSearch({ results: results.slice(0, 1), total: 87 }).split("\n")[0], "Showing 1 of 87 matches; refine the query to narrow them.");
 		assert.equal(renderSearch({ results: [], total: 0 }), "No matches.");
 	});
+
+	test("names the words that matched nothing and what to try instead", () => {
+		assert.equal(
+			renderSearch({ results: [], total: 0, unmatched: ["xyzzy", "plugh"] }),
+			'No matches for "xyzzy", "plugh". Try synonyms, another language (English or Spanish) or single words.',
+		);
+		assert.deepEqual(renderSearch({ results: results.slice(0, 1), total: 1, unmatched: ["xyzzy"] }).split("\n"), [
+			"1 match.",
+			'Nothing matches "xyzzy"; these results match the other words.',
+			'- table shop.orders · name · columns: total ("Includes VAT.")',
+		]);
+	});
+
+	test("shows the other databases of an identical table compactly", () => {
+		const alsoIn = Array.from({ length: 9 }, (_, index) => `emp_${String(index + 2).padStart(3, "0")}`);
+		assert.equal(
+			renderSearch({ results: [{ ...base, target: "emp_001.emp_001.fac_cab", object: "table", matchedIn: ["name"], alsoIn }], total: 1 }),
+			"1 match.\n- table emp_001.fac_cab (+9 identical: emp_002, emp_003, emp_004, …) · name",
+		);
+		const twice = ["fac_cab", "fac_lin"].map((name): SearchResult => ({ ...base, target: `emp_001.emp_001.${name}`, object: "table", matchedIn: ["name"], alsoIn: ["emp_002"] }));
+		assert.equal(
+			renderSearch({ results: twice, total: 2 }),
+			"2 matches.\n- table emp_001.fac_cab (+1 identical: emp_002) · name\n- table emp_001.fac_lin (+1 identical) · name",
+		);
+	});
 });
 
 describe("project notes and other connections", () => {

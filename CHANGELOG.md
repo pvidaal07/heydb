@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- `heydb_search` matches words, not a phrase: "facturas de venta cabecera" finds tables whose names, comments, notes or columns hold those words in any order, skipping stopwords, reading abbreviated names (`alb_lin` for "albarán") and ranking by BM25 with more matched words first. Identical tables in several databases are one result, and words that matched nothing are named instead of a bare "No matches".
+
 ## [2.0.0-beta.1]
 
 - Documentation, the bundled skill and tests use generic examples only.

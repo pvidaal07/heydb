@@ -10,7 +10,7 @@ heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`)
 ## Read before you write SQL
 
 1. Unknown schema: `heydb_overview` once. It shows, per database, how many tables have comments and which tables the rest point to (the core).
-2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case, accents and simple plurals, lists tables (with their matching columns) before anything else, and can keep to one `database`. Results also include tables whose meaning is inferred from the columns that reference them, marked `(inferred)`: `cus` has no comment, but columns pointing to it say "Cliente Habitual". Present those as inferences, never as facts.
+2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It matches each word on its own, in any order (stopwords skipped, abbreviated names such as `fac_cab` for "factura" found), ignores case, accents and simple plurals, says which words matched nothing, lists identical tables of other databases once, lists tables (with their matching columns) before anything else, and can keep to one `database`. Results also include tables whose meaning is inferred from the columns that reference them, marked `(inferred)`: `cus` has no comment, but columns pointing to it say "Cliente Habitual". Present those as inferences, never as facts.
 3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes. On wide tables it lists the 60 most telling columns; ask for `columns: "all"` or a `column_filter` when you need the rest.
 
 Never guess table or column names from memory when heydb can answer.

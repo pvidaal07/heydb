@@ -60,3 +60,21 @@ Tokens are characters / 4: good enough to compare two runs, not a bill.
 | 50 | ≈31.2k | ≈12.2k | ≈1.7M | ≈8.5k | 0 of 11 |
 
 Fixed tool text sent every turn: ≈1.6k tokens.
+
+## After word-level search (synthetic ERP)
+
+Words in any order, stopwords skipped, abbreviated names read, BM25 ranking,
+identical company databases grouped, unmatched words named.
+
+| companies | heydb, 10 questions | info_schema guided | overview | heydb_search, average | expected table in first search (top 1 / top 5 / anywhere) | needed the overview |
+|---|---|---|---|---|---|---|
+| 1 | ≈6.6k tokens (was ≈5.8k) | ≈11.2k | ≈0.8k | ≈239 | 9 / 9 / 10 of 11 (was 0 / 0 / 0) | 1 of 10 (was 3) |
+| 10 | ≈8.6k (was ≈11.4k) | ≈11.4k | ≈2.1k | ≈299 (was ≈96) | 9 / 9 / 10 of 11 (was 0 / 0 / 0) | 1 of 10 (was 3) |
+| 50 | ≈15.0k (was ≈31.2k) | ≈12.2k | ≈8.5k | ≈303 (was ≈131) | 9 / 9 / 10 of 11 (was 0 / 0 / 0) | 1 of 10 (was 3) |
+
+Tool calls for the 10 questions: 23 (was 34), so 11 fewer model round trips,
+each one also paying the fixed tool text (≈1.6k tokens). A search now returns
+results instead of nothing, so it costs more per call: with one company that
+outweighs the calls saved. The miss left is the English question ("customer
+invoice"): no table or comment is in English, so only a vocabulary bridge
+(layer 2) can find it; the overview still costs ≈8.5k at 50 databases.
