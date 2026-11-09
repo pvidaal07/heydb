@@ -30,7 +30,7 @@ describe("initProject", () => {
 		assert.match(gitignore, /^#/);
 		assert.deepEqual(
 			gitignore.split("\n").filter((line) => line !== "" && !line.startsWith("#")),
-			[".env", "*.tmp"],
+			["*.tmp", ".env"],
 		);
 		assert.deepEqual(loadConfig(root), emptyConfig());
 	});
@@ -132,6 +132,31 @@ describe("ensureEnvIgnored", () => {
 			writeFileSync(join(root, ".heydb", ".env"), "HEYDB_A=x\n");
 			const check = spawnSync("git", ["check-ignore", "-q", ".heydb/.env"], { cwd: root });
 			assert.equal(check.status, 0, `not ignored after ${JSON.stringify(before)}`);
+		}
+	});
+
+	test("git ignores .heydb/.env whatever the hand-edited .gitignore says before the rule", { skip: !git && "git is not installed" }, () => {
+		const cases = ["  .env\n", "\t.env\n", ".env\n!*\n", ".env\n!.env*\n", ".env\n!**/.env\n", ".env\n!*env\n"];
+		for (const before of cases) {
+			const root = projectWith(before);
+			execFileSync("git", ["init", "-q"], { cwd: root });
+			ensureEnvIgnored(root);
+			writeFileSync(join(root, ".heydb", ".env"), "HEYDB_A=x\n");
+			const check = spawnSync("git", ["check-ignore", "-q", ".heydb/.env"], { cwd: root });
+			assert.equal(check.status, 0, `not ignored after ${JSON.stringify(before)}`);
+		}
+	});
+
+	test("trusts only a last rule that is exactly .env or /.env, ignoring blank lines, comments and trailing spaces", () => {
+		for (const before of [".env\n", "/.env\n", "!.env\n.env  \n\n# done\n"]) {
+			const root = projectWith(before);
+			assert.equal(ensureEnvIgnored(root), false, JSON.stringify(before));
+			assert.equal(gitignore(root), before);
+		}
+		for (const before of ["  .env\n", ".env\n*.tmp\n", ".env\n!*\n"]) {
+			const root = projectWith(before);
+			assert.equal(ensureEnvIgnored(root), true, JSON.stringify(before));
+			assert.equal(gitignore(root), `${before}${APPENDED}`);
 		}
 	});
 });

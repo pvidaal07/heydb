@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -365,6 +366,18 @@ describe("forgetConnection", () => {
 		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
 	});
 
+	test("leaves config.json as it was when the password line cannot be removed", { skip: process.platform === "win32" && "symbolic links need privileges on Windows" }, () => {
+		const prod = { ...local, password: "env:HEYDB_PROD_PASSWORD" };
+		const root = project({ local, prod }, "prod");
+		const target = join(tempDir(), "elsewhere");
+		writeFileSync(target, "HEYDB_PROD_PASSWORD=b\n");
+		symlinkSync(target, join(root, ".heydb", ".env"));
+		const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
+		assert.throws(() => forgetConnection(root, "prod"), { message: /symbolic link/ });
+		assert.equal(readFileSync(join(root, ".heydb", "config.json"), "utf8"), before);
+		assert.equal(readFileSync(target, "utf8"), "HEYDB_PROD_PASSWORD=b\n");
+	});
+
 	test("refuses an unknown connection and changes nothing", () => {
 		const root = project();
 		const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
@@ -387,5 +400,32 @@ describe("savePassword", () => {
 		const root = project();
 		assert.throws(() => savePassword(root, "env:AWS_SECRET_ACCESS_KEY", "x"), { message: /only HEYDB_\* variables/ });
 		assert.equal(existsSync(join(root, ".heydb", ".env")), false);
+	});
+
+	const TRACKED = ".heydb/.env is tracked by git, so heydb will not write a password into it; untrack it with git rm --cached .heydb/.env first";
+
+	test("refuses to write into a .heydb/.env that git tracks, and changes nothing", () => {
+		const root = project();
+		writeFileSync(join(root, ".heydb", ".gitignore"), "custom\n");
+		writeFileSync(join(root, ".heydb", ".env"), "OTHER=1\n");
+		const asked: string[] = [];
+		const isTracked = (cwd: string): boolean => {
+			asked.push(cwd);
+			return true;
+		};
+		assert.throws(() => savePassword(root, "env:HEYDB_LOCAL_PASSWORD", "s3cret", { isTracked }), { message: TRACKED });
+		assert.deepEqual(asked, [root]);
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "OTHER=1\n");
+		assert.equal(readFileSync(join(root, ".heydb", ".gitignore"), "utf8"), "custom\n");
+	});
+
+	const git = spawnSync("git", ["--version"]).status === 0;
+	test("asks git itself: a file added with git add -f is refused, an untracked one is written", { skip: !git && "git is not installed" }, () => {
+		const root = project();
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		assert.equal(savePassword(root, "env:HEYDB_LOCAL_PASSWORD", "first"), "HEYDB_LOCAL_PASSWORD");
+		execFileSync("git", ["add", "-f", join(".heydb", "." + "env")], { cwd: root });
+		assert.throws(() => savePassword(root, "env:HEYDB_LOCAL_PASSWORD", "second"), { message: TRACKED });
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=first\n");
 	});
 });

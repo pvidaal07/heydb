@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { relative } from "node:path";
 
@@ -10,11 +11,11 @@ import { snapshotLookup } from "../knowledge/query.ts";
 import type { Annotation, Knowledge, Relationship } from "../knowledge/types.ts";
 import { formatName, parseName, parseSegments } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
-import { type SecretSource, referenceVariable, resolveSecret, secretSource, suggestedReference } from "../secrets.ts";
+import { ENV_FILE, type SecretSource, referenceVariable, resolveSecret, secretSource, suggestedReference } from "../secrets.ts";
 import { removeEnvValue, setEnvValue } from "../store/envfile.ts";
 import { assertConnectionName } from "../store/guards.ts";
 import { knowledgePath, loadKnowledge } from "../store/knowledge.ts";
-import { findProjectRoot } from "../store/project.ts";
+import { HEYDB_DIR, findProjectRoot } from "../store/project.ts";
 import { loadSnapshot, snapshotPath } from "../store/snapshots.ts";
 import { ensureEnvIgnored } from "./init.ts";
 import { forgetAnnotation, forgetRelationship } from "./knowledge.ts";
@@ -208,25 +209,71 @@ export function forgetConnection(root: string, name: string): { passwordRemoved:
 	const config = loadConfig(root);
 	const next = removeConnection(config, name);
 	const reference = (config.connections[name] as ConnectionConfig).password;
-	saveConfig(root, next);
-
+	// The password line goes first: if .heydb/.env cannot be changed (a
+	// symbolic link, say), config.json is still as it was.
 	const shared = Object.values(next.connections).some((entry) => entry.password === reference);
 	const passwordRemoved = !shared && removeEnvValue(root, referenceVariable(reference, name));
+	saveConfig(root, next);
+
 	const kept = [snapshotPath(root, name), knowledgePath(root, name)]
 		.filter((path) => existsSync(path))
 		.map((path) => relative(root, path).replaceAll("\\", "/"));
 	return { passwordRemoved, kept };
 }
 
+export interface SavePasswordOptions {
+	/** Whether git tracks .heydb/.env in `root`; replaced in tests so no git is needed. */
+	readonly isTracked?: (root: string) => boolean;
+}
+
 /**
  * Stores a typed password in .heydb/.env under the variable `reference` names,
- * after making sure git ignores that file. Returns the variable name.
+ * after making sure git ignores that file. Ignoring does not untrack a file
+ * already committed (git add -f), so such a file is refused. Returns the
+ * variable name.
  */
-export function savePassword(root: string, reference: string, value: string): string {
+export function savePassword(root: string, reference: string, value: string, options: SavePasswordOptions = {}): string {
+	const { isTracked = gitTracksEnvFile } = options;
 	const variable = referenceVariable(reference);
+	if (isTracked(root)) {
+		throw new Error(
+			".heydb/.env is tracked by git, so heydb will not write a password into it; untrack it with git rm --cached .heydb/.env first",
+		);
+	}
 	ensureEnvIgnored(root);
 	setEnvValue(root, variable, value);
 	return variable;
+}
+
+const GIT_TIMEOUT_MS = 2000;
+
+/**
+ * Whether git tracks .heydb/.env in the project at `root`. Without git, or
+ * outside a repository, nothing is tracked. Any other failure (a timeout, a
+ * repository git refuses to open) is an error: heydb does not guess before
+ * writing a password. Synchronous because savePassword is; execFileSync with
+ * an argument list never goes through a shell.
+ */
+export function gitTracksEnvFile(root: string): boolean {
+	try {
+		execFileSync("git", ["ls-files", "--error-unmatch", "--", `${HEYDB_DIR}/${ENV_FILE}`], {
+			cwd: root,
+			timeout: GIT_TIMEOUT_MS,
+			shell: false,
+			windowsHide: true,
+			stdio: ["ignore", "ignore", "pipe"],
+			encoding: "utf8",
+		});
+		return true;
+	} catch (error) {
+		const failure = error as { code?: unknown; status?: unknown; stderr?: unknown };
+		const stderr = typeof failure.stderr === "string" ? failure.stderr : "";
+		if (failure.code === "ENOENT") return false; // git is not installed
+		if (failure.status === 1) return false; // --error-unmatch: not tracked
+		if (/not a git repository/i.test(stderr)) return false;
+		const reason = stderr.trim().split("\n")[0] || (error instanceof Error ? error.message : String(error));
+		throw new Error(`could not ask git whether it tracks ${HEYDB_DIR}/${ENV_FILE}: ${reason}`, { cause: error });
+	}
 }
 
 export type Forgotten =

@@ -41,7 +41,11 @@ export function envLine(name: string, value: string): string {
 	return `${name}=${quote}${value}${quote}`;
 }
 
-/** Sets `name` in .heydb/.env: replaces the definition that counts, or appends one. */
+/**
+ * Sets `name` in .heydb/.env: replaces the definition that counts (the last)
+ * and removes the earlier ones, so an old password does not stay in the file;
+ * appends one when there is none.
+ */
 export function setEnvValue(projectRoot: string, name: string, value: string): void {
 	const line = envLine(name, value);
 	const text = readEnvText(projectRoot) ?? "";
@@ -57,7 +61,7 @@ export function setEnvValue(projectRoot: string, name: string, value: string): v
 		const old = lines[index] as string;
 		const bom = index === 0 && old.startsWith("\uFEFF") ? "\uFEFF" : "";
 		lines[index] = `${bom}${line}${old.endsWith("\r") ? "\r" : ""}`;
-		next = lines.join("\n");
+		next = withoutDefinitions(lines, name, index);
 	}
 
 	// The proof, before anything is written: the file as heydb will read it
@@ -75,10 +79,22 @@ export function removeEnvValue(projectRoot: string, name: string): boolean {
 	const text = readEnvText(projectRoot);
 	if (text === null) return false;
 	const lines = text.split("\n");
-	const kept = lines.filter((raw, at) => keyOf(raw, at) !== name);
-	if (kept.length === lines.length) return false;
-	writeFileAtomic(envPath(projectRoot), kept.join("\n"), OWNER_ONLY);
+	if (!lines.some((raw, at) => keyOf(raw, at) === name)) return false;
+	writeFileAtomic(envPath(projectRoot), withoutDefinitions(lines, name), OWNER_ONLY);
 	return true;
+}
+
+/**
+ * The file without the lines that define `name`, except the one at `keep`.
+ * Every other line is kept byte for byte, and the byte order mark stays at
+ * the start of the file even when the first line goes.
+ */
+function withoutDefinitions(lines: readonly string[], name: string, keep = -1): string {
+	const bom = lines[0]?.startsWith("\uFEFF") ? "\uFEFF" : "";
+	const kept = lines
+		.map((raw, at) => (at === 0 ? raw.slice(bom.length) : raw))
+		.filter((raw, at) => at === keep || parseEnvLine(raw)?.key !== name);
+	return `${bom}${kept.join("\n")}`;
 }
 
 function envPath(projectRoot: string): string {

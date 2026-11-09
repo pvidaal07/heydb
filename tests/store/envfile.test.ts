@@ -112,10 +112,11 @@ describe("setEnvValue", () => {
 		assert.equal(envText(root), "OTHER=1\nHEYDB_A=x\n");
 	});
 
-	test("replaces the definition that wins when a name is repeated", () => {
-		const root = project("HEYDB_A=first\nHEYDB_A=second\n");
+	test("replaces the last definition of a repeated name and removes the earlier ones, so no old password stays", () => {
+		const root = project("\uFEFFHEYDB_A=first\r\n# keep\nexport HEYDB_A='old'\nOTHER=1\nHEYDB_A=second\r\nTAIL=2");
 		setEnvValue(root, "HEYDB_A", "third");
-		assert.equal(envText(root), "HEYDB_A=first\nHEYDB_A=third\n");
+		assert.equal(envText(root), "\uFEFF# keep\nOTHER=1\nHEYDB_A=third\r\nTAIL=2");
+		assert.doesNotMatch(envText(root), /first|old|second/);
 		assert.equal(resolved(root, "HEYDB_A"), "third");
 	});
 
@@ -188,6 +189,12 @@ describe("removeEnvValue", () => {
 		assert.equal(removeEnvValue(root, "HEYDB_A"), true);
 		assert.equal(envText(root), "# notes\r\nOTHER=2\n");
 		if (posix) assert.equal(statSync(join(root, ".heydb", ".env")).mode & 0o777, 0o600);
+	});
+
+	test("keeps the file's byte order mark when the first line is the one removed", () => {
+		const root = project("\uFEFFHEYDB_A=1\nOTHER=2\nHEYDB_A=3\n");
+		assert.equal(removeEnvValue(root, "HEYDB_A"), true);
+		assert.equal(envText(root), "\uFEFFOTHER=2\n");
 	});
 
 	test("does nothing when the name or the file is not there", () => {

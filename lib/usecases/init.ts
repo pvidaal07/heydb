@@ -8,13 +8,14 @@ import { HEYDB_DIR } from "../store/project.ts";
 
 // .heydb/.gitignore keeps the two local-only things out of git, whatever the
 // project's own .gitignore says: the secrets file and the leftovers of an
-// interrupted atomic write (writeFileAtomic names them *.tmp).
+// interrupted atomic write (writeFileAtomic names them *.tmp). The .env rule
+// comes last, which is what ensureEnvIgnored checks for.
 const GITIGNORE = [
 	"# Written by heydb. Everything else in .heydb/ is meant to be committed.",
-	"# .env holds local secrets for env:HEYDB_NAME password references; never commit it.",
-	".env",
 	"# Leftovers of an interrupted write.",
 	"*.tmp",
+	"# .env holds local secrets for env:HEYDB_NAME password references; never commit it.",
+	".env",
 	"",
 ].join("\n");
 
@@ -49,9 +50,14 @@ const ENV_RULE = "# Added by heydb: .env holds local secrets for env:HEYDB_NAME 
 /**
  * Makes sure git ignores .heydb/.env before heydb writes a secret there. A
  * team may have replaced the .gitignore heydb wrote, so it is checked every
- * time: the rule is appended when no line ignores .env or a later "!.env"
- * un-ignores it, and the usual file is written when there is none. Returns
- * whether the file changed.
+ * time, and the usual file is written when there is none. Returns whether the
+ * file changed.
+ *
+ * heydb does not try to read git's patterns (leading spaces count, "!*" or
+ * "!**\/.env" un-ignore it, and so on). It relies on one rule instead: git
+ * applies the last pattern of this file that matches. So the file is left
+ * alone only when its last rule is exactly ".env" or "/.env"; otherwise the
+ * rule is appended, which makes it the last.
  */
 export function ensureEnvIgnored(root: string): boolean {
 	assertNoSymlinks(root, ".gitignore");
@@ -63,9 +69,14 @@ export function ensureEnvIgnored(root: string): boolean {
 		if (!hasCode(error, "ENOENT")) throw error;
 		return createFile(path, GITIGNORE);
 	}
-	// The last rule that names .env decides, as in git.
-	const rules = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => /^!?\/?\.env$/.test(line));
-	if (rules.length > 0 && !rules[rules.length - 1]?.startsWith("!")) return false;
+	// Only trailing spaces are dropped: git drops them too, but a leading space
+	// is part of the pattern. Blank lines and comments are not rules.
+	const rules = text
+		.split(/\r?\n/)
+		.map((line) => line.replace(/ +$/, ""))
+		.filter((line) => line !== "" && !line.startsWith("#"));
+	const last = rules[rules.length - 1];
+	if (last === ".env" || last === "/.env") return false;
 	const separator = text === "" || text.endsWith("\n") ? "" : "\n";
 	writeFileAtomic(path, `${text}${separator}${ENV_RULE}`);
 	return true;
