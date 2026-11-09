@@ -131,6 +131,10 @@ If your project's `.gitignore` excludes `.heydb/`, notes stay on your machine; h
 
 Ideas and bugs are welcome in [issues](https://github.com/pvidaal07/heydb/issues).
 
+## Contributing
+
+Contributions are welcome: open an issue, wait for `status:approved`, then fork and send a pull request to `main` that says `Closes #<issue>`. [CONTRIBUTING.md](CONTRIBUTING.md) explains the workflow, the setup and how the code is organized. Security problems go to a [private advisory](https://github.com/pvidaal07/heydb/security/advisories/new).
+
 ## Development
 
 ```sh
@@ -143,7 +147,7 @@ node --run db:down
 pi -e .                    # try the local copy in Pi
 ```
 
-Releases: bump `version` in `package.json`, add the entry to `CHANGELOG.md`, and push a tag `vX.Y.Z`; the publish workflow tests, publishes to npm and creates the GitHub release.
+Releases (maintainers): bump `version` in `package.json`, add the entry to `CHANGELOG.md`, merge, and push a tag `vX.Y.Z` on `main`; the publish workflow tests, publishes to npm through trusted publishing and creates the GitHub release.
 
 ## License
 

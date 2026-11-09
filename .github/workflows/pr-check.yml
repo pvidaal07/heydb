@@ -1,0 +1,42 @@
+name: PR check
+
+# Every pull request names its issue (Closes #N) and has a Conventional
+# Commits title, so each change is tracked and the history stays readable.
+#
+# The title and body are written by the contributor: they reach the script
+# only through environment variables, never inside the script text, so they
+# cannot inject commands.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Title follows Conventional Commits
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .+'
+          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error::The title must follow Conventional Commits, for example \"fix(search): match plurals\"."
+            exit 1
+          fi
+
+      - name: Links an issue
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Dependabot updates have no issue.
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then exit 0; fi
+          if ! printf '%s' "$BODY" | grep -Eiq '(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?) #[0-9]+'; then
+            echo "::error::Link the issue this pull request solves in its description, for example \"Closes #12\"."
+            exit 1
+          fi

@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose something heydb should do. A maintainer approves it before a pull request is opened.
+labels: ["type:feature", "status:needs-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the problem first; the solution can be discussed. Work starts once a maintainer adds `status:approved`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do and why heydb does not help today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How heydb could solve it. Commands, tool output or examples help.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - MySQL / MariaDB engine
+        - PostgreSQL engine
+        - A new database engine
+        - Notes and relationships
+        - Search
+        - Learning from code
+        - Pi tools, commands or skill
+        - Security
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I would like to implement this myself once it is approved.
