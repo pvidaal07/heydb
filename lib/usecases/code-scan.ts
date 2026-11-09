@@ -14,9 +14,11 @@ import type { GitRun, RunGit } from "./sharing.ts";
 // Many projects have none (a heydb project made only to explore a database),
 // and then the notes come from conversations instead.
 //
-// This only finds candidates: a table name written as a whole identifier in a
-// source file. It never interprets the code; the agent does that, if the
-// person agrees. The scan runs right after a sync, so it is bounded in files,
+// This only finds candidates: a table name in database context, that is SQL
+// (`SELECT … FROM gar`) or an ORM declaration (`protected $table = 'gar'`).
+// A name that is only mentioned (a comment, help text, a variable) does not
+// count: tables called "config" or "para" are ordinary words. It never
+// interprets the code; the agent does that, if the person agrees. The scan runs right after a sync, so it is bounded in files,
 // bytes and time: a huge repository gives a partial answer, never a stuck Pi.
 
 export interface ScanLimits {
@@ -46,8 +48,20 @@ const MAX_FILES_PER_TABLE = 5;
 /** Two-letter names ("id", "ab") are everywhere in code: they would only add noise. */
 const MIN_NAME_LENGTH = 3;
 
-/** Folders that hold someone else's code, build output or heydb's own files. */
-const SKIPPED_FOLDERS = new Set(["node_modules", "vendor", ".git", HEYDB_DIR, "dist", "build"]);
+/** Folders that hold someone else's code, build output, CI configuration or heydb's own files. */
+const SKIPPED_FOLDERS = new Set(["node_modules", "vendor", ".git", HEYDB_DIR, "dist", "build", ".github", ".gitlab", ".circleci"]);
+/** Files that are never database code: lockfiles and CI configuration. Minified bundles (*.min.js) too. */
+const SKIPPED_FILES = new Set([
+	"pnpm-lock.yaml",
+	"package-lock.json",
+	"yarn.lock",
+	"composer.lock",
+	"Gemfile.lock",
+	"poetry.lock",
+	"Cargo.lock",
+	"go.sum",
+	".gitlab-ci.yml",
+]);
 const SOURCE_EXTENSIONS = new Set([
 	"php",
 	"ts",
@@ -146,7 +160,7 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 		}
 		filesScanned += 1;
 		let matched = false;
-		for (const [token] of text.matchAll(IDENTIFIER)) {
+		for (const token of tableReferences(text)) {
 			const key = token.toLowerCase();
 			if (!names.has(key)) continue;
 			const perFile = found.get(key) ?? new Map<string, number>();
@@ -178,8 +192,65 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	};
 }
 
-/** Letters, digits and "_": "gar" in `FROM gar` or `'gar'`, but not in ref_gar or garage. */
-const IDENTIFIER = /[\p{L}\p{N}_]+/gu;
+// The patterns of database context. Each captures the table name as `name`:
+// a whole identifier (letters, digits, "_"), so "gar" never matches in
+// ref_gar or garage. Keywords are case-insensitive.
+
+const ID = "[\\p{L}\\p{N}_]+";
+/** A name as SQL writes it: optionally quoted (` " ' [ ]) and qualified (db.table, db.schema.table). */
+const SQL_NAME = `(?:[\`"'\\[]?${ID}[\`"'\\]]?\\.){0,2}[\`"'\\[]?(?<name>${ID})(?![\\p{L}\\p{N}_])`;
+/** A quoted string that holds only the name: 'gar', "gar", `gar`. */
+const QUOTED_NAME = `["'\`](?<name>${ID})["'\`]`;
+/** How far back, within one statement (no ";"), the verb that opens it may be. */
+const STATEMENT = "[^;]{0,2000}?";
+
+/**
+ * SQL, anywhere in a file (strings included). Each keyword needs the verb of
+ * its statement, so prose like "read it from config" or "update project"
+ * does not count:
+ * - FROM after SELECT or DELETE (DELETE FROM too)
+ * - JOIN after FROM, or after UPDATE when a SET follows
+ * - INTO after INSERT, REPLACE or MERGE
+ * - UPDATE followed by SET
+ * - TABLE after CREATE, ALTER, DROP, TRUNCATE, RENAME or LOCK
+ *
+ * ORM and mapping declarations:
+ * - `table = 'x'`, `$table = 'x'`, `protected $table = "x"`, `__tablename__ = "x"`
+ *   (SQLAlchemy), `db_table = "x"` (Django), `tableName: "x"` / `tableName = "x"`,
+ *   Doctrine XML `<entity … table="x">`
+ * - `->table('x')`, `DB::table('x')`, `.table("x")`, `->from('x')`, `.from("x")`, `knex("x")`
+ * - `@Table(name = "x")`, `@Entity(name = "x")` (JPA), `[Table("x")]` (C#)
+ * - `table: x` on its own line (YAML mappings)
+ */
+const REFERENCES: readonly RegExp[] = [
+	new RegExp(`(?<=\\b(?:SELECT|DELETE)\\b${STATEMENT})\\bFROM\\s+${SQL_NAME}`, "dgiu"),
+	new RegExp(`(?<=\\bFROM\\b${STATEMENT})\\bJOIN\\s+${SQL_NAME}`, "dgiu"),
+	new RegExp(`(?<=\\bUPDATE\\b${STATEMENT})\\bJOIN\\s+${SQL_NAME}(?=[^;]{0,500}?\\bSET\\b)`, "dgiu"),
+	new RegExp(`(?<=\\b(?:INSERT|REPLACE|MERGE)\\b[^;]{0,100}?)\\bINTO\\s+${SQL_NAME}`, "dgiu"),
+	new RegExp(`\\bUPDATE\\s+${SQL_NAME}(?=[^;]{0,500}?\\bSET\\b)`, "dgiu"),
+	new RegExp(
+		`(?<=\\b(?:CREATE|ALTER|DROP|TRUNCATE|RENAME|LOCK)\\b[^;]{0,40}?)\\bTABLES?\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_NAME}`,
+		"dgiu",
+	),
+	new RegExp(`(?<![\\p{L}\\p{N}_])\\$?(?:table|db_table|__tablename__|tableName)\\s*[:=]\\s*${QUOTED_NAME}`, "dgiu"),
+	new RegExp(`(?:->|::|\\.)\\s*(?:table|from)\\s*\\(\\s*${QUOTED_NAME}`, "dgu"),
+	new RegExp(`\\bknex\\s*\\(\\s*${QUOTED_NAME}`, "dgu"),
+	new RegExp(`(?:@(?:Table|Entity)\\s*\\([^)]*?\\bname\\s*=\\s*|\\[Table\\s*\\(\\s*)${QUOTED_NAME}`, "dgu"),
+	new RegExp(`^[ \\t]*table:[ \\t]*(?<name>${ID})[ \\t]*\\r?$`, "dgmu"),
+];
+
+/** Every table name the file uses in database context; one per place, even when two patterns see it. */
+function tableReferences(text: string): string[] {
+	const found = new Map<number, string>();
+	for (const pattern of REFERENCES) {
+		for (const match of text.matchAll(pattern)) {
+			const start = match.indices?.groups?.name?.[0];
+			const name = match.groups?.name;
+			if (start !== undefined && name !== undefined) found.set(start, name);
+		}
+	}
+	return [...found.values()];
+}
 
 interface TableName {
 	readonly canonical: string;
@@ -265,6 +336,7 @@ function isSource(path: string): boolean {
 	const segments = path.split("/");
 	if (segments.slice(0, -1).some((segment) => SKIPPED_FOLDERS.has(segment))) return false;
 	const name = segments.at(-1) ?? "";
+	if (SKIPPED_FILES.has(name) || name.toLowerCase().endsWith(".min.js")) return false;
 	const dot = name.lastIndexOf(".");
 	return dot > 0 && SOURCE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
 }

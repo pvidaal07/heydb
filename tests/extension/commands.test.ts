@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { describe, test } from "node:test";
 import { gunzipSync } from "node:zlib";
@@ -915,19 +915,27 @@ const LEARN_TITLE = "Learn from this project's code?";
 const LEARN_BODY =
 	"Found 2 files that use 2 tables (e.g. customers, orders). " +
 	"heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.";
-const LEARN_MESSAGE =
-	'heydb: the user agreed that you learn about the database of connection "local" from this project\'s code.\n\n' +
+const LANGUAGE_RULE =
+	"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
+	"keep table and column names as they are.";
+const LEARN_FILES =
 	"Files that use its tables, most used first:\n" +
-	"- shop.customers (3 uses): src/Repo/orders.sql, src/Models/Customer.php\n" +
-	"- shop.orders (2 uses): src/Repo/orders.sql\n\n" +
+	"- shop.customers (2 uses): src/Models/Customer.php, src/Repo/orders.sql\n" +
+	"- shop.orders (1 use): src/Repo/orders.sql\n\n";
+const LEARN_RULES =
 	"Rules:\n" +
+	`${LANGUAGE_RULE}\n` +
 	"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.\n" +
 	"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
 	"Record joins the code makes without a foreign key with heydb_relate.\n" +
-	'- End every note with its source, like "(code: src/Repo/orders.sql)".\n' +
+	'- End every note with its source, like "(code: src/Models/Customer.php)".\n' +
 	"- Never invent or guess: what the code does not make clear is not saved.\n" +
 	"- A few valuable notes beat many; stop after about 20.\n" +
 	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.";
+const LEARN_MESSAGE =
+	'heydb: the user agreed that you learn about the database of connection "local" from this project\'s code.\n\n' +
+	LEARN_FILES +
+	LEARN_RULES;
 
 describe("learning from code", () => {
 	function codeProject(): string {
@@ -1056,8 +1064,111 @@ describe("learning from code", () => {
 		assert.deepEqual(unsynced.notifications, [{ message: 'Connection "local" was never synced: run /heydb:sync local.', level: "error" }]);
 
 		const extra = fakeContext(code);
-		await runCommand(pi, "heydb:learn-code", "local prod", extra);
-		assert.deepEqual(extra.notifications, [{ message: "Usage: /heydb:learn-code [connection]", level: "error" }]);
+		await runCommand(pi, "heydb:learn-code", "local . prod", extra);
+		assert.deepEqual(extra.notifications, [{ message: "Usage: /heydb:learn-code [connection] [path]", level: "error" }]);
+		assert.deepEqual(pi.messages, []);
+	});
+
+	test("the agent is told first to answer and write the notes in the user's language", async () => {
+		const pi = loadHeydb();
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		await runCommand(pi, "heydb:learn-code", "", fakeContext(root, { answers: ["yes"] }));
+		const content = String(pi.messages[0]?.message.content);
+		assert.ok(content.includes(`Rules:\n${LANGUAGE_RULE}\n`), content);
+	});
+
+	test("field case: ordinary-word tables named only in lockfiles, CI, comments and help text are no code", async () => {
+		const words = snapshot(["para", "destino", "config", "project"].map((name) => ({ ...customersTable(), name })));
+		const pi = loadHeydb({ introspect: fakeIntrospect(words).introspect, env: { HEYDB_LOCAL_PASSWORD: "x" } });
+		const root = project();
+		saveSnapshot(root, "local", words);
+		writeCode(root, {
+			"pnpm-lock.yaml": "packages:\n  config@1.0.0: {}\n  project@2.0.0: {}\n",
+			"src/cli.ts": 'export const HELP = "Usa --help para ver los comandos";\n',
+			"src/git.ts": "// rama destino: la rama sobre la que se fusiona\n",
+			".gitlab/ci/node.yml": "script:\n  - pnpm config set store-dir .pnpm-store\n",
+		});
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.deepEqual(ctx.dialogs, []);
+		assert.deepEqual(ctx.notifications, [{ message: `heydb sync local: unchanged · 1 database, 4 tables.${NO_CODE}`, level: "info" }]);
+		assert.deepEqual(pi.messages, []);
+	});
+
+	test("/heydb:learn-code [connection] [path] scans another folder and names it", async () => {
+		const root = project();
+		saveSnapshot(root, "local", live);
+		const other = tempDir();
+		writeCode(other, CODE);
+		const folder = realpathSync(other);
+		const typed = relative(root, other).split("\\").join("/");
+		for (const args of [`local ${typed}`, typed, folder]) {
+			const pi = loadHeydb();
+			const ctx = fakeContext(root, { answers: ["yes"] });
+			await runCommand(pi, "heydb:learn-code", args, ctx);
+			assert.deepEqual(
+				ctx.dialogs,
+				[
+					{
+						kind: "confirm",
+						title: LEARN_TITLE,
+						hint:
+							`Found 2 files in ${folder} that use 2 tables (e.g. customers, orders). ` +
+							"heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.",
+					},
+				],
+				args,
+			);
+			assert.equal(
+				pi.messages[0]?.message.content,
+				`heydb: the user agreed that you learn about the database of connection "local" from the code in ${folder}. ` +
+					"File paths below are relative to that folder.\n\n" +
+					LEARN_FILES +
+					LEARN_RULES,
+				args,
+			);
+		}
+
+		const pi = loadHeydb();
+		const declined = fakeContext(root, { answers: ["no"] });
+		await runCommand(pi, "heydb:learn-code", typed, declined);
+		assert.deepEqual(declined.notifications, [
+			{ message: `Nothing was sent. Run /heydb:learn-code local ${typed} whenever you want the agent to read it.`, level: "info" },
+		]);
+	});
+
+	test("/heydb:learn-code never follows a symbolic link out of the scanned folder", async () => {
+		const root = project();
+		saveSnapshot(root, "local", live);
+		const outside = tempDir();
+		writeCode(outside, CODE);
+		mkdirSync(join(root, "src"));
+		symlinkSync(join(outside, "src"), join(root, "src", "linked"), "dir");
+		symlinkSync(join(outside, "src", "Repo", "orders.sql"), join(root, "orders.sql"));
+		const pi = loadHeydb();
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-code", "local .", ctx);
+		assert.deepEqual(ctx.notifications, [{ message: `heydb learn-code local: ${NO_CODE.trim()}`, level: "info" }]);
+		assert.deepEqual(pi.messages, []);
+	});
+
+	test("/heydb:learn-code says when the path is missing or not a folder", async () => {
+		const root = codeProject();
+		saveSnapshot(root, "local", live);
+		const pi = loadHeydb();
+		const cases: [string, string][] = [
+			["local ../nowhere", 'Folder "../nowhere" does not exist.'],
+			["local src/Repo/orders.sql", '"src/Repo/orders.sql" is not a folder.'],
+			// One argument that is neither a connection nor a folder is a connection name.
+			["nowhere", 'unknown connection "nowhere"'],
+		];
+		for (const [args, message] of cases) {
+			const ctx = fakeContext(root);
+			await runCommand(pi, "heydb:learn-code", args, ctx);
+			assert.equal(ctx.notifications[0]?.level, "error", args);
+			assert.match(ctx.notifications[0]?.message ?? "", new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), args);
+		}
 		assert.deepEqual(pi.messages, []);
 	});
 });

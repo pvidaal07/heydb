@@ -1,3 +1,6 @@
+import { realpathSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 
 import { aboutMessage } from "../lib/about.ts";
@@ -127,7 +130,8 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 		[
 			"heydb:learn-code",
 			{
-				description: "Offer the agent this project's code that uses the tables, to note what it shows: /heydb:learn-code [connection]",
+				description:
+					"Offer the agent the code that uses the tables, to note what it shows: /heydb:learn-code [connection] [path] (path: another folder to read)",
 				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
 				handler: (args, ctx) => learnCode(sendMessage, args, ctx),
 			},
@@ -418,21 +422,61 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 const NO_CODE =
 	"No code using these tables was found here; heydb will learn from your conversations (the agent annotates what you explain).";
 
-/** Same offer as after a sync, from the stored snapshot: it never connects. */
+/** Another folder to read instead of the project's: its real path, and the path as typed (to repeat it). */
+interface CodeFolder {
+	readonly root: string;
+	readonly typed: string;
+}
+
+/**
+ * Same offer as after a sync, from the stored snapshot: it never connects.
+ * The code may live elsewhere (`/heydb:learn-code eagle ../api-eagle`); a
+ * single argument that is not a connection but an existing folder is that
+ * path, with the default connection.
+ */
 async function learnCode(sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
 	const words = argumentWords(args);
-	if (words.length > 1) return ctx.ui.notify("Usage: /heydb:learn-code [connection]", "error");
+	if (words.length > 2) return ctx.ui.notify("Usage: /heydb:learn-code [connection] [path]", "error");
 	try {
-		const opened = openSnapshot(ctx.cwd, words[0]);
-		const usage = await findSchemaUsage(opened.root, opened.snapshot);
+		const [name, path] = words.length === 1 && isFolderNotConnection(ctx.cwd, words[0] as string) ? [undefined, words[0]] : words;
+		const opened = openSnapshot(ctx.cwd, name);
+		const folder = path === undefined ? undefined : codeFolder(opened.root, path);
+		const usage = await findSchemaUsage(folder?.root ?? opened.root, opened.snapshot);
 		if (usage.matches.length === 0) return ctx.ui.notify(`heydb learn-code ${opened.name}: ${NO_CODE}`, "info");
 		if (!ctx.hasUI) {
 			return ctx.ui.notify("/heydb:learn-code needs an interactive session to ask before the agent spends tokens.", "error");
 		}
-		await offerCode(sendMessage, opened.name, usage, ctx);
+		await offerCode(sendMessage, opened.name, usage, ctx, folder);
 	} catch (error) {
 		failed(ctx, error);
 	}
+}
+
+function isFolderNotConnection(cwd: string, word: string): boolean {
+	const project = projectConnections(cwd);
+	if (project === null || project.names.includes(word)) return false;
+	try {
+		return statSync(resolve(project.root, word)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The folder to scan, relative to the project root or absolute. The scan
+ * starts at its real path and only goes down from there: links inside it are
+ * never followed, so nothing outside the chosen folder is read.
+ */
+function codeFolder(projectRoot: string, typed: string): CodeFolder {
+	const path = resolve(projectRoot, typed);
+	let isDirectory: boolean;
+	try {
+		isDirectory = statSync(path).isDirectory();
+	} catch {
+		throw new Error(`Folder "${typed}" does not exist.`);
+	}
+	if (!isDirectory) throw new Error(`"${typed}" is not a folder.`);
+	return { root: realpathSync(path), typed };
 }
 
 /**
@@ -440,19 +484,27 @@ async function learnCode(sendMessage: SendMessage, args: string, ctx: ExtensionC
  * rather do it later. Accepted, one message starts an agent turn; while the
  * agent works it waits as a follow-up instead of interrupting it.
  */
-async function offerCode(sendMessage: SendMessage, connection: string, usage: SchemaUsage, ctx: ExtensionCommandContext): Promise<void> {
+async function offerCode(
+	sendMessage: SendMessage,
+	connection: string,
+	usage: SchemaUsage,
+	ctx: ExtensionCommandContext,
+	folder?: CodeFolder,
+): Promise<void> {
 	const examples = usage.matches.slice(0, 3).map((match) => match.name);
+	const where = folder === undefined ? "" : ` in ${folder.root}`;
 	const confirmed = await ctx.ui.confirm(
 		"Learn from this project's code?",
-		`Found ${usage.truncated ? "at least " : ""}${count(usage.filesMatched, "file")} that use ${count(usage.tablesMatched, "table")} ` +
+		`Found ${usage.truncated ? "at least " : ""}${count(usage.filesMatched, "file")}${where} that use ${count(usage.tablesMatched, "table")} ` +
 			`(e.g. ${examples.join(", ")}). heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.`,
 	);
 	if (!confirmed) {
-		return ctx.ui.notify(`Nothing was sent. Run /heydb:learn-code ${connection} whenever you want the agent to read it.`, "info");
+		const again = folder === undefined ? connection : `${connection} ${folder.typed}`;
+		return ctx.ui.notify(`Nothing was sent. Run /heydb:learn-code ${again} whenever you want the agent to read it.`, "info");
 	}
 	const idle = ctx.isIdle();
 	await sendMessage(
-		{ customType: "heydb", content: learnMessage(connection, usage), display: true },
+		{ customType: "heydb", content: learnMessage(connection, usage, folder), display: true },
 		{ triggerTurn: true, deliverAs: "followUp" },
 	);
 	ctx.ui.notify(
@@ -463,16 +515,26 @@ async function offerCode(sendMessage: SendMessage, connection: string, usage: Sc
 	);
 }
 
-/** The agent's instructions: which files, and what is worth a note. Bounded by the scan's top 30 tables. */
-function learnMessage(connection: string, usage: SchemaUsage): string {
+/**
+ * The agent's instructions: which files, and what is worth a note. Bounded by
+ * the scan's top 30 tables. The rules are in English, so the language rule
+ * comes first: the person may well be writing in Spanish.
+ */
+function learnMessage(connection: string, usage: SchemaUsage, folder?: CodeFolder): string {
 	const example = usage.matches[0]?.files[0] ?? "src/Models/Order.php";
+	const source =
+		folder === undefined
+			? "this project's code."
+			: `the code in ${folder.root}. File paths below are relative to that folder.`;
 	return [
-		`heydb: the user agreed that you learn about the database of connection "${connection}" from this project's code.`,
+		`heydb: the user agreed that you learn about the database of connection "${connection}" from ${source}`,
 		"",
 		"Files that use its tables, most used first:",
 		...usage.matches.map((match) => `- ${match.table} (${count(match.hits, "use")}): ${match.files.join(", ")}`),
 		"",
 		"Rules:",
+		"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
+			"keep table and column names as they are.",
 		"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.",
 		"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
 			"Record joins the code makes without a foreign key with heydb_relate.",
