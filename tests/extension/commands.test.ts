@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, test } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import { loadConfig, saveConfig } from "../../lib/config/store.ts";
 import { renderChanges } from "../../lib/render/markdown.ts";
@@ -374,10 +375,11 @@ describe("/heydb:connect password", () => {
 		]);
 		assert.equal(seen.includes(password), false, "shown to a person or the model");
 		const files = filesUnder(root);
-		assert.ok(files.includes(".heydb/snapshots/local.json"), "the search covers the snapshot");
+		assert.ok(files.includes(".heydb/snapshots/local.json.gz"), "the search covers the snapshot");
 		assert.ok(files.includes(".heydb/knowledge/local.json"), "the search covers the notes");
 		for (const file of files) {
-			const found = readFileSync(join(root, file), "utf8").includes(password);
+			const bytes = readFileSync(join(root, file));
+			const found = (file.endsWith(".gz") ? gunzipSync(bytes) : bytes).toString("utf8").includes(password);
 			assert.equal(found, file === ".heydb/.env", file);
 		}
 	});
@@ -565,13 +567,13 @@ describe("/heydb:connections", () => {
 		]);
 		assert.deepEqual(Object.keys(loadConfig(root).connections), ["local"]);
 		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
-		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json")));
+		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json.gz")));
 		assert.equal(loadKnowledge(root, "prod").annotations.length, 1);
 		assert.deepEqual(ctx.notifications, [
 			{
 				message:
 					'Removed connection "prod" and its password line in .heydb/.env.\n' +
-					"Kept on disk, so no notes are lost: .heydb/snapshots/prod.json, .heydb/knowledge/prod.json. " +
+					"Kept on disk, so no notes are lost: .heydb/snapshots/prod.json.gz, .heydb/knowledge/prod.json. " +
 					"Delete them yourself if you no longer need them.",
 				level: "info",
 			},

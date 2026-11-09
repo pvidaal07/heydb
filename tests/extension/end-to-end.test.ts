@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -32,6 +32,7 @@ test("init → connect → sync → overview, table, search and annotate via too
 	await runCommand(pi, "heydb:sync", "", sync);
 	assert.equal(sync.notifications[0]?.level, "info");
 	assert.deepEqual(passwords, ["typed pass"]);
+	assert.deepEqual(readdirSync(join(root, ".heydb", "snapshots")), ["local.json.gz"], "the shared copy is compressed");
 
 	const overview = await runTool(pi, "heydb_overview", {}, app);
 	assert.equal(overview.isError, false);

@@ -14,14 +14,17 @@ import { dirname } from "node:path";
  * applied when the temporary file is created, so the content is never
  * readable by others, not even for an instant. Windows only honors the
  * read-only bit, so there the file keeps the folder's permissions.
+ *
+ * A string is written as UTF-8; bytes (a compressed file) as they are.
  */
-export function writeFileAtomic(path: string, content: string, mode?: number): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array, mode?: number): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
 		const fd = openSync(temporary, "w", mode);
 		try {
-			writeSync(fd, content, null, "utf8");
+			if (typeof content === "string") writeSync(fd, content, null, "utf8");
+			else writeSync(fd, content);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);

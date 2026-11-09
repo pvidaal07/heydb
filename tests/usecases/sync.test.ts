@@ -49,14 +49,14 @@ describe("syncSnapshot", () => {
 	test("leaves the file byte-for-byte untouched when only capture time, row estimates or warnings changed", () => {
 		const root = projectRoot();
 		saveSnapshot(root, "local", snapshot([ordersTable()]));
-		const before = readFileSync(snapshotPath(root, "local"), "utf8");
+		const before = readFileSync(snapshotPath(root, "local"));
 		const live = snapshot([ordersTable({ rowEstimate: 5 })], {
 			capturedAt: "2027-01-01T00:00:00.000Z",
 			engine: { kind: "mysql", version: "8.0.40" },
 			warnings: [{ code: "routines_hidden", message: "hidden" }],
 		});
 		assert.deepEqual(syncSnapshot(root, "local", live), { written: false, hash: schemaHash(live), changes: [] });
-		assert.equal(readFileSync(snapshotPath(root, "local"), "utf8"), before);
+		assert.deepEqual(readFileSync(snapshotPath(root, "local")), before);
 	});
 
 	test("refuses an invalid connection name and writes nothing", () => {

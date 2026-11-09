@@ -337,6 +337,13 @@ describe("listConnections", () => {
 		assert.doesNotMatch(JSON.stringify(listed), /s3cret/);
 	});
 
+	test("counts a plain snapshot written by an earlier heydb as synced", () => {
+		const root = project();
+		mkdirSync(join(root, ".heydb", "snapshots"));
+		writeFileSync(join(root, ".heydb", "snapshots", "local.json"), JSON.stringify(snapshot([ordersTable()])));
+		assert.equal(listConnections(root, {}).connections[0]?.synced, true);
+	});
+
 	test("says the .env file is unreadable instead of failing the whole list", () => {
 		const root = project();
 		writeFileSync(join(root, ".heydb", ".env"), "not a pair s3cret\n");
@@ -369,12 +376,19 @@ describe("forgetConnection", () => {
 
 		assert.deepEqual(forgetConnection(root, "prod"), {
 			passwordRemoved: true,
-			kept: [".heydb/snapshots/prod.json", ".heydb/knowledge/prod.json"],
+			kept: [".heydb/snapshots/prod.json.gz", ".heydb/knowledge/prod.json"],
 		});
 		assert.deepEqual(loadConfig(root), { formatVersion: 1, defaultConnection: null, connections: { local } });
 		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
-		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json")));
+		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json.gz")));
 		assert.ok(existsSync(join(root, ".heydb", "knowledge", "prod.json")));
+	});
+
+	test("lists a plain snapshot written by an earlier heydb as kept", () => {
+		const root = project();
+		mkdirSync(join(root, ".heydb", "snapshots"));
+		writeFileSync(join(root, ".heydb", "snapshots", "local.json"), JSON.stringify(snapshot([ordersTable()])));
+		assert.deepEqual(forgetConnection(root, "local").kept, [".heydb/snapshots/local.json"]);
 	});
 
 	test("keeps a password line another connection still uses, and lists only files that exist", () => {

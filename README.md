@@ -69,9 +69,11 @@ The tools only read and write files in `.heydb/`; they never connect to the data
 | Path | Commit it? |
 |---|---|
 | `.heydb/config.json` | Yes: connections, with passwords only as `env:HEYDB_…` references |
-| `.heydb/snapshots/` | Yes: the schema, reviewable in pull requests |
+| `.heydb/snapshots/*.json.gz` | Yes: the schema, gzip-compressed |
 | `.heydb/knowledge/` | Yes: the team's notes and relationships |
 | `.heydb/.env` | Never: local passwords; `.heydb/.gitignore` excludes it |
+
+The snapshot is compressed because a large schema is hundreds of thousands of lines of JSON that nobody reviews; `/heydb:sync` prints what changed instead. It is rewritten only when the structure changed, so syncing an unchanged database leaves git clean. Snapshots written by earlier versions as plain `.json` are still read and replaced by the `.json.gz` on the next change. To see snapshot diffs in git anyway, add `*.json.gz diff=gzip` to `.gitattributes` and run `git config diff.gzip.textconv "gzip -dc"`.
 
 Removing a connection keeps its files in `.heydb/snapshots/` and `.heydb/knowledge/`; delete them yourself if you no longer need them.
 

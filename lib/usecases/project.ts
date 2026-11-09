@@ -16,7 +16,7 @@ import { removeEnvValue, setEnvValue } from "../store/envfile.ts";
 import { assertConnectionName } from "../store/guards.ts";
 import { knowledgePath, loadKnowledge } from "../store/knowledge.ts";
 import { HEYDB_DIR, findProjectRoot } from "../store/project.ts";
-import { loadSnapshot, snapshotPath } from "../store/snapshots.ts";
+import { loadSnapshot, storedSnapshotPath } from "../store/snapshots.ts";
 import { ensureEnvIgnored } from "./init.ts";
 import { forgetAnnotation, forgetRelationship } from "./knowledge.ts";
 import { resolveColumn, resolveTable } from "./resolve.ts";
@@ -187,7 +187,7 @@ export function listConnections(
 				// A broken .heydb/.env must not hide the list; the next sync explains the line at fault.
 				password = "unreadable";
 			}
-			const synced = existsSync(snapshotPath(root, name));
+			const synced = storedSnapshotPath(root, name) !== null;
 			return { name, connection, isDefault: config.defaultConnection === name, password, synced };
 		});
 	return { root, connections };
@@ -215,8 +215,8 @@ export function forgetConnection(root: string, name: string): { passwordRemoved:
 	const passwordRemoved = !shared && removeEnvValue(root, referenceVariable(reference, name));
 	saveConfig(root, next);
 
-	const kept = [snapshotPath(root, name), knowledgePath(root, name)]
-		.filter((path) => existsSync(path))
+	const kept = [storedSnapshotPath(root, name), knowledgePath(root, name)]
+		.filter((path): path is string => path !== null && existsSync(path))
 		.map((path) => relative(root, path).replaceAll("\\", "/"));
 	return { passwordRemoved, kept };
 }

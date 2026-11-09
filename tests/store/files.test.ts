@@ -32,6 +32,15 @@ describe("writeFileAtomic", () => {
 		assert.deepEqual(readdirSync(dir), ["a.json"]);
 	});
 
+	test("writes bytes as they are", () => {
+		const dir = tempDir();
+		const path = join(dir, "a.gz");
+		const bytes = Uint8Array.from([0x1f, 0x8b, 0x00, 0xff, 0xc3]);
+		writeFileAtomic(path, bytes);
+		assert.deepEqual(new Uint8Array(readFileSync(path)), bytes);
+		assert.deepEqual(readdirSync(dir), ["a.gz"]);
+	});
+
 	test("creates the file with the given mode, replacing a more open one", { skip: !posix && "no POSIX permissions on Windows" }, () => {
 		const dir = tempDir();
 		const path = join(dir, ".env");
