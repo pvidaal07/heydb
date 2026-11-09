@@ -169,20 +169,38 @@ describe("resolveTarget", () => {
 
 	test("explains an ambiguous column with its candidates", () => {
 		assert.throws(() => resolveTarget(twoDatabases, "email"), {
-			message: '"email" matches 2 columns; use the full name:\n- crm.crm.leads.email\n- shop.shop.customers.email',
+			message: '"email" matches 2 columns; use the full name:\n- crm.leads.email\n- shop.customers.email',
 		});
 	});
 
-	test("lists both readings when a name is a table and a column", () => {
-		const tricky = snapshot([ordersTable({ name: "status" }), ordersTable({ columns: [column("id", 1), column("status", 2)] })]);
-		assert.throws(() => resolveTarget(tricky, "status"), {
-			message: '"status" names more than one object; use the full name:\n- table shop.shop.status\n- column shop.shop.orders.status',
+	// The field report: annotating "gar" failed because a column postv.gar exists.
+	test("a name without a dot is a table even when columns share it", () => {
+		const tricky = snapshot([ordersTable({ name: "gar" }), ordersTable({ name: "postv", columns: [column("id", 1), column("gar", 2)] })]);
+		assert.deepEqual(resolveTarget(tricky, "gar"), { kind: "table", name: "shop.shop.gar" });
+		assert.deepEqual(resolveTarget(tricky, "GAR"), { kind: "table", name: "shop.shop.gar" });
+		assert.deepEqual(resolveTarget(tricky, "postv.gar"), { kind: "column", name: "shop.shop.postv.gar" });
+	});
+
+	test("a bare name stays ambiguous between several tables, or a table and a database", () => {
+		const twice = {
+			...twoDatabases,
+			databases: [...twoDatabases.databases, { name: "crm2", schemas: [{ name: "crm2", tables: [customersTable()], routines: [] }] }],
+		};
+		assert.throws(() => resolveTarget(twice, "customers"), {
+			message: '"customers" matches 2 tables; use the full name:\n- crm2.customers\n- shop.customers',
+		});
+		const named = {
+			...twoDatabases,
+			databases: [...twoDatabases.databases, { name: "orders", schemas: [{ name: "orders", tables: [], routines: [] }] }],
+		};
+		assert.throws(() => resolveTarget(named, "orders"), {
+			message: '"orders" names more than one object; use the full name:\n- database orders\n- table shop.orders',
 		});
 	});
 
 	test("reports what nothing matched, with suggestions, in a few lines", () => {
 		assert.throws(() => resolveTarget(twoDatabases, "ordrs"), {
-			message: 'nothing matches "ordrs":\n- no table matches "ordrs". Did you mean: shop.shop.orders?\n- no column matches "ordrs"',
+			message: 'nothing matches "ordrs":\n- no table matches "ordrs". Did you mean: shop.orders?\n- no column matches "ordrs"',
 		});
 	});
 

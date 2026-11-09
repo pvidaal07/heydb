@@ -24,6 +24,7 @@ import {
 	saveNewConnection,
 	savePassword,
 } from "../lib/usecases/project.ts";
+import { SHARE_NOTES_HINT, knowledgeSharing } from "../lib/usecases/sharing.ts";
 import { checkStatus } from "../lib/usecases/status.ts";
 import { syncSnapshot } from "../lib/usecases/sync.ts";
 import type { HeydbDeps } from "./deps.ts";
@@ -306,6 +307,7 @@ async function connections(deps: HeydbDeps, args: string, ctx: ExtensionCommandC
 			const lines = [
 				`heydb connections in ${root}:`,
 				...listed.map(summaryLine),
+				...(await sharingLine(root, listed)),
 				"Change the default with /heydb:connections use <name>; set a password with /heydb:password <name>.",
 			];
 			return ctx.ui.notify(lines.join("\n"), "info");
@@ -337,6 +339,28 @@ async function remove(root: string, name: string, ctx: ExtensionCommandContext):
 		lines.push(`Kept on disk, so no notes are lost: ${kept.join(", ")}. Delete them yourself if you no longer need them.`);
 	}
 	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+/**
+ * Whether git shares the notes, said once for the project: every connection
+ * keeps them in the same folder. A failing git check leaves the line out
+ * rather than hiding the list.
+ */
+async function sharingLine(root: string, listed: readonly ConnectionSummary[]): Promise<string[]> {
+	const connection = (listed.find((item) => item.isDefault) ?? listed[0])?.name;
+	try {
+		const sharing = await knowledgeSharing(root, connection === undefined ? {} : { connection });
+		switch (sharing.state) {
+			case "shared":
+				return ["Notes in .heydb/knowledge/ are visible to git: the team gets them once they are committed."];
+			case "no-git":
+				return ["No git repository here: notes in .heydb/knowledge/ stay on this machine."];
+			case "ignored":
+				return [`Notes in .heydb/knowledge/ are ignored by git (${sharing.rule}), so the team will not get them. ${SHARE_NOTES_HINT}`];
+		}
+	} catch {
+		return [];
+	}
 }
 
 const PASSWORD_STATES: Readonly<Record<ConnectionSummary["password"], string>> = {

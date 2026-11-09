@@ -277,7 +277,7 @@ export function renderChanges(changes: readonly Change[], { max = 50 }: { readon
 	const lines = changes.slice(0, max).map((change) => {
 		const object = change.object === "foreignKey" ? "foreign key" : change.object;
 		const details = change.details.length === 0 ? "" : `: ${change.details.join("; ")}`;
-		return `- ${change.kind} ${object} ${change.target}${details}`;
+		return `- ${change.kind} ${object} ${displayText(change.target)}${details}`;
 	});
 	return [...lines, ...more(changes.length - max, "change")].join("\n");
 }
@@ -289,13 +289,20 @@ export function renderSearch(search: SearchResults): string {
 			? `Showing ${search.results.length} of ${search.total} matches; refine the query to narrow them.`
 			: `${count(search.total, "match")}.`;
 	const lines = search.results.map((result) => {
-		const where = result.matchedIn === "name" ? "" : ` · ${result.matchedIn}: ${result.snippet}`;
-		// A relationship target is "from(columns) → to(columns)", not a name: kept as written.
-		const target = result.object === "relationship" ? result.target : displayText(result.target);
-		return `- ${result.object} ${target}${where}`;
+		const { relationship } = result;
+		const target =
+			relationship === undefined
+				? displayText(result.target)
+				: `${displayText(relationship.from.table)}${list(relationship.from.columns)} → ${displayText(relationship.to.table)}${list(relationship.to.columns)}`;
+		return [`- ${result.object} ${target}`, ...result.matchedIn].join(" · ");
 	});
-	return [header, ...lines].join("\n");
+	const inferred = search.results.some((result) => result.inferred) ? [INFERRED_NOTE] : [];
+	return [header, ...lines, ...inferred].join("\n");
 }
+
+// Said once under the results, only when one of them is inferred.
+const INFERRED_NOTE =
+	"(inferred): only the comments of columns that reference the table match; present that meaning as an inference and ask the user to confirm it.";
 
 // Which columns, and in which order: the filter first; then, when there are
 // more than the limit, the ones that say most about the table (primary key,

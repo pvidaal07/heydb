@@ -17,6 +17,7 @@ import {
 	renderTable,
 	type TableOptions,
 } from "../../lib/render/markdown.ts";
+import type { SearchResult } from "../../lib/search.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 import { annotation, knowledge, relationship } from "../knowledge/fixtures.ts";
 
@@ -414,20 +415,31 @@ const changes: Change[] = [
 ];
 
 describe("renderChanges", () => {
-	test("one line per change, details after a colon", () => {
+	test("one line per change, details after a colon, names as displayed", () => {
 		assert.equal(
 			renderChanges(changes),
 			[
-				"- added table shop.shop.carts",
-				"- modified column shop.shop.orders.total: type: int → bigint; nullable: false → true",
-				"- removed foreign key shop.shop.orders.fk_old",
-				"- added routine shop.shop.calc: procedure",
+				"- added table shop.carts",
+				"- modified column shop.orders.total: type: int → bigint; nullable: false → true",
+				"- removed foreign key shop.orders.fk_old",
+				"- added routine shop.calc: procedure",
 			].join("\n"),
 		);
 	});
 
+	test("keeps database names and every PostgreSQL level", () => {
+		assert.equal(
+			renderChanges([
+				{ kind: "added", object: "database", target: "shop", details: [] },
+				{ kind: "added", object: "schema", target: "legacy.billing", details: [] },
+				{ kind: "removed", object: "column", target: "legacy.public.orders.status", details: [] },
+			]),
+			["- added database shop", "- added schema legacy.billing", "- removed column legacy.public.orders.status"].join("\n"),
+		);
+	});
+
 	test("truncates after max changes and says how many are left", () => {
-		assert.equal(renderChanges(changes, { max: 1 }), "- added table shop.shop.carts\n… 3 more changes");
+		assert.equal(renderChanges(changes, { max: 1 }), "- added table shop.carts\n… 3 more changes");
 		assert.equal(renderChanges(changes, { max: 3 }).split("\n").at(-1), "… 1 more change");
 	});
 
@@ -445,29 +457,46 @@ describe("renderStatus", () => {
 		);
 		assert.equal(
 			renderStatus({ state: "drifted", storedHash: "a", liveHash: "b", changes: changes.slice(0, 1) }),
-			"Drifted: the live database differs from the snapshot in 1 change.\n\n- added table shop.shop.carts",
+			"Drifted: the live database differs from the snapshot in 1 change.\n\n- added table shop.carts",
 		);
 	});
 });
 
 describe("renderSearch", () => {
-	const results = [
-		{ target: "shop.shop.orders", object: "table" as const, matchedIn: "name" as const, snippet: "orders" },
-		{ target: "shop.shop.orders.total", object: "column" as const, matchedIn: "annotation" as const, snippet: "Includes VAT." },
+	const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
+	const results: SearchResult[] = [
+		{ ...base, target: "shop.shop.orders", object: "table", matchedIn: ["name", 'columns: total ("Includes VAT.")'] },
+		{ ...base, target: "legacy.public.gcl", object: "table", matchedIn: ['referenced as "Cliente" ×3 (inferred)'], inferred: true },
+		{ ...base, target: "shop.shop", object: "database", matchedIn: ["note: The web store."], snippet: "The web store." },
 	];
 
-	test("lists matches, with a snippet when the match is not the name", () => {
+	test("one line per result with why it matched, names as displayed", () => {
 		assert.equal(
-			renderSearch({ results, total: 2 }),
-			["2 matches.", "- table shop.orders", "- column shop.orders.total · annotation: Includes VAT."].join("\n"),
+			renderSearch({ results: results.slice(0, 1).concat(results.slice(2)), total: 2 }),
+			["2 matches.", '- table shop.orders · name · columns: total ("Includes VAT.")', "- database shop · note: The web store."].join("\n"),
 		);
 	});
 
-	test("keeps relationship targets as written", () => {
+	test("says inferred results are inferences", () => {
+		assert.equal(
+			renderSearch({ results: results.slice(1, 2), total: 1 }),
+			[
+				"1 match.",
+				'- table legacy.public.gcl · referenced as "Cliente" ×3 (inferred)',
+				"(inferred): only the comments of columns that reference the table match; present that meaning as an inference and ask the user to confirm it.",
+			].join("\n"),
+		);
+	});
+
+	test("shows relationship sides by display name", () => {
+		const relationship = { from: { table: "shop.shop.refunds", columns: ["order_id"] }, to: { table: "shop.shop.orders", columns: ["id"] } };
 		const target = "shop.shop.refunds(order_id) → shop.shop.orders(id)";
 		assert.equal(
-			renderSearch({ results: [{ target, object: "relationship", matchedIn: "relationship", snippet: "app code" }], total: 1 }),
-			`1 match.\n- relationship ${target} · relationship: app code`,
+			renderSearch({
+				results: [{ ...base, target, object: "relationship", matchedIn: ["relationship note: app code"], snippet: "app code", relationship }],
+				total: 1,
+			}),
+			"1 match.\n- relationship shop.refunds(order_id) → shop.orders(id) · relationship note: app code",
 		);
 	});
 

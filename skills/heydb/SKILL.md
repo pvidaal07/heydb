@@ -10,7 +10,7 @@ heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`)
 ## Read before you write SQL
 
 1. Unknown schema: `heydb_overview` once. It shows, per database, how many tables have comments and which tables the rest point to (the core).
-2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case and accents.
+2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case, accents and simple plurals, lists tables (with their matching columns) before anything else, and can keep to one `database`. Results also include tables whose meaning is inferred from the columns that reference them, marked `(inferred)`: `gcl` has no comment, but columns pointing to it say "Cliente Habitual". Present those as inferences, never as facts.
 3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes. On wide tables it lists the 60 most telling columns; ask for `columns: "all"` or a `column_filter` when you need the rest.
 
 Never guess table or column names from memory when heydb can answer.
@@ -39,6 +39,8 @@ When the conversation or the code teaches you something the schema does not say,
 
 - `heydb_annotate` for meaning: valid values, units, encodings, who writes the column, legacy quirks.
 - `heydb_relate` for joins without a foreign key: `orders.customer_id → customers.id`. Say how you know in `note`.
+- A name without a dot is a table: `heydb_annotate` with `gar` notes the table even if some column is also called `gar`; write `postv.gar` for the column.
+- If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
 - Read the existing notes first (`heydb_table`). Fix a wrong note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that contradicts the first.
 
 Good notes are short, factual and verifiable:

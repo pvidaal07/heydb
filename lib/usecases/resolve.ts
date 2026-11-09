@@ -1,4 +1,4 @@
-import { formatName, parseSegments } from "../model/names.ts";
+import { displayNameOf, formatName, parseSegments } from "../model/names.ts";
 import type { Column, Snapshot, Table } from "../model/snapshot.ts";
 
 // Agents and people rarely type canonical names. They write "orders",
@@ -8,6 +8,8 @@ import type { Column, Snapshot, Table } from "../model/snapshot.ts";
 //
 // Error messages stay small whatever the size of the schema: at most 10
 // candidates for an ambiguous name and 5 suggestions for an unknown one.
+// They name objects by display name ("shop.orders"), which is shorter and
+// typed back exactly like the canonical one.
 // heydb v1 listed every table when one was not found (bug #7): with 3,000
 // tables, each typo cost the agent thousands of tokens.
 
@@ -85,7 +87,7 @@ function pickOne<T>(entries: readonly Entry<T>[], input: readonly string[], text
 
 	const [first] = matches;
 	if (first !== undefined && matches.length === 1) return first;
-	if (matches.length > 1) throw ambiguous(text, kind, matches.map((entry) => entry.name).sort(compareText));
+	if (matches.length > 1) throw ambiguous(text, kind, matches.map((entry) => entry.name).sort(compareText).map(displayNameOf));
 	throw notFound(text, kind, suggestions(entries, input));
 }
 
@@ -141,7 +143,7 @@ function suggestions<T>(entries: readonly Entry<T>[], input: readonly string[]):
 	return scored
 		.sort((a, b) => a.distance - b.distance || compareText(a.name, b.name))
 		.slice(0, MAX_SUGGESTIONS)
-		.map((item) => item.name);
+		.map((item) => displayNameOf(item.name));
 }
 
 /**

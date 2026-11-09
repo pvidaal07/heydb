@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, test } from "node:test";
@@ -495,11 +496,33 @@ describe("/heydb:connections", () => {
 						`heydb connections in ${root}:\n` +
 						"- local (default): mysql root@127.0.0.1:3306, all databases · password HEYDB_LOCAL_PASSWORD: in .heydb/.env · synced\n" +
 						"- prod: mysql reader@db.internal:3306, databases shop · password HEYDB_PROD_PASSWORD: set in your environment · never synced\n" +
+						"No git repository here: notes in .heydb/knowledge/ stay on this machine.\n" +
 						"Change the default with /heydb:connections use <name>; set a password with /heydb:password <name>.",
 					level: "info",
 				},
 			]);
 		}
+	});
+
+	test("says once whether git shares the notes", { skip: spawnSync("git", ["--version"]).error !== undefined && "git is not installed" }, async () => {
+		const pi = loadHeydb();
+		const root = twoConnections();
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		writeFileSync(join(root, ".gitignore"), ".heydb/\n");
+		const ignored = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "", ignored);
+		const lines = (ignored.notifications[0]?.message ?? "").split("\n");
+		assert.deepEqual(
+			lines.filter((line) => line.includes("git")),
+			[
+				"Notes in .heydb/knowledge/ are ignored by git (.gitignore:1: .heydb/), so the team will not get them. " +
+					"To share notes, commit .heydb/config.json, .heydb/snapshots/ and .heydb/knowledge/ (never .heydb/.env).",
+			],
+		);
+		writeFileSync(join(root, ".gitignore"), "");
+		const shared = fakeContext(root);
+		await runCommand(pi, "heydb:connections", "", shared);
+		assert.match(shared.notifications[0]?.message ?? "", /^Notes in \.heydb\/knowledge\/ are visible to git: the team gets them once they are committed\.$/m);
 	});
 
 	test("shows a missing or unreadable password without failing", async () => {
@@ -796,7 +819,7 @@ describe("/heydb:status", () => {
 		assert.equal(
 			second.notifications[0]?.message,
 			"heydb status local: Drifted: the live database differs from the snapshot in 1 change.\n\n" +
-				"- removed table shop.shop.orders\n\nRun /heydb:sync local to store it.",
+				"- removed table shop.orders\n\nRun /heydb:sync local to store it.",
 		);
 		assert.equal(second.notifications[0]?.level, "warning");
 		assert.deepEqual(loadSnapshot(root, "local"), live);

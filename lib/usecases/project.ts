@@ -9,7 +9,7 @@ import { validateConnection } from "../config/validate.ts";
 import { introspect as introspectEngine } from "../engines/index.ts";
 import { snapshotLookup } from "../knowledge/query.ts";
 import type { Annotation, Knowledge, Relationship } from "../knowledge/types.ts";
-import { formatName, parseName, parseSegments } from "../model/names.ts";
+import { displayNameOf, formatName, parseName, parseSegments } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
 import { ENV_FILE, type SecretSource, referenceVariable, resolveSecret, secretSource, suggestedReference } from "../secrets.ts";
 import { removeEnvValue, setEnvValue } from "../store/envfile.ts";
@@ -299,6 +299,11 @@ export type TargetKind = "database" | "table" | "column";
  * "shop.shop"), a table or a column in any form resolveTable and resolveColumn
  * accept. A complete canonical name that exists is taken as written. Otherwise
  * every reading is tried, and the target must be exactly one object.
+ *
+ * A name without a dot is a table (or a database), never a column when one
+ * of those matches: in a legacy ERP the articles table "gar" shares its name
+ * with a column postv.gar, and "gar" must still name the table. A column then
+ * needs its table: "postv.gar". Errors use display names.
  */
 export function resolveTarget(snapshot: Snapshot, input: string): { kind: TargetKind; name: string } {
 	const segments = parseSegments(input);
@@ -322,7 +327,8 @@ export function resolveTarget(snapshot: Snapshot, input: string): { kind: Target
 	};
 	if (segments.length <= 2) found.push(...databaseMatches(snapshot, segments));
 	if (segments.length <= 3) attempt("table", () => resolveTable(snapshot, input).name);
-	attempt("column", () => resolveColumn(snapshot, input).name);
+	const tableOrDatabase = found.length > 0 || ambiguities.length > 0;
+	if (segments.length > 1 || !tableOrDatabase) attempt("column", () => resolveColumn(snapshot, input).name);
 
 	const [ambiguity] = ambiguities;
 	if (ambiguity !== undefined) throw new Error(ambiguity);
@@ -330,7 +336,9 @@ export function resolveTarget(snapshot: Snapshot, input: string): { kind: Target
 	if (only !== undefined && found.length === 1) return only;
 	if (found.length > 1) {
 		throw new Error(
-			[`"${input}" names more than one object; use the full name:`, ...found.map((item) => `- ${item.kind} ${item.name}`)].join("\n"),
+			[`"${input}" names more than one object; use the full name:`, ...found.map((item) => `- ${item.kind} ${displayNameOf(item.name)}`)].join(
+				"\n",
+			),
 		);
 	}
 	const [miss] = misses;

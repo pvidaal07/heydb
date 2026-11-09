@@ -15,7 +15,8 @@ import { knowledgeForTable } from "../../lib/knowledge/query.ts";
 import { schemaHash } from "../../lib/model/hash.ts";
 import type { Snapshot, Table } from "../../lib/model/snapshot.ts";
 import { validateSnapshot } from "../../lib/model/validate.ts";
-import { renderOverview, renderTable } from "../../lib/render/markdown.ts";
+import { renderOverview, renderSearch, renderTable } from "../../lib/render/markdown.ts";
+import { searchSchema } from "../../lib/search.ts";
 import { resolveTable } from "../../lib/usecases/resolve.ts";
 
 // Hand-written catalog rows, shaped like the aliases of the queries in
@@ -455,6 +456,11 @@ describe("a PostgreSQL snapshot through the tools' building blocks", () => {
 		assert.match(text, /^- legacy\.public: 1 table, 1 view$/m);
 		assert.match(text, /no USAGE privilege on schema "billing"/);
 		assert.match(text, /^\| legacy\.public\.orders \| table \| ~1\.2k \| Customer orders \|$/m);
+	});
+
+	test("search results and resolve errors keep every level of a PostgreSQL name", () => {
+		assert.match(renderSearch(searchSchema(snapshot, emptyKnowledge(), "orders")), /^- table legacy\.public\.orders · name · table comment: Customer orders$/m);
+		assert.throws(() => resolveTable(snapshot, "ordrs"), { message: 'no table matches "ordrs". Did you mean: legacy.public.orders?' });
 	});
 
 	test("a table resolves as schema.table and renders its enum, identity and cross-schema foreign key", () => {

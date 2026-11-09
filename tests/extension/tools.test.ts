@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
@@ -13,10 +14,12 @@ import { saveSnapshot } from "../../lib/store/snapshots.ts";
 import { initProject } from "../../lib/usecases/init.ts";
 import { annotate, relate } from "../../lib/usecases/knowledge.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
-import { customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
+import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 import { loadHeydb, runTool, tempDirs } from "./fake-pi.ts";
 
 const tempDir = tempDirs("heydb-tools-");
+
+const noGit = spawnSync("git", ["--version"]).error !== undefined && "git is not installed";
 
 const TOOLS = [
 	"heydb_overview",
@@ -229,7 +232,7 @@ describe("reading tools", () => {
 		const root = project();
 		assert.deepEqual(await runTool(pi, "heydb_table", { table: "ordrs" }, root), {
 			isError: true,
-			text: 'no table matches "ordrs". Did you mean: shop.shop.orders?',
+			text: 'no table matches "ordrs". Did you mean: shop.orders?',
 		});
 	});
 
@@ -246,6 +249,27 @@ describe("reading tools", () => {
 			text: renderSearch(searchSchema(stored, knowledge, "id", { limit: 1 })),
 		});
 		assert.match((await runTool(pi, "heydb_search", { query: "id", limit: 1 }, root)).text, /^Showing 1 of \d+ matches/);
+	});
+
+	test("heydb_search filters by database and refuses an unknown one", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		const knowledge = loadKnowledge(root, "local");
+		assert.deepEqual(await runTool(pi, "heydb_search", { query: "orders", database: "shop" }, root), {
+			isError: false,
+			text: renderSearch(searchSchema(stored, knowledge, "orders", { database: "shop" })),
+		});
+		assert.deepEqual(await runTool(pi, "heydb_search", { query: "orders", database: "crm" }, root), {
+			isError: true,
+			text: 'no database matches "crm"; databases: shop',
+		});
+	});
+
+	test("heydb_search says its results include inferred meanings", () => {
+		const tool = loadHeydb().tools.get("heydb_search");
+		const text = [tool?.description ?? "", ...(tool?.promptGuidelines ?? [])].join("\n");
+		assert.match(text, /inferred from the columns that reference them/);
+		assert.match(text, /heydb_search.*inference/);
 	});
 
 	test("heydb_search rejects a limit outside 1-50 and an empty query", async () => {
@@ -290,6 +314,40 @@ describe("writing tools", () => {
 		);
 	});
 
+	// The field report: "gar" was ambiguous because a column postv.gar exists.
+	test("heydb_annotate takes a name without a dot as the table, even when a column shares it", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", snapshot([{ ...customersTable(), name: "gar" }, ordersTable({ name: "postv", columns: [column("gar", 1)] })]));
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "gar", text: "Artículos." }, root), {
+			isError: false,
+			text: "Saved note id-001 on table shop.gar (author: Ana (via agent)).",
+		});
+	});
+
+	test("heydb_annotate and heydb_relate warn when git ignores the notes, naming the rule", { skip: noGit }, async () => {
+		const pi = loadHeydb();
+		const root = project();
+		execFileSync("git", ["init", "-q"], { cwd: root });
+		writeFileSync(join(root, ".gitignore"), "vendor/\n.heydb/\n");
+		const warning =
+			"\nNote saved locally; git ignores it (.gitignore:2: .heydb/), so the team will not get it. " +
+			"To share notes, commit .heydb/config.json, .heydb/snapshots/ and .heydb/knowledge/ (never .heydb/.env).";
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "orders", text: "x" }, root), {
+			isError: false,
+			text: `Saved note id-001 on table shop.orders (author: Ana (via agent)).${warning}`,
+		});
+		const related = await runTool(pi, "heydb_relate", { from_table: "orders", from_columns: ["customer_id"], to_table: "customers", to_columns: ["id"] }, root);
+		assert.equal(related.text, `Saved relationship id-002: shop.orders(customer_id) → shop.customers(id) (author: Ana (via agent)).${warning}`);
+		assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "vendor/\n.heydb/\n", ".gitignore is never changed");
+
+		writeFileSync(join(root, ".gitignore"), "vendor/\n");
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "orders", text: "y" }, root), {
+			isError: false,
+			text: "Saved note id-003 on table shop.orders (author: Ana (via agent)).",
+		});
+	});
+
 	test("heydb_annotate reads the author from the project folder", async () => {
 		const seen: string[] = [];
 		const pi = loadHeydb({
@@ -308,7 +366,7 @@ describe("writing tools", () => {
 		const root = project();
 		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "ordrs", text: "x" }, root), {
 			isError: true,
-			text: 'nothing matches "ordrs":\n- no table matches "ordrs". Did you mean: shop.shop.orders?\n- no column matches "ordrs"',
+			text: 'nothing matches "ordrs":\n- no table matches "ordrs". Did you mean: shop.orders?\n- no column matches "ordrs"',
 		});
 		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "orders", text: " " }, root), {
 			isError: true,

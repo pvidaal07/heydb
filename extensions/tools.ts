@@ -9,6 +9,7 @@ import { searchSchema } from "../lib/search.ts";
 import { annotate, editNote, relate } from "../lib/usecases/knowledge.ts";
 import { ProjectError, forgetById, openConnection, openSnapshot, resolveTarget } from "../lib/usecases/project.ts";
 import { resolveTable } from "../lib/usecases/resolve.ts";
+import { SHARE_NOTES_HINT, knowledgeSharing } from "../lib/usecases/sharing.ts";
 import type { HeydbDeps } from "./deps.ts";
 
 // Tools are what the model calls. They read the stored snapshot and the
@@ -127,6 +128,7 @@ const SEARCH_PARAMETERS = {
 	properties: {
 		query: { type: "string", description: "Text to find; case and accents are ignored." },
 		limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Maximum results (default 20)." },
+		database: { type: "string", description: 'Only this database, e.g. "shop" (PostgreSQL: "app.public").' },
 		connection: CONNECTION,
 	},
 	required: ["query"],
@@ -137,9 +139,13 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 	return {
 		name: "heydb_search",
 		label: "heydb search",
-		description: "Search names, comments, view definitions and team notes of the schema; ignores case and accents.",
+		description:
+			"Search tables by name, comment, team notes and columns, plus tables whose meaning is inferred from the columns that reference them; ignores case, accents and plurals.",
 		promptSnippet: "Search the database schema and its notes by keyword",
-		promptGuidelines: ["Use heydb_search to find which tables or columns hold a concept before writing SQL."],
+		promptGuidelines: [
+			"Use heydb_search to find which tables or columns hold a concept before writing SQL.",
+			"A heydb_search result marked (inferred) matched only through the comments of columns that reference it: present it as an inference and confirm with the user before relying on it or saving it.",
+		],
 		parameters: SEARCH_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -150,7 +156,8 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 					throw new Error(`limit must be an integer from 1 to ${MAX_SEARCH_LIMIT}`);
 				}
 				const opened = openSnapshot(ctx.cwd, params.connection);
-				return ok(renderSearch(searchSchema(opened.snapshot, opened.knowledge, params.query, { limit })), opened.name);
+				const options = { limit, ...(params.database !== undefined && { database: params.database }) };
+				return ok(renderSearch(searchSchema(opened.snapshot, opened.knowledge, params.query, options)), opened.name);
 			});
 		},
 	};
@@ -189,7 +196,8 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 				const target = resolveTarget(opened.snapshot, params.target);
 				const author = await agentAuthor(deps, ctx.cwd);
 				const note = annotate(opened.root, opened.name, { target: target.name, text: params.text, author }, deps.knowledge);
-				return ok(`Saved note ${note.id} on ${target.kind} ${displayNameOf(note.target)} (author: ${note.author}).`, opened.name);
+				const saved = `Saved note ${note.id} on ${target.kind} ${displayNameOf(note.target)} (author: ${note.author}).`;
+				return ok(saved + (await sharingWarning(opened.root, opened.name)), opened.name);
 			});
 		},
 	};
@@ -229,7 +237,8 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 				const to = { table: resolveTable(opened.snapshot, params.to_table).name, columns: params.to_columns };
 				const author = await agentAuthor(deps, ctx.cwd);
 				const link = relate(opened.root, opened.name, { from, to, note: params.note ?? "", author }, deps.knowledge);
-				return ok(`Saved relationship ${link.id}: ${side(link.from)} → ${side(link.to)} (author: ${link.author}).`, opened.name);
+				const saved = `Saved relationship ${link.id}: ${side(link.from)} → ${side(link.to)} (author: ${link.author}).`;
+				return ok(saved + (await sharingWarning(opened.root, opened.name)), opened.name);
 			});
 		},
 	};
@@ -295,6 +304,21 @@ export function createForgetTool(): ToolDefinition<typeof FORGET_PARAMETERS, Too
 			});
 		},
 	};
+}
+
+/**
+ * Said after saving only when git ignores the notes: the agent would
+ * otherwise tell the user the team has them. Saving already succeeded, so a
+ * failing git check adds nothing rather than turning it into an error.
+ */
+async function sharingWarning(root: string, connection: string): Promise<string> {
+	try {
+		const sharing = await knowledgeSharing(root, { connection });
+		if (sharing.state !== "ignored") return "";
+		return `\nNote saved locally; git ignores it (${sharing.rule}), so the team will not get it. ${SHARE_NOTES_HINT}`;
+	} catch {
+		return "";
+	}
 }
 
 async function agentAuthor(deps: HeydbDeps, cwd: string): Promise<string> {

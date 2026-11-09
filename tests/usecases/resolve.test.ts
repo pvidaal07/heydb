@@ -48,8 +48,8 @@ describe("resolveTable", () => {
 		assert.throws(() => resolveTable(twoDatabases, "customers"), {
 			message: [
 				'"customers" matches 2 tables; use the full name:',
-				"- crm.crm.customers",
-				"- shop.shop.customers",
+				"- crm.customers",
+				"- shop.customers",
 			].join("\n"),
 		});
 	});
@@ -64,7 +64,7 @@ describe("resolveTable", () => {
 			(error: Error) => {
 				const lines = error.message.split("\n");
 				assert.equal(lines[0], '"t" matches 13 tables; use the full name:');
-				assert.deepEqual(lines.slice(1, 3), ["- db00.db00.t", "- db01.db01.t"]);
+				assert.deepEqual(lines.slice(1, 3), ["- db00.t", "- db01.t"]);
 				assert.equal(lines.length, 12);
 				assert.equal(lines[11], "… and 3 more");
 				return true;
@@ -74,7 +74,7 @@ describe("resolveTable", () => {
 
 	test("suggests at most 5 similar names and never dumps every table (v1 bug #7)", () => {
 		const many = snapshot(Array.from({ length: 3000 }, (_, index) => table(`table_${index}`)).concat(ordersTable()));
-		assert.throws(() => resolveTable(many, "ordrs"), { message: 'no table matches "ordrs". Did you mean: shop.shop.orders?' });
+		assert.throws(() => resolveTable(many, "ordrs"), { message: 'no table matches "ordrs". Did you mean: shop.orders?' });
 		assert.throws(
 			() => resolveTable(many, "table_12".replace("12", "x12")),
 			(error: Error) => {
@@ -88,7 +88,7 @@ describe("resolveTable", () => {
 
 	test("says so plainly when nothing is similar", () => {
 		assert.throws(() => resolveTable(twoDatabases, "zzzzzz"), { message: 'no table matches "zzzzzz"' });
-		assert.throws(() => resolveTable(twoDatabases, "nope.orders"), { message: 'no table matches "nope.orders". Did you mean: shop.shop.orders?' });
+		assert.throws(() => resolveTable(twoDatabases, "nope.orders"), { message: 'no table matches "nope.orders". Did you mean: shop.orders?' });
 	});
 
 	test("rejects names that cannot be a table", () => {
@@ -111,7 +111,7 @@ describe("resolveColumn", () => {
 
 	test("lists the candidates of an ambiguous column", () => {
 		assert.throws(() => resolveColumn(twoDatabases, "customers.email"), {
-			message: ['"customers.email" matches 2 columns; use the full name:', "- crm.crm.customers.email", "- shop.shop.customers.email"].join(
+			message: ['"customers.email" matches 2 columns; use the full name:', "- crm.customers.email", "- shop.customers.email"].join(
 				"\n",
 			),
 		});
@@ -119,13 +119,13 @@ describe("resolveColumn", () => {
 
 	test("suggests columns of the table when only the column is wrong", () => {
 		assert.throws(() => resolveColumn(twoDatabases, "orders.totl"), {
-			message: 'no column matches "orders.totl". Did you mean: shop.shop.orders.total?',
+			message: 'no column matches "orders.totl". Did you mean: shop.orders.total?',
 		});
 	});
 
 	test("reports the table when the table part is wrong", () => {
 		assert.throws(() => resolveColumn(twoDatabases, "ordrs.total"), {
-			message: 'no column matches "ordrs.total". Did you mean: shop.shop.orders.total?',
+			message: 'no column matches "ordrs.total". Did you mean: shop.orders.total?',
 		});
 	});
 
@@ -148,6 +148,15 @@ describe("display names", () => {
 				],
 			},
 		],
+	});
+
+	test("errors name candidates and suggestions by display name, every level kept in PostgreSQL", () => {
+		assert.throws(() => resolveTable(postgres, "orders"), {
+			message: '"orders" matches 2 tables; use the full name:\n- app.public.orders\n- app.sales.orders',
+		});
+		assert.throws(() => resolveColumn(postgres, "sales.orders.totl"), {
+			message: 'no column matches "sales.orders.totl". Did you mean: app.public.orders.total, app.sales.orders.total?',
+		});
 	});
 
 	test("every table and column resolves from its display name", () => {
