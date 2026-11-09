@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { formatDatabaseName, formatName, parseName, parseSegments } from "../../lib/model/names.ts";
+import { displayName, displayNameOf, formatDatabaseName, formatName, parseName, parseSegments } from "../../lib/model/names.ts";
 
 describe("formatName", () => {
 	test("joins database, schema, table and column with dots", () => {
@@ -97,5 +97,28 @@ describe("parseSegments", () => {
 	test("rejects the same malformed input as parseName", () => {
 		assert.throws(() => parseSegments(""), /empty segment must be written as ""/);
 		assert.throws(() => parseSegments('"open'), /unterminated quote/);
+	});
+});
+
+describe("displayName", () => {
+	test("omits the schema when it repeats the database, as MySQL and MariaDB name things", () => {
+		assert.equal(displayName({ database: "shop", schema: "shop" }), "shop");
+		assert.equal(displayName({ database: "shop", schema: "shop", table: "orders" }), "shop.orders");
+		assert.equal(displayName({ database: "shop", schema: "shop", table: "orders", column: "total" }), "shop.orders.total");
+	});
+
+	test("keeps every level when the schema differs, as in PostgreSQL", () => {
+		assert.equal(displayName({ database: "app", schema: "public", table: "orders", column: "total" }), "app.public.orders.total");
+		assert.equal(displayName({ database: "app", schema: "public" }), "app.public");
+	});
+
+	test("quotes segments with the canonical rule", () => {
+		assert.equal(displayName({ database: "v1.old", schema: "v1.old", table: 'a"b' }), '"v1.old"."a""b"');
+	});
+
+	test("displayNameOf reads a canonical name and never changes what it names", () => {
+		assert.equal(displayNameOf("shop.shop.orders"), "shop.orders");
+		assert.equal(displayNameOf("app.public.orders"), "app.public.orders");
+		assert.throws(() => displayNameOf("orders"), /expected 2 to 4 segments/);
 	});
 });

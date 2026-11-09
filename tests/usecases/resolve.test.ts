@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { displayName, formatName } from "../../lib/model/names.ts";
 import type { Snapshot, Table } from "../../lib/model/snapshot.ts";
 import { resolveColumn, resolveTable } from "../../lib/usecases/resolve.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
@@ -131,5 +132,38 @@ describe("resolveColumn", () => {
 	test("works on a table with a column called __proto__", () => {
 		const odd = snapshot([ordersTable({ columns: [column("__proto__", 1)] })]);
 		assert.equal(resolveColumn(odd, "orders.__proto__").name, "shop.shop.orders.__proto__");
+	});
+});
+
+describe("display names", () => {
+	// What heydb prints must be something heydb accepts back, unchanged.
+	const postgres: Snapshot = snapshot([], {
+		engine: { kind: "postgresql", version: "16.4" },
+		databases: [
+			{
+				name: "app",
+				schemas: [
+					{ name: "public", tables: [ordersTable()], routines: [] },
+					{ name: "sales", tables: [ordersTable()], routines: [] },
+				],
+			},
+		],
+	});
+
+	test("every table and column resolves from its display name", () => {
+		for (const schema of [twoDatabases, postgres]) {
+			for (const database of schema.databases) {
+				for (const { name: schemaName, tables } of database.schemas) {
+					for (const table of tables) {
+						const ref = { database: database.name, schema: schemaName, table: table.name };
+						assert.equal(resolveTable(schema, displayName(ref)).name, formatName(ref));
+						for (const { name: columnName } of table.columns) {
+							const columnRef = { ...ref, column: columnName };
+							assert.equal(resolveColumn(schema, displayName(columnRef)).name, formatName(columnRef));
+						}
+					}
+				}
+			}
+		}
 	});
 });

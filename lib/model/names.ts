@@ -38,6 +38,32 @@ export function formatDatabaseName(database: string): string {
 	return formatSegment(database);
 }
 
+/**
+ * The name to show people and agents. In MySQL and MariaDB the schema repeats
+ * the database, and "shop.shop.orders.total" makes them read (and pay for) the
+ * same word twice, so it prints as "shop.orders.total", the way MySQL itself
+ * names it. When the schema differs (PostgreSQL) every level stays.
+ *
+ * Display only: snapshots, knowledge files and ids keep the canonical name.
+ * resolveTable and resolveColumn accept both, so whatever heydb prints can be
+ * typed back.
+ */
+export function displayName(ref: ObjectRef): string {
+	if (ref.schema !== ref.database) return formatName(ref);
+	if (ref.column !== undefined && ref.table === undefined) {
+		throw new Error(`column "${ref.column}" needs a table`);
+	}
+	const segments = [ref.database];
+	if (ref.table !== undefined) segments.push(ref.table);
+	if (ref.column !== undefined) segments.push(ref.column);
+	return segments.map(formatSegment).join(".");
+}
+
+/** displayName of a canonical name such as "shop.shop.orders". */
+export function displayNameOf(canonical: string): string {
+	return displayName(parseName(canonical));
+}
+
 function formatSegment(segment: string): string {
 	const needsQuotes = segment === "" || segment.includes(".") || segment.includes(QUOTE);
 	if (!needsQuotes) return segment;
