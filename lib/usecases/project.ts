@@ -1,4 +1,7 @@
-import { addConnection, pickConnection, setDefaultConnection } from "../config/operations.ts";
+import { existsSync } from "node:fs";
+import { relative } from "node:path";
+
+import { addConnection, pickConnection, removeConnection, setDefaultConnection } from "../config/operations.ts";
 import { loadConfig, saveConfig } from "../config/store.ts";
 import type { Config, ConnectionConfig } from "../config/types.ts";
 import { validateConnection } from "../config/validate.ts";
@@ -7,11 +10,13 @@ import { snapshotLookup } from "../knowledge/query.ts";
 import type { Annotation, Knowledge, Relationship } from "../knowledge/types.ts";
 import { formatName, parseName, parseSegments } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
-import { resolveSecret, suggestedReference } from "../secrets.ts";
+import { type SecretSource, referenceVariable, resolveSecret, secretSource, suggestedReference } from "../secrets.ts";
+import { removeEnvValue, setEnvValue } from "../store/envfile.ts";
 import { assertConnectionName } from "../store/guards.ts";
-import { loadKnowledge } from "../store/knowledge.ts";
+import { knowledgePath, loadKnowledge } from "../store/knowledge.ts";
 import { findProjectRoot } from "../store/project.ts";
-import { loadSnapshot } from "../store/snapshots.ts";
+import { loadSnapshot, snapshotPath } from "../store/snapshots.ts";
+import { ensureEnvIgnored } from "./init.ts";
 import { forgetAnnotation, forgetRelationship } from "./knowledge.ts";
 import { resolveColumn, resolveTable } from "./resolve.ts";
 
@@ -50,13 +55,19 @@ export interface OpenedSnapshot extends OpenedConnection {
 
 /** Finds the project above `cwd` and picks a connection with pickConnection's rules. */
 export function openConnection(cwd: string, name?: string): OpenedConnection {
+	const { root, config } = openProject(cwd);
+	return { root, config, ...pickConnection(config, name) };
+}
+
+/** The project above `cwd` and its config, which must have at least one connection. */
+function openProject(cwd: string): { root: string; config: Config } {
 	const root = findProjectRoot(cwd);
 	if (root === null) throw new ProjectError("not_initialized", "no heydb project here (no .heydb/ in this folder or above)");
 	const config = loadConfig(root);
 	if (Object.keys(config.connections).length === 0) {
 		throw new ProjectError("no_connections", "no connections are configured in this heydb project");
 	}
-	return { root, config, ...pickConnection(config, name) };
+	return { root, config };
 }
 
 /** Like openConnection, plus the stored snapshot and knowledge. Never connects to the server. */
@@ -146,6 +157,76 @@ export function saveNewConnection(root: string, name: string, entry: ConnectionC
 	}
 	saveConfig(root, config);
 	return { isDefault: config.defaultConnection === name };
+}
+
+export interface ConnectionSummary {
+	readonly name: string;
+	readonly connection: ConnectionConfig;
+	readonly isDefault: boolean;
+	/** Where its password is set, never the value; "unreadable" when .heydb/.env cannot be parsed. */
+	readonly password: SecretSource | "missing" | "unreadable";
+	/** Whether a snapshot is stored for it. */
+	readonly synced: boolean;
+}
+
+/** Every connection of the project above `cwd`, sorted by name, with what a person needs to pick one. */
+export function listConnections(
+	cwd: string,
+	env: Readonly<Record<string, string | undefined>>,
+): { root: string; connections: ConnectionSummary[] } {
+	const { root, config } = openProject(cwd);
+	const connections = Object.keys(config.connections)
+		.sort()
+		.map((name) => {
+			const connection = config.connections[name] as ConnectionConfig;
+			let password: ConnectionSummary["password"];
+			try {
+				password = secretSource(connection.password, { connection: name, env, projectRoot: root }) ?? "missing";
+			} catch {
+				// A broken .heydb/.env must not hide the list; the next sync explains the line at fault.
+				password = "unreadable";
+			}
+			const synced = existsSync(snapshotPath(root, name));
+			return { name, connection, isDefault: config.defaultConnection === name, password, synced };
+		});
+	return { root, connections };
+}
+
+/** Makes `name` the connection commands use when they are given none. */
+export function chooseDefaultConnection(root: string, name: string): void {
+	saveConfig(root, setDefaultConnection(loadConfig(root), name));
+}
+
+/**
+ * Removes a connection from config.json and its password from .heydb/.env
+ * (unless another connection uses the same variable). Its snapshot and notes
+ * stay on disk: notes are written by people and cannot be recaptured, so
+ * deleting them is left to a person. Returns the paths kept, relative to the
+ * project root, so the caller can say where they are.
+ */
+export function forgetConnection(root: string, name: string): { passwordRemoved: boolean; kept: string[] } {
+	const config = loadConfig(root);
+	const next = removeConnection(config, name);
+	const reference = (config.connections[name] as ConnectionConfig).password;
+	saveConfig(root, next);
+
+	const shared = Object.values(next.connections).some((entry) => entry.password === reference);
+	const passwordRemoved = !shared && removeEnvValue(root, referenceVariable(reference, name));
+	const kept = [snapshotPath(root, name), knowledgePath(root, name)]
+		.filter((path) => existsSync(path))
+		.map((path) => relative(root, path).replaceAll("\\", "/"));
+	return { passwordRemoved, kept };
+}
+
+/**
+ * Stores a typed password in .heydb/.env under the variable `reference` names,
+ * after making sure git ignores that file. Returns the variable name.
+ */
+export function savePassword(root: string, reference: string, value: string): string {
+	const variable = referenceVariable(reference);
+	ensureEnvIgnored(root);
+	setEnvValue(root, variable, value);
+	return variable;
 }
 
 export type Forgotten =

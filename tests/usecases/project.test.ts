@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -15,12 +15,16 @@ import {
 	ProjectError,
 	buildConnection,
 	captureLive,
+	chooseDefaultConnection,
 	forgetById,
+	forgetConnection,
+	listConnections,
 	openConnection,
 	openSnapshot,
 	projectConnections,
 	resolveTarget,
 	saveNewConnection,
+	savePassword,
 } from "../../lib/usecases/project.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
@@ -293,5 +297,95 @@ describe("forgetById", () => {
 	test("says no entry has an unknown id", () => {
 		const root = project();
 		assert.throws(() => forgetById(root, "local", "nope"), { message: 'no annotation or relationship has id "nope"' });
+	});
+});
+
+describe("listConnections", () => {
+	const prod: ConnectionConfig = { ...local, host: "db.internal", password: "env:HEYDB_PROD_PASSWORD" };
+
+	test("describes every connection, sorted: default, where its password is found and whether it was synced", () => {
+		const root = project({ prod, local, qa: { ...local, password: "env:HEYDB_QA_PASSWORD" } }, "prod");
+		writeFileSync(join(root, ".heydb", ".env"), "HEYDB_LOCAL_PASSWORD=s3cret\n");
+		saveSnapshot(root, "prod", snapshot([ordersTable()]));
+
+		const listed = listConnections(join(root, ".heydb"), { HEYDB_PROD_PASSWORD: "x" });
+		assert.equal(listed.root, root);
+		assert.deepEqual(listed.connections, [
+			{ name: "local", connection: local, isDefault: false, password: "env-file", synced: false },
+			{ name: "prod", connection: prod, isDefault: true, password: "environment", synced: true },
+			{ name: "qa", connection: { ...local, password: "env:HEYDB_QA_PASSWORD" }, isDefault: false, password: "missing", synced: false },
+		]);
+		assert.doesNotMatch(JSON.stringify(listed), /s3cret/);
+	});
+
+	test("says the .env file is unreadable instead of failing the whole list", () => {
+		const root = project();
+		writeFileSync(join(root, ".heydb", ".env"), "not a pair s3cret\n");
+		assert.equal(listConnections(root, {}).connections[0]?.password, "unreadable");
+	});
+
+	test("outside a project or without connections, says so like openConnection", () => {
+		assert.equal(errorCode(() => listConnections(tempDir(), {})).code, "not_initialized");
+		assert.equal(errorCode(() => listConnections(project({}), {})).code, "no_connections");
+	});
+});
+
+describe("chooseDefaultConnection", () => {
+	test("makes an existing connection the default and refuses an unknown one", () => {
+		const root = project({ local, prod: { ...local, password: "env:HEYDB_PROD_PASSWORD" } }, "local");
+		chooseDefaultConnection(root, "prod");
+		assert.equal(loadConfig(root).defaultConnection, "prod");
+		assert.throws(() => chooseDefaultConnection(root, "qa"), { message: 'unknown connection "qa"; configured: local, prod' });
+		assert.equal(loadConfig(root).defaultConnection, "prod");
+	});
+});
+
+describe("forgetConnection", () => {
+	test("removes the entry and its password line, and keeps its snapshot and notes on disk", () => {
+		const prod = { ...local, password: "env:HEYDB_PROD_PASSWORD" };
+		const root = project({ local, prod }, "prod");
+		writeFileSync(join(root, ".heydb", ".env"), "HEYDB_LOCAL_PASSWORD=a\nHEYDB_PROD_PASSWORD=b\n");
+		saveSnapshot(root, "prod", snapshot([ordersTable()]));
+		annotate(root, "prod", { target: "shop.shop.orders", text: "One per checkout.", author: "ana" }, fixedClock());
+
+		assert.deepEqual(forgetConnection(root, "prod"), {
+			passwordRemoved: true,
+			kept: [".heydb/snapshots/prod.json", ".heydb/knowledge/prod.json"],
+		});
+		assert.deepEqual(loadConfig(root), { formatVersion: 1, defaultConnection: null, connections: { local } });
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
+		assert.ok(existsSync(join(root, ".heydb", "snapshots", "prod.json")));
+		assert.ok(existsSync(join(root, ".heydb", "knowledge", "prod.json")));
+	});
+
+	test("keeps a password line another connection still uses, and lists only files that exist", () => {
+		const root = project({ local, copy: local });
+		writeFileSync(join(root, ".heydb", ".env"), "HEYDB_LOCAL_PASSWORD=a\n");
+		assert.deepEqual(forgetConnection(root, "copy"), { passwordRemoved: false, kept: [] });
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=a\n");
+	});
+
+	test("refuses an unknown connection and changes nothing", () => {
+		const root = project();
+		const before = readFileSync(join(root, ".heydb", "config.json"), "utf8");
+		assert.throws(() => forgetConnection(root, "qa"), { message: 'unknown connection "qa"; configured: local' });
+		assert.equal(readFileSync(join(root, ".heydb", "config.json"), "utf8"), before);
+	});
+});
+
+describe("savePassword", () => {
+	test("stores the value for the reference in .heydb/.env and makes sure git ignores it", () => {
+		const root = project();
+		writeFileSync(join(root, ".heydb", ".gitignore"), "custom\n");
+		assert.equal(savePassword(root, "env:HEYDB_LOCAL_PASSWORD", "s3 cret"), "HEYDB_LOCAL_PASSWORD");
+		assert.match(readFileSync(join(root, ".heydb", ".gitignore"), "utf8"), /^\.env$/m);
+		assert.equal(readFileSync(join(root, ".heydb", ".env"), "utf8"), "HEYDB_LOCAL_PASSWORD=s3 cret\n");
+		if (process.platform !== "win32") assert.equal(statSync(join(root, ".heydb", ".env")).mode & 0o777, 0o600);
+	});
+
+	test("refuses anything that is not an env:HEYDB_* reference", () => {
+		const root = project();
+		assert.throws(() => savePassword(root, "env:AWS_SECRET_ACCESS_KEY", "x"), { message: /only HEYDB_\* variables/ });
+		assert.equal(existsSync(join(root, ".heydb", ".env")), false);
 	});
 });
