@@ -193,7 +193,7 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 			"Save a note on the project, a database, table or column in .heydb/knowledge; the team gets it when the project commits .heydb/.",
 		promptSnippet: "Record what a database, table or column means, for the whole team",
 		promptGuidelines: [
-			"When you learn what a table or column means (valid values, units, legacy quirks), save it with heydb_annotate: one or two factual sentences, never invent or guess.",
+			"When you learn what a table or column means (valid values, units, legacy quirks), or the user confirms what a table or column means or which table holds a concept, save it with heydb_annotate in the words people search with: one or two factual sentences, never invent or guess.",
 			"Before heydb_annotate, read the existing notes with heydb_table; fix a wrong note with heydb_edit_note instead of adding a contradicting one.",
 			'End a heydb_annotate note with its source: "(code: src/Models/Order.php)" when code shows it, "(told by the user)" when the user said it. Save an inference only after the user confirms it.',
 			'For a fact about the whole project rather than one database (one database per client, which connection is central), use heydb_annotate with scope: "project" and no target.',

@@ -23,7 +23,8 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // cab, 2019). Field weights, strongest first:
 //
 //   table name                                             3
-//   table comment, team notes on the table                 3
+//   table comment                                          3
+//   team notes on the table (not tempered by length)       3
 //   inferred meaning: comments of the columns that
 //   reference the table (incomingReferences)               2
 //   column comments and column notes                       1
@@ -54,6 +55,14 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // phrase, in order and without stopwords in between, adds the sum of its
 // IDFs (half of it in a column comment).
 //
+// Team notes are how search learns: nobody knows cst is the customer master
+// until someone notes it, and from then on "clientes" must find cst first,
+// ahead of thirty tables with a cod_cst "Cliente" column and of a table
+// called clientes_tmp. So a note's length does not temper it (a long,
+// careful note is no weaker than a short one), and each query word a table
+// note matches adds its IDF on top of BM25, outside saturation: a noted
+// table outranks the same word in another table's name or columns.
+//
 // Results are tables (and views, databases, documented relationships), never
 // loose columns: a column that matches is listed under its table, so 40
 // matching columns of one table cost one line, not 40. Each result says what
@@ -78,7 +87,18 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // One database per company repeats every table: copies with the same name and
 // the same columns (names and types) in other databases are one result, the
 // first in snapshot order, with `alsoIn` naming the rest; `total` counts those
-// results. Query words that match nothing anywhere are in `unmatched`, so the
+// results.
+//
+// Within one database, legacy systems keep copies of a table under any name
+// (fac_cab_2019, a backup, a temporary one): never told by their names,
+// since every company names them its own way, but by their columns (see
+// structuralCopies). A copy whose match is only what it shares with its
+// original (the words of the original's name, its comment, its columns with
+// the same comments) is folded into the original's result, in `copies`, and
+// not counted. A copy matching something of its own is a result like any
+// other: a word of its name the original's lacks, exact or as an
+// abbreviation ("rectificación de asistencia" finds asistencia_rec), its own
+// comment or notes, columns the original lacks, or references to it. Query words that match nothing anywhere are in `unmatched`, so the
 // agent can try another word instead of the same search again.
 
 export type SearchObject = "database" | "table" | "view" | "relationship";
@@ -120,6 +140,8 @@ export interface SearchResult {
 	readonly relationship?: { readonly from: RelationshipSide; readonly to: RelationshipSide };
 	/** Other databases with an identical table (same name, same columns) that matched too, as displayed; absent when none. */
 	readonly alsoIn?: readonly string[];
+	/** Copies of this table in its own database (same columns) that matched only what they share with it, by table name; absent when none. */
+	readonly copies?: readonly string[];
 }
 
 export interface SearchResults {
@@ -150,12 +172,13 @@ const MAX_COLUMNS = 5;
 const MAX_INFERRED_TABLES = 10;
 const MAX_DATABASES_LISTED = 10;
 
-type Field = "name" | "stated" | "inferred" | "columnText" | "columnName" | "definition" | "relationship";
+type Field = "name" | "stated" | "note" | "inferred" | "columnText" | "columnName" | "definition" | "relationship";
 
 /** Weight of a match in each field, and how much its length tempers it (BM25 b). */
 const FIELDS: Readonly<Record<Field, { readonly weight: number; readonly b: number }>> = {
 	name: { weight: 3, b: 0.5 },
 	stated: { weight: 3, b: 0.5 },
+	note: { weight: 3, b: 0 },
 	inferred: { weight: 2, b: 0 },
 	columnText: { weight: 1, b: 0.75 },
 	columnName: { weight: 0.6, b: 0.75 },
@@ -171,6 +194,11 @@ const MIN_ABBREVIATION = 3;
 const K1 = 1.2;
 const EXACT_NAME_BONUS = 1000;
 const PHRASE_BONUS = { stated: 1, column: 0.5 } as const;
+/** Per query word a team note on the table matches, this share of the word's IDF is added outside saturation. */
+const NOTE_BONUS = 1;
+/** A table is a copy of another when it has at least this many columns and this share of them is in the other. */
+const COPY_MIN_COLUMNS = 3;
+const COPY_SHARE = 0.9;
 
 /** Words a question is wrapped in that say nothing about the schema, Spanish and English. */
 const STOPWORDS: ReadonlySet<string> = new Set([
@@ -260,11 +288,14 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 				docs.push(doc);
 			}
 
+			const originals = included ? structuralCopies(schema.tables) : new Map<string, Table>();
 			for (const table of schema.tables) {
 				const tableName = formatName({ database: database.name, schema: schema.name, table: table.name });
 				if (included) {
-					const doc = collectTable(table, tableName, notes, match, docs.length);
+					const original = originals.get(table.name);
+					const doc = collectTable(table, tableName, notes, match, docs.length, original);
 					doc.copy = { key: copyKey(table, database.name, schema.name), shown: displayName({ database: database.name, schema: schema.name }) };
+					if (original !== undefined) doc.copyOf = formatName({ database: database.name, schema: schema.name, table: original.name });
 					docs.push(doc);
 					byTarget.set(tableName, doc);
 				}
@@ -305,6 +336,8 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 		if (shown.length === 0) continue;
 		doc.inferred = true;
 		doc.inferredFrom = from;
+		// Columns pointing to a copy by its own name are about the copy alone.
+		doc.own = true;
 		addEvidence(doc, { field: "inferred", label: `referenced as ${shown.join(", ")} (inferred)`, snippet: "", tf, length: 0 });
 		if (phrase) doc.phrase = Math.max(doc.phrase, PHRASE_BONUS.stated);
 	}
@@ -502,6 +535,12 @@ interface Doc {
 	relationship?: SearchResult["relationship"];
 	/** Tables only: what makes copies identical, and the database to show for this one. */
 	copy?: { readonly key: string; readonly shown: string };
+	/** The table this one is a structural copy of, in the same database. */
+	copyOf?: string;
+	/** True when a copy matched something its original lacks: then it is a result of its own. */
+	own: boolean;
+	/** Per query word, true when a team note on the table matched it. */
+	readonly noted: boolean[];
 }
 
 interface Ranked {
@@ -516,20 +555,39 @@ type Notes = ReadonlyMap<string, readonly Annotation[]>;
 
 function newDoc(target: string, object: SearchObject, order: number): Doc {
 	const lengths = Object.fromEntries(FIELD_NAMES.map((field) => [field, 0])) as Record<Field, number>;
-	return { target, object, order, evidence: [], columns: [], lengths, tf: {}, matched: [], exactName: false, phrase: 0, inferred: false, about: "" };
+	return { target, object, order, evidence: [], columns: [], lengths, tf: {}, matched: [], noted: [], exactName: false, phrase: 0, inferred: false, about: "", own: false };
 }
 
-function collectTable(table: Table, tableName: string, notes: Notes, match: Matcher, order: number): Doc {
+function collectTable(table: Table, tableName: string, notes: Notes, match: Matcher, order: number, original?: Table): Doc {
 	const doc = newDoc(tableName, table.kind, order);
 	const own = match.name(table.name);
 	addName(doc, [own]);
 	doc.exactName = match.isExactName(table.name);
 	addText(doc, "stated", "table comment", table.comment, match.text(table.comment), SNIPPET_LENGTH);
 	const tableNotes = notes.get(tableName) ?? [];
-	for (const note of tableNotes) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
+	for (const note of tableNotes) {
+		const matched = match.text(note.text);
+		addText(doc, "note", "note", note.text, matched, SNIPPET_LENGTH);
+		matched.tf?.forEach((value, index) => {
+			if (value > 0) doc.noted[index] = true;
+		});
+	}
 	doc.about = collapse(table.comment) || bestNote(tableNotes, match);
 	const definition = table.viewDefinition ?? "";
 	addText(doc, "definition", "definition", definition, match.text(definition), SNIPPET_LENGTH);
+
+	// What a copy shares with its original: the words of the original's name, its comment, its columns.
+	let shared: { readonly words: ReadonlySet<string>; readonly columns: ReadonlyMap<string, string> } | null = null;
+	if (original !== undefined) {
+		shared = {
+			words: new Set(nameWords(original.name).map(foldWord)),
+			columns: new Map(original.columns.map((column) => [`${column.name}\u0001${column.type}`, column.comment])),
+		};
+		doc.own =
+			own.hits.some((hit) => !shared?.words.has(hit)) ||
+			(table.comment !== original.comment && match.text(table.comment).tf !== null) ||
+			doc.noted.some(Boolean);
+	}
 
 	for (const column of table.columns) {
 		const matchedName = match.name(column.name);
@@ -537,12 +595,14 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 		// num_fac in fac_cab: an abbreviation the table's own name already gave says nothing new.
 		const name = matchedName.abbreviated && matchedName.hits.every((hit) => own.hits.includes(hit)) ? { tf: null } : matchedName;
 		let text: { tf: readonly number[]; raw: string; first: string; weight: number } | null = null;
+		let notedColumn = false;
 		const columnNotes = (notes.get(columnKey(tableName, column.name)) ?? []).map((note) => note.text);
-		for (const raw of [column.comment, ...columnNotes]) {
+		for (const [index, raw] of [column.comment, ...columnNotes].entries()) {
 			if (raw === "") continue;
 			const matched = match.text(raw);
 			doc.lengths.columnText += matched.length;
 			if (matched.tf === null) continue;
+			notedColumn ||= index > 0;
 			if (matched.phrase) doc.phrase = Math.max(doc.phrase, PHRASE_BONUS.column);
 			accumulate(doc, "columnText", matched.tf);
 			const weight = matched.tf.reduce((sum, value) => sum + value, 0);
@@ -551,6 +611,7 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 		}
 		if (name.tf !== null) accumulate(doc, "columnName", name.tf);
 		if (name.tf === null && text === null) continue;
+		if (shared !== null && (notedColumn || shared.columns.get(`${column.name}\u0001${column.type}`) !== column.comment)) doc.own = true;
 		doc.columns.push({
 			name: column.name,
 			snippet: text === null ? "" : snippetAround(collapse(text.raw), text.first, COLUMN_SNIPPET_LENGTH),
@@ -636,7 +697,8 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 	};
 
 	const idfSum = idf.reduce((total, value) => total + value, 0);
-	const scored: { doc: Doc; score: number; base: number; exactName: boolean; result: SearchResult }[] = [];
+	type Scored = { doc: Doc; score: number; base: number; exactName: boolean; result: SearchResult };
+	const scored: Scored[] = [];
 	for (const doc of docs) {
 		if (!doc.matched.some(Boolean)) continue;
 		let sum = 0;
@@ -648,16 +710,35 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 			matched += 1;
 			sum += ((idf[index] as number) * tf * (K1 + 1)) / (tf + K1);
 		}
-		const base = sum * (matched / count) ** 2 + doc.phrase * idfSum;
+		// What the team wrote down counts on top: a noted table outranks names and columns that say the same.
+		const noted = doc.noted.reduce((total, value, index) => total + (value ? NOTE_BONUS * (idf[index] as number) : 0), 0);
+		const base = sum * (matched / count) ** 2 + doc.phrase * idfSum + noted;
 		const score = base + (doc.exactName ? EXACT_NAME_BONUS : 0);
 		scored.push({ doc, score, base, exactName: doc.exactName, result: finish(doc, idf, (field) => norm(doc, field)) });
 	}
 
+	// Copies in the same database that matched only what their original has go under its line.
+	const byTarget = new Map(scored.map((item) => [item.doc.target, item]));
+	const folded = new Map<Scored, Doc[]>();
+	const kept: Scored[] = [];
+	for (const item of scored) {
+		const original = item.doc.copyOf === undefined || item.doc.own ? undefined : byTarget.get(item.doc.copyOf);
+		if (original === undefined) {
+			kept.push(item);
+			continue;
+		}
+		folded.set(original, [...(folded.get(original) ?? []), item.doc]);
+	}
+	for (const [item, docs] of folded) {
+		const copies = docs.sort((a, b) => a.order - b.order).map((doc) => parseName(doc.target).table as string);
+		item.result = { ...item.result, copies };
+	}
+
 	// Identical copies: the first in snapshot order is shown, ranked by the best of them.
-	const groups = new Map<string, { doc: Doc; score: number; base: number; exactName: boolean; result: SearchResult; others: Doc[] }>();
+	const groups = new Map<string, Scored & { others: Doc[] }>();
 	const ranked: Ranked[] = [];
 	const single: Ranked[] = [];
-	for (const item of scored) {
+	for (const item of kept) {
 		if (item.doc.copy === undefined) {
 			single.push(item);
 			continue;
@@ -733,6 +814,76 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 function copyKey(table: Table, database: string, schema: string): string {
 	const columns = table.columns.map((column) => `${column.name}\u0001${column.type}`).join("\u0002");
 	return [table.kind, table.name, schema === database ? "" : schema, columns].join("\u0000");
+}
+
+/** Per list of tables, its structural copies: computed once per snapshot loaded. */
+const copiesCache = new WeakMap<readonly Table[], ReadonlyMap<string, Table>>();
+
+/**
+ * The copies among the tables of one database, by name, each with its
+ * original. Two tables are copies when the one with fewer columns has
+ * COPY_MIN_COLUMNS or more, all of them (name and type) are in the other, and
+ * they are at least COPY_SHARE of the other's: a yearly copy, a backup with a
+ * column dropped or added. Two tables that differ in a column on each side
+ * (alb_lin with num_alb, ped_lin with num_ped) are different tables. The
+ * original is the one with the shortest name, then the most rows; a table
+ * identical to an earlier one belongs to it before any near copy, and a copy
+ * of a copy belongs to the first original. Names are never read: every
+ * company names its yearly, backup and temporary tables its own way.
+ */
+function structuralCopies(tables: readonly Table[]): ReadonlyMap<string, Table> {
+	const cached = copiesCache.get(tables);
+	if (cached !== undefined) return cached;
+	const eligible = tables
+		.filter((table) => table.kind === "table" && table.columns.length >= COPY_MIN_COLUMNS)
+		.sort((a, b) => a.name.length - b.name.length || (b.rowEstimate ?? 0) - (a.rowEstimate ?? 0) || compareText(a.name, b.name));
+	const keys = eligible.map((table) => [...new Set(table.columns.map((column) => `${column.name}\u0001${column.type}`))]);
+	// Column → the tables that have it, in the order above: who can be an original.
+	const postings = new Map<string, number[]>();
+	for (const [index, own] of keys.entries()) {
+		for (const key of own) {
+			const list = postings.get(key);
+			if (list === undefined) postings.set(key, [index]);
+			else list.push(index);
+		}
+	}
+	// Rarest columns first: a table that is not a copy usually fails on the first one checked.
+	const rarity = (key: string) => postings.get(key)?.length ?? 0;
+	for (const own of keys) own.sort((a, b) => rarity(a) - rarity(b));
+	const sets = keys.map((own) => new Set(own));
+	const contains = (outer: number, inner: number) => (keys[inner] as string[]).every((key) => (sets[outer] as Set<string>).has(key));
+
+	const root = new Int32Array(eligible.length).fill(-1);
+	const seen = new Int32Array(eligible.length).fill(-1);
+	const copies = new Map<string, Table>();
+	for (const [index, own] of keys.entries()) {
+		// The other table misses at most this many of these columns, so it has one of the first misses + 1.
+		const misses = own.length - Math.ceil(COPY_SHARE * own.length - 1e-9);
+		let found = -1;
+		let exact = false;
+		for (const key of own.slice(0, misses + 1)) {
+			for (const other of postings.get(key) ?? []) {
+				if (other >= index) break;
+				if (seen[other] === index) continue;
+				seen[other] = index;
+				const size = (keys[other] as string[]).length;
+				const [small, large] = size <= own.length ? [other, index] : [index, other];
+				const smaller = Math.min(size, own.length);
+				if (smaller < COPY_SHARE * Math.max(size, own.length) || !contains(large, small)) continue;
+				// Identical beats near, then the first in order.
+				const identical = size === own.length;
+				if (found === -1 || (identical && !exact) || (identical === exact && other < found)) {
+					found = other;
+					exact = identical;
+				}
+			}
+		}
+		if (found === -1) continue;
+		root[index] = root[found] === -1 ? found : (root[found] as number);
+		copies.set((eligible[index] as Table).name, eligible[root[index] as number] as Table);
+	}
+	copiesCache.set(tables, copies);
+	return copies;
 }
 
 /** The tables a column may point to: its foreign key, a documented relationship, or else its name pattern. */

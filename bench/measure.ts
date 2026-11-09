@@ -16,13 +16,26 @@
 // list of names and comments, which no notes, references or search help with.
 //
 // Tokens are estimated as characters / 4: good enough to compare, not a bill.
+//
+// The learning loop (measureLearning) answers the questions, notes on each
+// table that answered one what the question asked, as an agent does once the
+// user confirms which table holds a concept, and answers them again.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { defaultDeps } from "../extensions/deps.ts";
 import { registerHeydbTools } from "../extensions/tools.ts";
+import { saveConfig } from "../lib/config/store.ts";
 import { displayNameOf } from "../lib/model/names.ts";
 import type { Snapshot, Table } from "../lib/model/snapshot.ts";
 import { searchSchema } from "../lib/search.ts";
+import { knowledgeConnections, loadKnowledge, saveKnowledge } from "../lib/store/knowledge.ts";
+import { saveSnapshot } from "../lib/store/snapshots.ts";
+import { initProject } from "../lib/usecases/init.ts";
+import { annotate } from "../lib/usecases/knowledge.ts";
 import { openSnapshot } from "../lib/usecases/project.ts";
 
 export interface Question {
@@ -213,20 +226,80 @@ export function columnsDump(tables: readonly Located[], withSchema: boolean): st
 	return [header, ...rows].join("\n");
 }
 
+export interface LearningReport {
+	/** The questions answered on a copy of the project, as it was. */
+	readonly before: Report;
+	/** The same questions after the notes. */
+	readonly after: Report;
+	/** Notes added: one per table read for each question. */
+	readonly notes: number;
+}
+
+/**
+ * Runs the questions on a copy of the project in a temporary folder (config
+ * of the connection, snapshot, every knowledge file), notes on each table
+ * read for a question the question's `ask`, and runs them again. The project
+ * measured is only read.
+ */
+export async function measureLearning(cwd: string, questions: readonly Question[], connection?: string): Promise<LearningReport> {
+	const opened = openSnapshot(cwd, connection);
+	const root = mkdtempSync(join(tmpdir(), "heydb-bench-learn-"));
+	try {
+		initProject(root);
+		saveConfig(root, { formatVersion: 1, defaultConnection: opened.name, connections: { [opened.name]: opened.connection } });
+		saveSnapshot(root, opened.name, opened.snapshot);
+		for (const name of knowledgeConnections(opened.root)) saveKnowledge(root, name, loadKnowledge(opened.root, name));
+		const before = await measure(root, questions, opened.name);
+		let notes = 0;
+		for (const [index, question] of questions.entries()) {
+			const read = before.questions[index]?.steps.filter((step) => step.tool === "heydb_table") ?? [];
+			for (const step of read) {
+				annotate(root, opened.name, { target: step.args, text: question.ask, author: "bench" });
+				notes += 1;
+			}
+		}
+		const after = await measure(root, questions, opened.name);
+		return { before, after, notes };
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
 export const tokens = (chars: number): number => Math.round(chars / 4);
 
 const format = (chars: number): string => tokens(chars).toLocaleString("en-US");
 
-export function renderReport(report: Report): string {
+interface Summary {
+	readonly ranks: readonly (number | null)[];
+	readonly hits: (limit: number) => number;
+	readonly mrr: number;
+	readonly heydbTotal: number;
+	readonly guidedTotal: number;
+	readonly tableSteps: readonly Step[];
+	readonly searchSteps: readonly Step[];
+	readonly overviews: number;
+}
+
+function summarize(report: Report): Summary {
 	const questions = report.questions;
 	const ranks = questions.flatMap((question) => question.firstRanks);
-	const hits = (limit: number) => ranks.filter((rank) => rank !== null && rank <= limit).length;
-	const mrr = ranks.reduce<number>((sum, rank) => sum + (rank === null ? 0 : 1 / rank), 0) / Math.max(ranks.length, 1);
-	const heydbTotal = questions.reduce((sum, question) => sum + question.chars, 0);
-	const guidedTotal = questions.reduce((sum, question) => sum + question.guidedChars, 0);
-	const tableSteps = questions.flatMap((question) => question.steps.filter((step) => step.tool === "heydb_table"));
-	const searchSteps = questions.flatMap((question) => question.steps.filter((step) => step.tool === "heydb_search"));
-	const average = (steps: readonly Step[]) => steps.reduce((sum, step) => sum + step.chars, 0) / Math.max(steps.length, 1);
+	return {
+		ranks,
+		hits: (limit) => ranks.filter((rank) => rank !== null && rank <= limit).length,
+		mrr: ranks.reduce<number>((sum, rank) => sum + (rank === null ? 0 : 1 / rank), 0) / Math.max(ranks.length, 1),
+		heydbTotal: questions.reduce((sum, question) => sum + question.chars, 0),
+		guidedTotal: questions.reduce((sum, question) => sum + question.guidedChars, 0),
+		tableSteps: questions.flatMap((question) => question.steps.filter((step) => step.tool === "heydb_table")),
+		searchSteps: questions.flatMap((question) => question.steps.filter((step) => step.tool === "heydb_search")),
+		overviews: questions.filter((question) => !question.found).length,
+	};
+}
+
+const average = (steps: readonly Step[]) => steps.reduce((sum, step) => sum + step.chars, 0) / Math.max(steps.length, 1);
+
+export function renderReport(report: Report): string {
+	const questions = report.questions;
+	const { ranks, hits, mrr, heydbTotal, guidedTotal, tableSteps, searchSteps, overviews } = summarize(report);
 	const lines = [
 		`# heydb token benchmark — ${report.connection}`,
 		"",
@@ -255,7 +328,40 @@ export function renderReport(report: Report): string {
 		`| fixed tool text, every turn | ≈${format(report.fixedChars)} tokens |`,
 		`| first search: expected table in top 1 / top 5 / anywhere | ${hits(1)} / ${hits(5)} / ${hits(20)} of ${ranks.length} |`,
 		`| first search: mean reciprocal rank | ${mrr.toFixed(2)} |`,
-		`| questions that needed the overview | ${questions.filter((question) => !question.found).length} of ${questions.length} |`,
+		`| questions that needed the overview | ${overviews} of ${questions.length} |`,
+	];
+	return lines.join("\n");
+}
+
+export function renderLearning({ before, after, notes }: LearningReport): string {
+	const [was, now] = [summarize(before), summarize(after)];
+	const total = before.questions.length;
+	const row = (measure: string, value: (summary: Summary) => string) => `| ${measure} | ${value(was)} | ${value(now)} |`;
+	const lines = [
+		`# heydb learning loop — ${before.connection}`,
+		"",
+		`${before.databases} databases · ${before.tables.toLocaleString("en-US")} tables. After the first pass, ${notes} ${notes === 1 ? "note" : "notes"}: on each table read for a question, the question as asked. Tokens ≈ characters / 4.`,
+		"",
+		"## Per question",
+		"",
+		"| question | first-search rank, before | after | heydb ≈tokens, before | after |",
+		"|---|---|---|---|---|",
+		...before.questions.map((question, index) => {
+			const later = after.questions[index] as QuestionResult;
+			const rank = (result: QuestionResult) => `${result.firstRanks.map((value) => value ?? "—").join(", ")}${result.found ? "" : " (overview)"}`;
+			return `| ${question.id} | ${rank(question)} | ${rank(later)} | ${format(question.chars)} | ${format(later.chars)} |`;
+		}),
+		"",
+		"## Summary",
+		"",
+		"| measure | before notes | after notes |",
+		"|---|---|---|",
+		row("heydb, all questions", (summary) => `≈${format(summary.heydbTotal)} tokens`),
+		row("heydb_search, average", (summary) => `≈${format(average(summary.searchSteps))} tokens`),
+		row("heydb_table, average", (summary) => `≈${format(average(summary.tableSteps))} tokens`),
+		row("first search: expected table in top 1 / top 5 / anywhere", (summary) => `${summary.hits(1)} / ${summary.hits(5)} / ${summary.hits(20)} of ${summary.ranks.length}`),
+		row("first search: mean reciprocal rank", (summary) => summary.mrr.toFixed(2)),
+		row("questions that needed the overview", (summary) => `${summary.overviews} of ${total}`),
 	];
 	return lines.join("\n");
 }

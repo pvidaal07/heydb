@@ -274,6 +274,8 @@ const MODULES: readonly Module[] = [
 ];
 
 const FILLER_PREFIXES = ["tmp", "aux", "log", "cfg", "bak", "int"] as const;
+/** Fillers left by a CREATE TABLE … LIKE of their module table: same columns, no comment. The rest have columns of their own. */
+const COPY_PREFIXES: ReadonlySet<string> = new Set(["tmp", "aux", "bak"]);
 
 const AUDIT_COLUMNS: readonly ColumnSpec[] = [
 	["usu_alt", "varchar(20)"],
@@ -315,9 +317,13 @@ function moduleTable(module: Module): Table {
 	return table(module.table, module.comment ?? "", module.rows, specs);
 }
 
+// Each module gets fillers of every kind in turn: tmp_cli_0, tmp_cli_dir_1, …,
+// then aux_cli_24, and so on.
 function fillerTable(index: number): Table {
-	const prefix = FILLER_PREFIXES[index % FILLER_PREFIXES.length]!;
-	const base = MODULES[index % MODULES.length]!.table;
+	const module = MODULES[index % MODULES.length]!;
+	const prefix = FILLER_PREFIXES[Math.floor(index / MODULES.length) % FILLER_PREFIXES.length]!;
+	const base = module.table;
+	if (COPY_PREFIXES.has(prefix)) return { ...moduleTable(module), name: `${prefix}_${base}_${index}`, comment: "", rowEstimate: index * 37 };
 	const specs: ColumnSpec[] = [
 		["id", "int(11)"],
 		...Array.from({ length: 6 + (index % 9) }, (_, column): ColumnSpec => [`c${column + 1}`, "varchar(60)"]),

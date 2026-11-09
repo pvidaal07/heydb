@@ -586,6 +586,18 @@ describe("renderSearch", () => {
 			"2 matches.\n- table emp_001.fac_cab (+1 identical: emp_002)\n- table emp_001.fac_lin (+1 identical)",
 		);
 	});
+
+	test("folds copies of a table in its database onto its line, the first two named", () => {
+		const copies = ["fac_cab_2019", "fac_cab_2020", "fac_cab_2021"];
+		assert.equal(
+			renderSearch({ results: [{ ...base, target: "emp_001.emp_001.fac_cab", object: "table", alsoIn: ["emp_002"], copies }], total: 1 }),
+			"1 match.\n- table emp_001.fac_cab (+1 identical: emp_002) (+3 copies: fac_cab_2019, fac_cab_2020, …)",
+		);
+		assert.equal(
+			renderSearch({ results: [{ ...base, target: "shop.shop.ventas", object: "table", copies: ["ventas_sel"] }], total: 1 }),
+			"1 match.\n- table shop.ventas (+1 copy: ventas_sel)",
+		);
+	});
 });
 
 describe("project notes and other connections", () => {

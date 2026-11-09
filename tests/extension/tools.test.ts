@@ -89,6 +89,12 @@ describe("tool registration", () => {
 		assert.match(guidelines, /\(told by the user\)/);
 		assert.match(guidelines, /inference.*confirm/i);
 	});
+
+	test("heydb_annotate asks to save what the user confirms in the words people search with", () => {
+		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
+		assert.match(guidelines, /user confirms what a table or column means or which table holds a concept/);
+		assert.match(guidelines, /words people search with/);
+	});
 });
 
 describe("tools outside a usable project", () => {

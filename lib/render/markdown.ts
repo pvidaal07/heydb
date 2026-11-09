@@ -348,7 +348,7 @@ const SEARCH_COLUMNS = 3;
 function searchLine(result: SearchResult, named: Set<string>): string {
 	const { relationship } = result;
 	const target = relationship === undefined ? displayText(result.target) : `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
-	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${result.abbreviated ? " (abbreviated name)" : ""}`;
+	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${structuralCopies(result.copies ?? [])}${result.abbreviated ? " (abbreviated name)" : ""}`;
 	const about = result.about === "" ? result.snippet : result.about;
 	if (about !== "") line += ` — ${shorten(about, ABOUT_LENGTH)}`;
 	const from = result.inferredFrom ?? [];
@@ -377,6 +377,15 @@ function copies(alsoIn: readonly string[], named: Set<string>): string {
 }
 
 const IDENTICAL_NAMED = 3;
+
+/** " (+3 copies: fac_cab_2019, fac_cab_2020, …)": tables of the same database with this one's columns, matched only by what they share with it. */
+function structuralCopies(names: readonly string[]): string {
+	if (names.length === 0) return "";
+	const shown = names.slice(0, COPIES_NAMED).join(", ");
+	return ` (+${names.length} ${names.length === 1 ? "copy" : "copies"}: ${shown}${names.length > COPIES_NAMED ? ", …" : ""})`;
+}
+
+const COPIES_NAMED = 2;
 
 // Said once under the results, only when one of them is inferred.
 const INFERRED_NOTE =
