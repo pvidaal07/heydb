@@ -226,16 +226,16 @@ describe("removeRelationship", () => {
 });
 
 describe("relationships across connections", () => {
-	const toErp = { ...ordersToCustomers, to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] } };
+	const toErp = { ...ordersToCustomers, to: { connection: "erp", table: "erp.erp.cus", columns: ["cod"] } };
 
 	test("keeps the connection of the other side", () => {
 		const { relationship: added } = addRelationship(emptyKnowledge(), toErp, fixedClock());
-		assert.deepEqual(added.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.deepEqual(added.to, { connection: "erp", table: "erp.erp.cus", columns: ["cod"] });
 		assert.equal("connection" in added.from, false);
 	});
 
 	test("the same table name in another connection is a different side", () => {
-		const local = { ...ordersToCustomers, to: { table: "erp.erp.gcl", columns: ["cod"] } };
+		const local = { ...ordersToCustomers, to: { table: "erp.erp.cus", columns: ["cod"] } };
 		const { knowledge: once } = addRelationship(emptyKnowledge(), local, fixedClock());
 		const { knowledge: twice } = addRelationship(once, toErp, fixedClock());
 		assert.equal(twice.relationships.length, 2);

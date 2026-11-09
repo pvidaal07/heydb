@@ -54,7 +54,7 @@ export interface Relationship {
 export interface RelationshipSide {
 	/**
 	 * The connection the table belongs to when it is not the one whose file
-	 * stores the relationship (crm.clientes.cod_erp → erp's gcl.cod). Absent
+	 * stores the relationship (crm.clientes.cod_erp → erp's cus.cod). Absent
 	 * means that connection, so files written before this field stay valid.
 	 */
 	readonly connection?: string;

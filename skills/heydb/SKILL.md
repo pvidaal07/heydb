@@ -10,17 +10,17 @@ heydb keeps a snapshot of the project's database structure (`.heydb/snapshots/`)
 ## Read before you write SQL
 
 1. Unknown schema: `heydb_overview` once. It shows, per database, how many tables have comments and which tables the rest point to (the core).
-2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case, accents and simple plurals, lists tables (with their matching columns) before anything else, and can keep to one `database`. Results also include tables whose meaning is inferred from the columns that reference them, marked `(inferred)`: `gcl` has no comment, but columns pointing to it say "Cliente Habitual". Present those as inferences, never as facts.
+2. Looking for a concept ("invoices", "fecha de baja"): `heydb_search`. It ignores case, accents and simple plurals, lists tables (with their matching columns) before anything else, and can keep to one `database`. Results also include tables whose meaning is inferred from the columns that reference them, marked `(inferred)`: `cus` has no comment, but columns pointing to it say "Cliente Habitual". Present those as inferences, never as facts.
 3. Before using a table: `heydb_table`. Use the real column names, types and joins it shows, including implicit relationships and notes. On wide tables it lists the 60 most telling columns; ask for `columns: "all"` or a `column_filter` when you need the rest.
 
 Never guess table or column names from memory when heydb can answer.
 
 ## Never guess a meaning from a table name
 
-Legacy names lie. In one ERP, `gar` looked like "garantías"; it holds the articles. Before you say what a table is, read the `heydb_table` header, strongest evidence first:
+Legacy names lie. A table named `art` looks like artwork; it holds the articles. Before you say what a table is, read the `heydb_table` header, strongest evidence first:
 
 1. Team notes and the table comment.
-2. Who points to it ("Referenced by"): foreign keys, documented relationships and the comments of columns like `ref_gar`, `cod_gar`. `Referencing columns are commented as: "Artículo" ×12` is strong evidence. Name-pattern guesses are not enforced; treat them as clues.
+2. Who points to it ("Referenced by"): foreign keys, documented relationships and the comments of columns like `ref_art`, `cod_art`. `Referencing columns are commented as: "Artículo" ×12` is strong evidence. Name-pattern guesses are not enforced; treat them as clues.
 3. Its own columns.
 
 When the meaning comes from 2 or 3, say it is an inference and ask the user to confirm. Once confirmed, save it with `heydb_annotate` so nobody has to guess again. When the overview says most tables have no comment, do not infer anything from names alone.
@@ -39,9 +39,9 @@ When the conversation or the code teaches you something the schema does not say,
 
 - `heydb_annotate` for meaning: valid values, units, encodings, who writes the column, legacy quirks.
 - `heydb_relate` for joins without a foreign key: `orders.customer_id → customers.id`. Say how you know in `note`.
-- `heydb_annotate` with `scope: "project"` and no `target` for facts above any one database: "the ERP uses one database per client; the central one is eagle". `heydb_overview` shows them first. A table called `project` is still `target: "project"`.
-- `heydb_relate` with `to_connection` when the referenced table is in another connection of the project (`crm.clientes.cod_erp → erp`'s `gcl.cod`). Call it from the referencing connection; `heydb_table` on the other side shows it too, prefixed with the connection.
-- A name without a dot is a table: `heydb_annotate` with `gar` notes the table even if some column is also called `gar`; write `postv.gar` for the column.
+- `heydb_annotate` with `scope: "project"` and no `target` for facts above any one database: "the ERP uses one database per client; the central one is acme". `heydb_overview` shows them first. A table called `project` is still `target: "project"`.
+- `heydb_relate` with `to_connection` when the referenced table is in another connection of the project (`crm.clientes.cod_erp → erp`'s `cus.cod`). Call it from the referencing connection; `heydb_table` on the other side shows it too, prefixed with the connection.
+- A name without a dot is a table: `heydb_annotate` with `art` notes the table even if some column is also called `art`; write `pos.art` for the column.
 - If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
 - End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
 - After `/heydb:sync` (or `/heydb:learn-code`) the user may ask you to read the project's code: follow the rules in that message and stop after about 20 notes.

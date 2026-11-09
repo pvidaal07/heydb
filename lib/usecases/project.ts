@@ -314,9 +314,9 @@ export type TargetKind = "database" | "table" | "column";
  * every reading is tried, and the target must be exactly one object.
  *
  * A name without a dot is a table (or a database), never a column when one
- * of those matches: in a legacy ERP the articles table "gar" shares its name
- * with a column postv.gar, and "gar" must still name the table. A column then
- * needs its table: "postv.gar". Errors use display names.
+ * of those matches: in a legacy schema the articles table "art" shares its name
+ * with a column pos.art, and "art" must still name the table. A column then
+ * needs its table: "pos.art". Errors use display names.
  */
 export function resolveTarget(snapshot: Snapshot, input: string): { kind: TargetKind; name: string } {
 	const segments = parseSegments(input);

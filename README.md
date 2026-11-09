@@ -11,10 +11,10 @@ It is a [Pi](https://pi.dev) package: Pi gets agent tools, slash commands and a 
 
 ## Why
 
-On a legacy database the agent guesses. A table called `gar` "looks like" guarantees and turns out to hold the articles; `estado = 3` means something only the team knows; half the joins have no foreign key. heydb gives the agent the evidence instead of the name:
+On a legacy database the agent guesses. A table called `art` "looks like" artwork and turns out to hold the articles; `estado = 3` means something only the team knows; half the joins have no foreign key. heydb gives the agent the evidence instead of the name:
 
 - the structure, read-only and complete, with warnings for anything your privileges hide;
-- who references each table and how those columns are commented (`ref_gar` "Artículo" ×12 says more than the name `gar`);
+- who references each table and how those columns are commented (`ref_art` "Artículo" ×12 says more than the name `art`);
 - the notes your team and your agent saved, each with its author and its source.
 
 The agent is told to present inferences as inferences and ask before saving them.
@@ -45,7 +45,7 @@ Then just work: ask your agent about the database. It reads the snapshot with th
 
 | Engine | Tested in CI | Notes |
 |---|---|---|
-| MySQL | 8.0 | 5.7 used on a real 1,500-table ERP |
+| MySQL | 8.0 | 5.7 used on a schema with about 1,500 tables |
 | MariaDB | 10.6 | 10.2 or later expected |
 | PostgreSQL | 16 | 14 or later expected; one connection reaches one database, choose schemas inside it |
 
@@ -85,9 +85,9 @@ Notes saved by the agent are signed `<your git user.name> (via agent)` and end w
 
 After a sync, heydb looks for code in the project that uses the synced tables. It walks the folders, including ones git ignores (a reference copy of another repository, for example), and skips `node_modules`, `vendor`, build output, CI folders and lockfiles. It reads modern and legacy languages: PHP, TypeScript, JavaScript, Python, Java, C#, Go, Ruby, SQL, Kotlin, Scala, Harbour/Clipper, Delphi, Visual Basic, COBOL, ABL and RPG.
 
-A table only counts in database context: SQL with its statement verb (`SELECT … FROM gar`, `UPDATE gar … SET`, `INSERT INTO gar`), including SQL whose database prefix is built by code (`"FROM " + cEmp + ".gar"`), or a table declaration (`protected $table = 'gar'`, `cTabla := "gar"`, `@Table(name = "gar")`, `__tablename__`, `DB::table('gar')`…). A table called `config` is not matched by every comment that says "config".
+A table only counts in database context: SQL with its statement verb (`SELECT … FROM art`, `UPDATE art … SET`, `INSERT INTO art`), including SQL whose database prefix is built by code (`"FROM " + cDb + ".art"`), or a table declaration (`protected $table = 'art'`, `cTabla := "art"`, `@Table(name = "art")`, `__tablename__`, `DB::table('art')`…). A table called `config` is not matched by every comment that says "config".
 
-If it finds such code it asks first, because reading it costs tokens. The agent then notes only what the code makes explicit (valid values, units, joins without a foreign key), stops after about 20 notes and leaves what remains unclear as questions. `/heydb:learn-code eagle ../api-eagle` reads code that lives in another folder. The scan stops after 10 seconds or 50 MB on very large codebases.
+If it finds such code it asks first, because reading it costs tokens. The agent then notes only what the code makes explicit (valid values, units, joins without a foreign key), stops after about 20 notes and leaves what remains unclear as questions. `/heydb:learn-code acme ../legacy-app` reads code that lives in another folder. The scan stops after 10 seconds or 50 MB on very large codebases.
 
 Without such code, notes come from your conversations: tell the agent what a table means and it saves it.
 
@@ -95,8 +95,8 @@ Without such code, notes come from your conversations: tell the agent what a tab
 
 A project can have as many connections as it needs: `dev` and `prod`, or one per service. Commands and tools use the default unless you name one (`/heydb:sync prod`). Each connection has its own snapshot and notes.
 
-- **Across connections:** when `crm.clientes.cod_erp` holds codes of `erp`'s `gcl.cod`, the agent records it with `heydb_relate` and `to_connection: "erp"`, and `heydb_table gcl` on `erp` shows it.
-- **Project notes:** facts about the whole system ("one database per client; the central one is eagle") are saved with `scope: "project"` and shown first by `heydb_overview`.
+- **Across connections:** when `crm.clientes.cod_erp` holds codes of `erp`'s `cus.cod`, the agent records it with `heydb_relate` and `to_connection: "erp"`, and `heydb_table cus` on `erp` shows it.
+- **Project notes:** facts about the whole system ("one database per client; the central one is acme") are saved with `scope: "project"` and shown first by `heydb_overview`.
 - **Microservices:** give each service its own `.heydb/`; heydb uses the nearest one above the folder Pi runs in.
 
 ## Passwords
@@ -114,7 +114,7 @@ This keeps passwords out of git and out of the chat, not away from your own user
 | Path | Commit it? |
 |---|---|
 | `.heydb/config.json` | Yes: connections, with password references only |
-| `.heydb/snapshots/*.json.gz` | Yes: the schema, compressed (a 1,500-table ERP is about 470 KB) |
+| `.heydb/snapshots/*.json.gz` | Yes: the schema, compressed (a schema with about 1,500 tables is about 470 KB) |
 | `.heydb/knowledge/` | Yes: the team's notes and relationships |
 | `.heydb/.env` | Never: local passwords |
 

@@ -3,13 +3,13 @@ import { formatName, type ObjectRef, parseName, parseSegments } from "./names.ts
 import type { Snapshot, Table } from "./snapshot.ts";
 
 // Who points to a table. In a legacy schema this is the strongest evidence of
-// what a table means: "gar" has no comment and looks like "garantías", but 500
-// columns elsewhere called ref_gar or id_gar say "Artículo" in their comments.
+// what a table means: "art" has no comment and looks like artwork, but 500
+// columns elsewhere called ref_art or id_art say "Artículo" in their comments.
 //
 // Three kinds of evidence, strongest first:
 // - declared foreign keys, enforced by the engine;
 // - implicit relationships the team documented (knowledge);
-// - name-pattern guesses: a column called ref_gar, id_gar, cod_gar, gar_id…
+// - name-pattern guesses: a column called ref_art, id_art, cod_art, art_id…
 //   in another table of the same database. Nothing enforces them, so they are
 //   always shown as guesses.
 //
@@ -155,9 +155,9 @@ export function incomingCounts(snapshot: Snapshot, knowledge: Knowledge): Map<st
 
 /**
  * The table names a column name may point to, lowercased: what comes before
- * or after any "_". ref_gar → ref, gar; cod_gar_ant → cod, cod_gar, gar_ant,
- * ant. So "gar" matches ref_gar, id_gar, cod_gar, gar_id and gar_precio as a
- * whole token, but never ref_garantia.
+ * or after any "_". ref_art → ref, art; cod_art_ant → cod, cod_art, art_ant,
+ * ant. So "art" matches ref_art, id_art, cod_art, art_id and art_precio as a
+ * whole token, but never ref_artista.
  */
 export function namePatternTargets(columnName: string): string[] {
 	const lower = columnName.toLowerCase();

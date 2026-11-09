@@ -173,12 +173,12 @@ describe("resolveTarget", () => {
 		});
 	});
 
-	// The field report: annotating "gar" failed because a column postv.gar exists.
+	// The field report: annotating "art" failed because a column pos.art exists.
 	test("a name without a dot is a table even when columns share it", () => {
-		const tricky = snapshot([ordersTable({ name: "gar" }), ordersTable({ name: "postv", columns: [column("id", 1), column("gar", 2)] })]);
-		assert.deepEqual(resolveTarget(tricky, "gar"), { kind: "table", name: "shop.shop.gar" });
-		assert.deepEqual(resolveTarget(tricky, "GAR"), { kind: "table", name: "shop.shop.gar" });
-		assert.deepEqual(resolveTarget(tricky, "postv.gar"), { kind: "column", name: "shop.shop.postv.gar" });
+		const tricky = snapshot([ordersTable({ name: "art" }), ordersTable({ name: "pos", columns: [column("id", 1), column("art", 2)] })]);
+		assert.deepEqual(resolveTarget(tricky, "art"), { kind: "table", name: "shop.shop.art" });
+		assert.deepEqual(resolveTarget(tricky, "ART"), { kind: "table", name: "shop.shop.art" });
+		assert.deepEqual(resolveTarget(tricky, "pos.art"), { kind: "column", name: "shop.shop.pos.art" });
 	});
 
 	test("a bare name stays ambiguous between several tables, or a table and a database", () => {

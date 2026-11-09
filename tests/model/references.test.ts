@@ -28,7 +28,7 @@ function fk(name: string, columns: string[], target: string, database = "erp"): 
 	};
 }
 
-// The shape of the ERP of the field report: "gar" has no comment, and what it
+// The shape of a legacy schema: "art" has no comment, and what it
 // is shows in the columns that point to it.
 const erp: Snapshot = snapshot([], {
 	databases: [
@@ -39,41 +39,41 @@ const erp: Snapshot = snapshot([], {
 					name: "erp",
 					routines: [],
 					tables: [
-						table("gar", [["id"], ["nombre"], ["parent_id"], ["gar_old"]], { foreignKeys: [fk("fk_gar_parent", ["parent_id"], "gar")] }),
-						table("gcl", [["id"]]),
-						table("pedidos", [["id"], ["ref_gar", "Artículo"], ["cod_gcl", "Cliente Habitual"], ["gar_x"]]),
-						table("albaranes", [["id"], ["id_gar", " artículo. "], ["gar_precio", "Precio"]]),
-						table("stock", [["id"], ["articulo", "Artículo"]], { foreignKeys: [fk("fk_stock_gar", ["articulo"], "gar")] }),
-						table("notas", [["id"], ["gar_ref", "Referencia"], ["ref_gar", "Cliente"]], {
-							foreignKeys: [fk("fk_notas_gcl", ["ref_gar"], "gcl")],
+						table("art", [["id"], ["nombre"], ["parent_id"], ["art_old"]], { foreignKeys: [fk("fk_art_parent", ["parent_id"], "art")] }),
+						table("cus", [["id"]]),
+						table("pedidos", [["id"], ["ref_art", "Artículo"], ["cod_cus", "Cliente Habitual"], ["art_x"]]),
+						table("albaranes", [["id"], ["id_art", " artículo. "], ["art_precio", "Precio"]]),
+						table("stock", [["id"], ["articulo", "Artículo"]], { foreignKeys: [fk("fk_stock_art", ["articulo"], "art")] }),
+						table("notas", [["id"], ["art_ref", "Referencia"], ["ref_art", "Cliente"]], {
+							foreignKeys: [fk("fk_notas_cus", ["ref_art"], "cus")],
 						}),
 						table("movs", [["id"], ["codigo_articulo", "Referencia"]]),
-						table("garantias", [["id"], ["ref_garantia", "Garantía"]]),
-						table("postv", [["id"], ["gar", "Artículo"]]),
-						table("Facturas", [["id"], ["Ref_GAR"]]),
-						table("v_pedidos", [["id"], ["ref_gar", "Artículo"]], { kind: "view", primaryKey: [] }),
+						table("artistas", [["id"], ["ref_artista", "Artista"]]),
+						table("pos", [["id"], ["art", "Artículo"]]),
+						table("Facturas", [["id"], ["Ref_ART"]]),
+						table("v_pedidos", [["id"], ["ref_art", "Artículo"]], { kind: "view", primaryKey: [] }),
 					],
 				},
 			],
 		},
-		{ name: "otra", schemas: [{ name: "otra", routines: [], tables: [table("x", [["id"], ["ref_gar", "Artículo"]])] }] },
+		{ name: "otra", schemas: [{ name: "otra", routines: [], tables: [table("x", [["id"], ["ref_art", "Artículo"]])] }] },
 	],
 });
 
 const notes = knowledge(
-	[annotation("a-1", "erp.erp.gar", { text: "Artículos." })],
+	[annotation("a-1", "erp.erp.art", { text: "Artículos." })],
 	[
-		{ ...relationship("r-1", "erp.erp.movs", ["codigo_articulo"], "erp.erp.gar", ["id"]), note: "app code" },
-		relationship("r-2", "erp.erp.gar", ["id"], "erp.erp.gar", ["parent_id"]),
+		{ ...relationship("r-1", "erp.erp.movs", ["codigo_articulo"], "erp.erp.art", ["id"]), note: "app code" },
+		relationship("r-2", "erp.erp.art", ["id"], "erp.erp.art", ["parent_id"]),
 	],
 );
 
 describe("incomingReferences", () => {
-	const incoming = incomingReferences(erp, notes, "erp.erp.gar");
+	const incoming = incomingReferences(erp, notes, "erp.erp.art");
 
 	test("lists declared foreign keys pointing to the table, never its own", () => {
 		assert.deepEqual(incoming.declared, [
-			{ table: "erp.erp.stock", name: "fk_stock_gar", columns: ["articulo"], toColumns: ["id"], comment: "Artículo" },
+			{ table: "erp.erp.stock", name: "fk_stock_art", columns: ["articulo"], toColumns: ["id"], comment: "Artículo" },
 		]);
 	});
 
@@ -88,12 +88,12 @@ describe("incomingReferences", () => {
 		assert.deepEqual(
 			incoming.guesses.map((guess) => [guess.table, guess.column, guess.comment]),
 			[
-				["erp.erp.albaranes", "gar_precio", "Precio"],
-				["erp.erp.albaranes", "id_gar", " artículo. "],
-				["erp.erp.notas", "gar_ref", "Referencia"],
-				["erp.erp.pedidos", "ref_gar", "Artículo"],
-				["erp.erp.Facturas", "Ref_GAR", ""],
-				["erp.erp.pedidos", "gar_x", ""],
+				["erp.erp.albaranes", "art_precio", "Precio"],
+				["erp.erp.albaranes", "id_art", " artículo. "],
+				["erp.erp.notas", "art_ref", "Referencia"],
+				["erp.erp.pedidos", "ref_art", "Artículo"],
+				["erp.erp.Facturas", "Ref_ART", ""],
+				["erp.erp.pedidos", "art_x", ""],
 			],
 		);
 		assert.equal(incoming.moreGuesses, 0);
@@ -120,13 +120,13 @@ describe("incomingReferences", () => {
 	test("keeps at most MAX_NAME_PATTERN_GUESSES guesses, but summarizes all of them", () => {
 		const many = 250;
 		const wide = snapshot([
-			table("gar", [["id"]]),
+			table("art", [["id"]]),
 			table(
 				"lineas",
-				Array.from({ length: many }, (_, index): [string, string] => [`ref${index}_gar`, index < 10 ? "Producto" : "Artículo"]),
+				Array.from({ length: many }, (_, index): [string, string] => [`ref${index}_art`, index < 10 ? "Producto" : "Artículo"]),
 			),
 		]);
-		const result = incomingReferences(wide, emptyKnowledge(), "shop.shop.gar");
+		const result = incomingReferences(wide, emptyKnowledge(), "shop.shop.art");
 		assert.equal(MAX_NAME_PATTERN_GUESSES, 200);
 		assert.equal(result.guesses.length, 200);
 		assert.equal(result.moreGuesses, 50);
@@ -137,15 +137,15 @@ describe("incomingReferences", () => {
 	});
 
 	test("rejects a name that is not a canonical table name", () => {
-		assert.throws(() => incomingReferences(erp, notes, "gar"), /expected a table name \(database\.schema\.table\)/);
+		assert.throws(() => incomingReferences(erp, notes, "art"), /expected a table name \(database\.schema\.table\)/);
 	});
 });
 
 describe("incomingCounts", () => {
 	test("counts, for every table, exactly what incomingReferences finds", () => {
 		const counts = incomingCounts(erp, notes);
-		assert.equal(counts.get("erp.erp.gar"), 8);
-		assert.equal(counts.get("erp.erp.gcl"), 2);
+		assert.equal(counts.get("erp.erp.art"), 8);
+		assert.equal(counts.get("erp.erp.cus"), 2);
 		for (const database of erp.databases) {
 			for (const schema of database.schemas) {
 				for (const { name } of schema.tables) {
@@ -163,11 +163,11 @@ describe("relationships into another connection", () => {
 	// Stored here, but its target lives in the "other" connection, whose database is also called erp.
 	const cross = knowledge(
 		[],
-		[{ ...relationship("x-1", "erp.erp.stock", ["articulo"], "erp.erp.gar", ["id"]), to: { connection: "other", table: "erp.erp.gar", columns: ["id"] } }],
+		[{ ...relationship("x-1", "erp.erp.stock", ["articulo"], "erp.erp.art", ["id"]), to: { connection: "other", table: "erp.erp.art", columns: ["id"] } }],
 	);
 
 	test("are not references to a same-named table of this connection", () => {
-		assert.deepEqual(incomingReferences(erp, cross, "erp.erp.gar").implicit, []);
+		assert.deepEqual(incomingReferences(erp, cross, "erp.erp.art").implicit, []);
 		assert.deepEqual(incomingCounts(erp, cross), incomingCounts(erp, emptyKnowledge()));
 	});
 });

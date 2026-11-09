@@ -164,7 +164,7 @@ describe("snapshots written by earlier builds (plain .json)", () => {
 	});
 });
 
-// A real ERP had 1,500 tables: its pretty-printed snapshot was 395,460 lines.
+// A schema with about 1,500 tables: its pretty-printed snapshot is about 400,000 lines.
 // The bounds are generous so slow CI machines pass; the measured values are
 // printed as test diagnostics.
 describe("a 1,500-table × 60-column schema", () => {

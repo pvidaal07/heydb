@@ -82,7 +82,7 @@ export function schemaStats(snapshot: Snapshot, knowledge: Knowledge, counts = i
 /**
  * The family a table name belongs to: the start of the name up to the first
  * "_" ("sii_fac" → "sii_") or digit ("log2020" → "log0-9"), lowercased. null
- * when there is no such start ("gcl", "_tmp", "2020_log").
+ * when there is no such start ("cus", "_tmp", "2020_log").
  */
 export function tablePrefix(name: string): string | null {
 	const match = /^([^_0-9]+)([_0-9])/.exec(name);

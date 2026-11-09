@@ -16,7 +16,7 @@ describe("tablePrefix", () => {
 		assert.equal(tablePrefix("sii_fac"), "sii_");
 		assert.equal(tablePrefix("SII_Fac_Lin"), "sii_");
 		assert.equal(tablePrefix("log2020"), "log0-9");
-		assert.equal(tablePrefix("gcl"), null);
+		assert.equal(tablePrefix("cus"), null);
 		assert.equal(tablePrefix("_tmp"), null);
 		assert.equal(tablePrefix("2020_log"), null);
 	});
@@ -24,14 +24,14 @@ describe("tablePrefix", () => {
 
 describe("schemaStats", () => {
 	const shop = snapshot([
-		table("gar", ["id", "nombre"], { comment: "Productos" }),
-		table("sii_a", ["id", "ref_gar"]),
-		table("sii_b", ["id", "gar_id"]),
+		table("art", ["id", "nombre"], { comment: "Productos" }),
+		table("sii_a", ["id", "ref_art"]),
+		table("sii_b", ["id", "art_id"]),
 		table("sii_c", ["id"]),
 		table("log1", ["id"]),
 		table("log2", ["id", "cod_sii_c"]),
 		table("tmp_x", ["id"]),
-		table("v_gar", ["id", "ref_gar"], { kind: "view", comment: "A view" }),
+		table("v_art", ["id", "ref_art"], { kind: "view", comment: "A view" }),
 	]);
 	const shopWithComments = {
 		...shop,
@@ -40,7 +40,7 @@ describe("schemaStats", () => {
 			schemas: database.schemas.map((schema) => ({
 				...schema,
 				tables: schema.tables.map((item) =>
-					item.name === "gar" ? { ...item, columns: [column("id", 1, { comment: "Código" }), column("nombre", 2)] } : item,
+					item.name === "art" ? { ...item, columns: [column("id", 1, { comment: "Código" }), column("nombre", 2)] } : item,
 				),
 			})),
 		})),
@@ -72,7 +72,7 @@ describe("schemaStats", () => {
 		assert.deepEqual(
 			stats?.mainTables.map((item) => [item.name, item.incoming]),
 			[
-				["shop.shop.gar", 2],
+				["shop.shop.art", 2],
 				["shop.shop.sii_a", 1],
 				["shop.shop.sii_c", 1],
 			],

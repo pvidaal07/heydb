@@ -321,14 +321,14 @@ describe("writing tools", () => {
 		);
 	});
 
-	// The field report: "gar" was ambiguous because a column postv.gar exists.
+	// The field report: "art" was ambiguous because a column pos.art exists.
 	test("heydb_annotate takes a name without a dot as the table, even when a column shares it", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		saveSnapshot(root, "local", snapshot([{ ...customersTable(), name: "gar" }, ordersTable({ name: "postv", columns: [column("gar", 1)] })]));
-		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "gar", text: "Artículos." }, root), {
+		saveSnapshot(root, "local", snapshot([{ ...customersTable(), name: "art" }, ordersTable({ name: "pos", columns: [column("art", 1)] })]));
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { target: "art", text: "Artículos." }, root), {
 			isError: false,
-			text: "Saved note id-001 on table shop.gar (author: Ana (via agent)).",
+			text: "Saved note id-001 on table shop.art (author: Ana (via agent)).",
 		});
 	});
 
@@ -469,8 +469,8 @@ describe("writing tools", () => {
 });
 
 describe("relationships across connections", () => {
-	const gcl = { ...customersTable(), name: "gcl", columns: [column("cod", 1), column("nombre", 2)] };
-	const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [gcl], routines: [] }] }] });
+	const cus = { ...customersTable(), name: "cus", columns: [column("cod", 1), column("nombre", 2)] };
+	const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [cus], routines: [] }] }] });
 
 	/** "local" (shop, the default) and "erp"; erp synced unless told otherwise. */
 	function twoConnections({ erpSynced = true } = {}): string {
@@ -480,16 +480,16 @@ describe("relationships across connections", () => {
 		return root;
 	}
 
-	const toErp = { from_table: "customers", from_columns: ["id"], to_table: "gcl", to_columns: ["cod"], to_connection: "erp", note: "Same code." };
+	const toErp = { from_table: "customers", from_columns: ["id"], to_table: "cus", to_columns: ["cod"], to_connection: "erp", note: "Same code." };
 
 	test("heydb_relate with to_connection resolves the to side in that connection and stores it with the from side", async () => {
 		const pi = loadHeydb();
 		const root = twoConnections();
 		assert.deepEqual(await runTool(pi, "heydb_relate", toErp, root), {
 			isError: false,
-			text: "Saved relationship id-001: shop.customers(id) → erp: erp.gcl(cod) (author: Ana (via agent)).",
+			text: "Saved relationship id-001: shop.customers(id) → erp: erp.cus(cod) (author: Ana (via agent)).",
 		});
-		assert.deepEqual(loadKnowledge(root, "local").relationships[0]?.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.deepEqual(loadKnowledge(root, "local").relationships[0]?.to, { connection: "erp", table: "erp.erp.cus", columns: ["cod"] });
 		assert.deepEqual(loadKnowledge(root, "erp").relationships, []);
 	});
 
@@ -507,7 +507,7 @@ describe("relationships across connections", () => {
 		saveSnapshot(root, "erp", erpSnapshot);
 		assert.deepEqual(await runTool(pi, "heydb_relate", { ...toErp, to_columns: ["codigo"] }, root), {
 			isError: true,
-			text: 'erp.erp.gcl.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
+			text: 'erp.erp.cus.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
 		});
 		assert.deepEqual(loadKnowledge(root, "local").relationships, []);
 	});
@@ -516,14 +516,14 @@ describe("relationships across connections", () => {
 		const pi = loadHeydb();
 		const root = twoConnections();
 		await runTool(pi, "heydb_relate", toErp, root);
-		const result = await runTool(pi, "heydb_table", { table: "gcl", connection: "erp" }, root);
+		const result = await runTool(pi, "heydb_table", { table: "cus", connection: "erp" }, root);
 		assert.equal(result.isError, false);
 		assert.match(
 			result.text,
 			/## Referenced by\n- local: shop\.customers\(id\) → \(cod\) · implicit, documented by Ana \(via agent\) · Same code\. \[id id-001 · connection local · 2026-11-06\]/,
 		);
 		const from = await runTool(pi, "heydb_table", { table: "customers" }, root);
-		assert.match(from.text, /- \(id\) → erp: erp\.gcl\(cod\) · implicit/);
+		assert.match(from.text, /- \(id\) → erp: erp\.cus\(cod\) · implicit/);
 	});
 });
 
@@ -531,13 +531,13 @@ describe("project notes", () => {
 	test("heydb_annotate with scope project saves a project note; the overview shows it first", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		assert.deepEqual(await runTool(pi, "heydb_annotate", { scope: "project", text: "One database per client; the central one is eagle." }, root), {
+		assert.deepEqual(await runTool(pi, "heydb_annotate", { scope: "project", text: "One database per client; the central one is acme." }, root), {
 			isError: false,
 			text: "Saved project note id-001 (author: Ana (via agent)).",
 		});
 		assert.deepEqual(loadKnowledge(root, "local").annotations, []);
 		const overview = await runTool(pi, "heydb_overview", {}, root);
-		assert.match(overview.text, /^# heydb · local\n.*\n\n## Project notes\n- One database per client; the central one is eagle\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]\n\n## Databases/);
+		assert.match(overview.text, /^# heydb · local\n.*\n\n## Project notes\n- One database per client; the central one is acme\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]\n\n## Databases/);
 	});
 
 	test("heydb_edit_note and heydb_forget find project notes by id", async () => {

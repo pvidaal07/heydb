@@ -40,9 +40,9 @@ function table(name: string, columns: Column[], overrides: Partial<Table> = {}):
 	return { ...customersTable(), name, columns, ...overrides };
 }
 
-// The ERP of the field report, in miniature. gcl (customers) and gar
+// A legacy schema in miniature. cus (customers) and art
 // (articles) have no useful comment; what they mean is only in the comments
-// of the columns that point to them. eagle.clientes is an unrelated table
+// of the columns that point to them. acme.clientes is an unrelated table
 // that happens to be called "clientes".
 const erp: Snapshot = snapshot([], {
 	engine: { kind: "mysql", version: "5.7.27" },
@@ -54,21 +54,21 @@ const erp: Snapshot = snapshot([], {
 					name: "gestion",
 					routines: [],
 					tables: [
-						table("gcl", [column("id", 1), column("nom", 2, { comment: "Nombre" })]),
-						table("gar", [column("id", 1), column("des", 2, { comment: "Descripción" })], { comment: "Productos" }),
-						...["gcv", "ghc", "gpr", "gfg", "whcar"].map((name) =>
-							table(name, [column("id", 1), column("cod_gcl", 2, { comment: "Cliente Habitual" })]),
+						table("cus", [column("id", 1), column("nom", 2, { comment: "Nombre" })]),
+						table("art", [column("id", 1), column("des", 2, { comment: "Descripción" })], { comment: "Productos" }),
+						...["dln", "mov", "sup", "exp", "cart"].map((name) =>
+							table(name, [column("id", 1), column("cod_cus", 2, { comment: "Cliente Habitual" })]),
 						),
-						table("gal", [column("id", 1), column("cod_gcl", 2, { comment: "Cliente" }), column("ref_gar", 3, { comment: "Artículo" })]),
-						table("gpe", [column("id", 1), column("cod_gcl", 2, { comment: "Cliente" }), column("ref_gar", 3, { comment: "artículo." })]),
-						table("gfc", [column("id", 1), column("num", 2, { comment: "Nº Factura" }), column("fec", 3, { comment: "Fecha" })]),
-						table("gfl", [column("id", 1), column("num_gfc", 2, { comment: "Factura" }), column("ref_gar", 3, { comment: "Artículo" })]),
+						table("dnl", [column("id", 1), column("cod_cus", 2, { comment: "Cliente" }), column("ref_art", 3, { comment: "Artículo" })]),
+						table("ord", [column("id", 1), column("cod_cus", 2, { comment: "Cliente" }), column("ref_art", 3, { comment: "artículo." })]),
+						table("inv", [column("id", 1), column("num", 2, { comment: "Nº Factura" }), column("fec", 3, { comment: "Fecha" })]),
+						table("inl", [column("id", 1), column("num_inv", 2, { comment: "Factura" }), column("ref_art", 3, { comment: "Artículo" })]),
 						table("clientela_web", [column("id", 1)]),
 					],
 				},
 			],
 		},
-		{ name: "eagle", schemas: [{ name: "eagle", routines: [], tables: [table("clientes", [column("id", 1), column("email", 2)])] }] },
+		{ name: "acme", schemas: [{ name: "acme", routines: [], tables: [table("clientes", [column("id", 1), column("email", 2)])] }] },
 	],
 });
 
@@ -102,42 +102,42 @@ describe("foldWord", () => {
 });
 
 describe("searchSchema: the field report", () => {
-	test('"cliente" finds gcl from the columns that reference it, and says it is an inference', () => {
+	test('"cliente" finds cus from the columns that reference it, and says it is an inference', () => {
 		const { results } = searchSchema(erp, emptyKnowledge(), "cliente");
 		// A table literally called "clientes" legitimately ranks first.
-		assert.equal(results[0]?.target, "eagle.eagle.clientes");
-		const gcl = results.slice(0, 3).find((result) => result.target === "gestion.gestion.gcl");
-		assert.ok(gcl, lines(results).join("\n"));
-		assert.equal(gcl.object, "table");
-		assert.equal(gcl.inferred, true);
-		assert.deepEqual(gcl.matchedIn, ['referenced as "Cliente Habitual" ×5, "Cliente" ×2 (inferred)']);
+		assert.equal(results[0]?.target, "acme.acme.clientes");
+		const cus = results.slice(0, 3).find((result) => result.target === "gestion.gestion.cus");
+		assert.ok(cus, lines(results).join("\n"));
+		assert.equal(cus.object, "table");
+		assert.equal(cus.inferred, true);
+		assert.deepEqual(cus.matchedIn, ['referenced as "Cliente Habitual" ×5, "Cliente" ×2 (inferred)']);
 		// The plural finds it too.
-		assert.ok(searchSchema(erp, emptyKnowledge(), "clientes").results.slice(0, 3).some((result) => result.target === "gestion.gestion.gcl"));
+		assert.ok(searchSchema(erp, emptyKnowledge(), "clientes").results.slice(0, 3).some((result) => result.target === "gestion.gestion.cus"));
 	});
 
-	test('"artículo" and "articulos" find gar, whose own comment says "Productos"', () => {
+	test('"artículo" and "articulos" find art, whose own comment says "Productos"', () => {
 		for (const query of ["artículo", "articulos", "ARTICULO"]) {
 			const [first] = searchSchema(erp, emptyKnowledge(), query).results;
-			assert.equal(first?.target, "gestion.gestion.gar", query);
+			assert.equal(first?.target, "gestion.gestion.art", query);
 			assert.deepEqual(first?.matchedIn, ['referenced as "Artículo" ×3 (inferred)'], query);
 		}
 	});
 
 	test('"factura" lists the invoice header as a table, with its matching columns', () => {
 		const { results } = searchSchema(erp, emptyKnowledge(), "factura");
-		const header = results.find((result) => result.target === "gestion.gestion.gfc");
+		const header = results.find((result) => result.target === "gestion.gestion.inv");
 		assert.ok(header);
 		assert.equal(header.object, "table");
 		assert.deepEqual(header.matchedIn, ['referenced as "Factura" ×1 (inferred)', 'columns: num ("Nº Factura")']);
 		assert.deepEqual(header.columns, [{ name: "num", snippet: "Nº Factura" }]);
-		assert.equal(results[0]?.target, "gestion.gestion.gfc");
+		assert.equal(results[0]?.target, "gestion.gestion.inv");
 		assert.ok(results.every((result) => (result.object as string) !== "column"));
 	});
 
 	test("a referencing table is listed by its columns, after the table they point to", () => {
 		const { results } = searchSchema(erp, emptyKnowledge(), "cliente habitual");
-		assert.equal(results[0]?.target, "gestion.gestion.gcl");
-		assert.deepEqual(results[1]?.matchedIn, ['columns: cod_gcl ("Cliente Habitual")']);
+		assert.equal(results[0]?.target, "gestion.gestion.cus");
+		assert.deepEqual(results[1]?.matchedIn, ['columns: cod_cus ("Cliente Habitual")']);
 		assert.equal(results[1]?.inferred, false);
 	});
 });
@@ -146,17 +146,17 @@ describe("searchSchema: ranking", () => {
 	test("exact name, then stated meaning, then inferred meaning, then name prefix, then columns", () => {
 		const ranked: Snapshot = snapshot([
 			table("cliente_tmp", [column("id", 1)]),
-			table("gcl", [column("id", 1)]),
+			table("cus", [column("id", 1)]),
 			table("socios", [column("id", 1)], { comment: "Clientes con cuota" }),
-			table("gcv", [column("id", 1), column("cod_gcl", 2, { comment: "Cliente" })]),
+			table("dln", [column("id", 1), column("cod_cus", 2, { comment: "Cliente" })]),
 			table("clientes", [column("id", 1)]),
 		]);
 		assert.deepEqual(lines(searchSchema(ranked, emptyKnowledge(), "cliente").results), [
 			"table shop.shop.clientes · name",
 			"table shop.shop.socios · table comment: Clientes con cuota",
-			'table shop.shop.gcl · referenced as "Cliente" ×1 (inferred)',
+			'table shop.shop.cus · referenced as "Cliente" ×1 (inferred)',
 			"table shop.shop.cliente_tmp · name",
-			'table shop.shop.gcv · columns: cod_gcl ("Cliente")',
+			'table shop.shop.dln · columns: cod_cus ("Cliente")',
 		]);
 	});
 
@@ -172,9 +172,9 @@ describe("searchSchema: ranking", () => {
 	});
 
 	test("a team note on a table counts like its comment", () => {
-		const team = knowledge([annotation("n-1", "shop.shop.gcl", { text: "Clientes del ERP." })]);
-		const plain: Snapshot = snapshot([table("gcl", [column("id", 1)])]);
-		assert.deepEqual(lines(searchSchema(plain, team, "cliente").results), ["table shop.shop.gcl · note: Clientes del ERP."]);
+		const team = knowledge([annotation("n-1", "shop.shop.cus", { text: "Clientes del ERP." })]);
+		const plain: Snapshot = snapshot([table("cus", [column("id", 1)])]);
+		assert.deepEqual(lines(searchSchema(plain, team, "cliente").results), ["table shop.shop.cus · note: Clientes del ERP."]);
 	});
 
 	test("groups columns under their table: at most 5 listed, the rest counted", () => {
@@ -261,12 +261,12 @@ describe("searchSchema: what it covers", () => {
 
 describe("searchSchema: database filter", () => {
 	test("keeps one database, named as shown or canonically", () => {
-		for (const database of ["eagle", "eagle.eagle", "EAGLE"]) {
-			assert.deepEqual(lines(searchSchema(erp, emptyKnowledge(), "cliente", { database }).results), ["table eagle.eagle.clientes · name"], database);
+		for (const database of ["acme", "acme.acme", "ACME"]) {
+			assert.deepEqual(lines(searchSchema(erp, emptyKnowledge(), "cliente", { database }).results), ["table acme.acme.clientes · name"], database);
 		}
 		const gestion = searchSchema(erp, emptyKnowledge(), "cliente", { database: "gestion" }).results;
 		assert.ok(gestion.every((result) => result.target.startsWith("gestion.")));
-		assert.equal(gestion[0]?.target, "gestion.gestion.gcl");
+		assert.equal(gestion[0]?.target, "gestion.gestion.cus");
 	});
 
 	test("filters PostgreSQL schemas by database.schema", () => {
@@ -288,7 +288,7 @@ describe("searchSchema: database filter", () => {
 
 	test("refuses an unknown database and lists the known ones", () => {
 		assert.throws(() => searchSchema(erp, emptyKnowledge(), "cliente", { database: "nope" }), {
-			message: 'no database matches "nope"; databases: eagle, gestion',
+			message: 'no database matches "nope"; databases: acme, gestion',
 		});
 	});
 });
@@ -302,13 +302,13 @@ describe("searchSchema: performance", () => {
 				table(
 					`t${t}`,
 					Array.from({ length: 30 }, (_, c) =>
-						column(c === 0 ? "id" : c === 1 ? "cod_gcl" : c === 2 ? `ref_t${(t + 1) % 500}` : `campo_${c}`, c + 1, {
+						column(c === 0 ? "id" : c === 1 ? "cod_cus" : c === 2 ? `ref_t${(t + 1) % 500}` : `campo_${c}`, c + 1, {
 							comment: c === 1 ? "Cliente Habitual" : c === 2 ? "Artículo relacionado" : c % 5 === 0 ? `Comentario ${c}` : "",
 						}),
 					),
 				),
 			);
-			return { name, schemas: [{ name, tables: [...tables, table("gcl", [column("id", 1)])], routines: [] }] };
+			return { name, schemas: [{ name, tables: [...tables, table("cus", [column("id", 1)])], routines: [] }] };
 		});
 		const large = snapshot([], { databases });
 		for (const query of ["cliente", "articulo", "campo"]) {
@@ -318,6 +318,6 @@ describe("searchSchema: performance", () => {
 			assert.ok(found.total > 0, query);
 			assert.ok(elapsed < 500, `${query}: ${elapsed.toFixed(0)} ms`);
 		}
-		assert.equal(searchSchema(large, emptyKnowledge(), "cliente").results[0]?.target, "db0.db0.gcl");
+		assert.equal(searchSchema(large, emptyKnowledge(), "cliente").results[0]?.target, "db0.db0.cus");
 	});
 });

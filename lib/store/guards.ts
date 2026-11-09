@@ -25,8 +25,8 @@ export function assertConnectionName(name: string): void {
 }
 
 /**
- * Turns what a person typed ("Eagle", "Prod EU", "Producción") into a name
- * assertConnectionName accepts ("eagle", "prod-eu", "produccion"), so the
+ * Turns what a person typed ("Acme", "Prod EU", "Producción") into a name
+ * assertConnectionName accepts ("acme", "prod-eu", "produccion"), so the
  * rule protects the files without getting in the user's way. Returns null
  * when nothing usable is left.
  */

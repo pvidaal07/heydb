@@ -9,11 +9,11 @@ function table(name: string): Table {
 	return { ...customersTable(), name };
 }
 
-// gar holds the articles, gcl the customers: legacy names the code explains.
+// art holds the articles, cus the customers: legacy names the code explains.
 const erp = snapshot([
-	table("gar"),
-	table("gcl"),
-	table("gcv"),
+	table("art"),
+	table("cus"),
+	table("dln"),
 	table("ab"),
 ]);
 
@@ -47,15 +47,15 @@ function memoryFiles(contents: Record<string, string>) {
 
 
 const project = {
-	"src/Models/Articulo.php": "class Articulo extends Model { protected $table = 'gar'; }\n// gar.ref is the article code; GAR in SQL too\n",
-	"src/Models/Cliente.php": "class Cliente extends Model { protected $table = 'gcl'; }\n",
-	"src/Repo/Ventas.php": "SELECT * FROM gar JOIN gcl ON gcl.ref = gar.ref_gcl",
-	"src/garage.php": "SELECT * FROM garage JOIN ref_gar ON gar_id", // only whole names count
-	"vendor/lib/Gar.php": "gar gar gar gar gar gar",
-	"node_modules/x/index.js": "gcl gcl gcl",
-	"README.md": "gar gcl gcv",
-	".heydb/.env": "HEYDB_LOCAL_PASSWORD=gar",
-	".heydb/knowledge/local.json": '{"target":"gar"}',
+	"src/Models/Articulo.php": "class Articulo extends Model { protected $table = 'art'; }\n// art.ref is the article code; ART in SQL too\n",
+	"src/Models/Cliente.php": "class Cliente extends Model { protected $table = 'cus'; }\n",
+	"src/Repo/Ventas.php": "SELECT * FROM art JOIN cus ON cus.ref = art.ref_cus",
+	"src/article.php": "SELECT * FROM article JOIN ref_art ON art_id", // only whole names count
+	"vendor/lib/Art.php": "art art art art art art",
+	"node_modules/x/index.js": "cus cus cus",
+	"README.md": "art cus dln",
+	".heydb/.env": "HEYDB_LOCAL_PASSWORD=art",
+	".heydb/knowledge/local.json": '{"target":"art"}',
 };
 
 describe("findSchemaUsage", () => {
@@ -68,44 +68,44 @@ describe("findSchemaUsage", () => {
 			filesMatched: 3,
 			tablesMatched: 2,
 			matches: [
-				{ table: "shop.gar", name: "gar", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2 },
-				{ table: "shop.gcl", name: "gcl", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2 },
+				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2 },
+				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2 },
 			],
 			truncated: false,
 		});
-		assert.deepEqual(reads.sort(), ["src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/garage.php"]);
+		assert.deepEqual(reads.sort(), ["src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/article.php"]);
 	});
 
 	test("never reads anything under .heydb, the secrets file included", async () => {
-		const { files, reads } = memoryFiles({ ...project, ".heydb/model.php": "SELECT * FROM gar" });
+		const { files, reads } = memoryFiles({ ...project, ".heydb/model.php": "SELECT * FROM art" });
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.equal(usage.filesScanned, 4);
 		for (const path of reads) assert.doesNotMatch(path, /^\.heydb\/|vendor|node_modules|\.env/, path);
 	});
 
-	// Found on a real ERP: the code that used the database was a reference copy in
-	// source-code/, which the project's .gitignore excludes. Listing files through
-	// git hid it, so the folders are walked directly.
+	// The code that uses a database is often a reference copy of another repository
+	// kept in a folder git ignores (source-code/ here). Listing files through git
+	// would hide it, so the folders are walked directly.
 	test("reads code in folders git ignores, such as a reference copy of another repository", async () => {
 		const { files } = memoryFiles({
 			".gitignore": "source-code/\n",
 			"src/cli.ts": "console.log('help')",
-			"source-code/eagle-master/Articulos.pas": "x",
-			"source-code/eagle-master/sql/ventas.sql": "SELECT * FROM gcl JOIN gar ON gar.id = gcl.id",
-			"coverage/lcov-report/index.js": "SELECT * FROM gcv",
+			"source-code/legacy-app-master/Articulos.pas": "x",
+			"source-code/legacy-app-master/sql/ventas.sql": "SELECT * FROM cus JOIN art ON art.id = cus.id",
+			"coverage/lcov-report/index.js": "SELECT * FROM dln",
 		});
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(
 			usage.matches.map((match) => [match.name, match.files]),
 			[
-				["gar", ["source-code/eagle-master/sql/ventas.sql"]],
-				["gcl", ["source-code/eagle-master/sql/ventas.sql"]],
+				["art", ["source-code/legacy-app-master/sql/ventas.sql"]],
+				["cus", ["source-code/legacy-app-master/sql/ventas.sql"]],
 			],
 		);
 	});
 
 	test("without source files there is no code, and no code using the tables is no match", async () => {
-		const empty = memoryFiles({ "README.md": "FROM gar", "notes.txt": "FROM gcl" });
+		const empty = memoryFiles({ "README.md": "FROM art", "notes.txt": "FROM cus" });
 		assert.deepEqual(await findSchemaUsage("/app", erp, { files: empty.files }), {
 			hasCode: false,
 			filesScanned: 0,
@@ -121,14 +121,14 @@ describe("findSchemaUsage", () => {
 	});
 
 	test("skips files bigger than the per-file limit without calling the scan truncated", async () => {
-		const { files, reads } = memoryFiles({ "big.sql": `${"x".repeat(100)} FROM gar`, "small.sql": "FROM gcl" });
+		const { files, reads } = memoryFiles({ "big.sql": `${"x".repeat(100)} FROM art`, "small.sql": "FROM cus" });
 		const usage = await findSchemaUsage("/app", erp, { files, limits: { maxFileBytes: 50 } });
 		assert.deepEqual(reads, ["small.sql"]);
 		assert.equal(usage.truncated, false);
 	});
 
 	test("stops at the file, byte and time limits and returns what it found, marked truncated", async () => {
-		const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`src/m${i}.php`, "SELECT * FROM gar"]));
+		const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`src/m${i}.php`, "SELECT * FROM art"]));
 		const cases: [Partial<ScanLimits>, number][] = [
 			[{ maxFiles: 3 }, 3],
 			[{ maxBytes: 40 }, 2],
@@ -183,36 +183,36 @@ describe("findSchemaUsage", () => {
 
 	test("SQL: the name right after FROM, JOIN, INTO, UPDATE, TABLE or DELETE FROM, quoted or qualified, inside strings too", async () => {
 		const { files } = memoryFiles({
-			"from.php": '$rows = $db->query("SELECT ref FROM gar WHERE id = 1");',
-			"join.sql": "select *\nfrom `erp`.`gcl`\n  left join\n    [dbo].[gcv] on 1 = 1",
-			"into.py": "cursor.execute('INSERT INTO \"public\".\"gar\" (ref) VALUES (%s)')",
-			"update.go": 'db.Exec("UPDATE erp.gcl SET name = ?")\ndb.Exec("UPDATE gar a JOIN gcl b ON a.x = b.x SET a.y = 1")',
-			"table.sql": "CREATE TABLE IF NOT EXISTS gcv (id int);\nALTER TABLE 'gar' ADD x int;",
-			"delete.ts": "await sql`DELETE FROM gcv WHERE id = ${id}`;",
+			"from.php": '$rows = $db->query("SELECT ref FROM art WHERE id = 1");',
+			"join.sql": "select *\nfrom `erp`.`cus`\n  left join\n    [dbo].[dln] on 1 = 1",
+			"into.py": "cursor.execute('INSERT INTO \"public\".\"art\" (ref) VALUES (%s)')",
+			"update.go": 'db.Exec("UPDATE erp.cus SET name = ?")\ndb.Exec("UPDATE art a JOIN cus b ON a.x = b.x SET a.y = 1")',
+			"table.sql": "CREATE TABLE IF NOT EXISTS dln (id int);\nALTER TABLE 'art' ADD x int;",
+			"delete.ts": "await sql`DELETE FROM dln WHERE id = ${id}`;",
 		});
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(usage.matches, [
-			{ table: "shop.gar", name: "gar", files: ["from.php", "into.py", "table.sql", "update.go"], hits: 4 },
-			{ table: "shop.gcl", name: "gcl", files: ["update.go", "join.sql"], hits: 3 },
-			{ table: "shop.gcv", name: "gcv", files: ["delete.ts", "join.sql", "table.sql"], hits: 3 },
+			{ table: "shop.art", name: "art", files: ["from.php", "into.py", "table.sql", "update.go"], hits: 4 },
+			{ table: "shop.cus", name: "cus", files: ["update.go", "join.sql"], hits: 3 },
+			{ table: "shop.dln", name: "dln", files: ["delete.ts", "join.sql", "table.sql"], hits: 3 },
 		]);
 	});
 
 	// One documented example per ORM or mapping family; each must find exactly its table.
 	const declarations: [string, string, string][] = [
-		["Eloquent $table property", "Gar.php", "class Gar extends Model { protected $table = \"gar\"; }"],
-		["plain table assignment", "gar.rb", "self.table = 'gar'"],
-		["Laravel query builder", "Repo.php", "DB::table('gar')->get(); $q->from('gar');"],
-		["fluent .table() call", "repo.js", 'db.table("gar").select()'],
-		["knex", "repo.ts", "await knex('gar').where({ id })"],
-		["JPA @Table", "Gar.java", '@Entity\n@Table(name = "gar")\npublic class Gar {}'],
-		["JPA @Entity with a table name", "Gar.kt", '@Entity(name = "gar")\nclass Gar'],
-		["C# [Table]", "Gar.cs", '[Table("gar")]\npublic class Gar {}'],
-		["SQLAlchemy __tablename__", "models.py", 'class Gar(Base):\n    __tablename__ = "gar"'],
-		["Django db_table", "models.py", "class Meta:\n    db_table = 'gar'"],
-		["tableName option", "gar.ts", 'sequelize.define("Gar", {}, { tableName: "gar" });\nconst x = { tableName = "gar" };'],
-		["Doctrine XML entity", "Gar.orm.xml", '<entity name="App\\Gar" table="gar">'],
-		["YAML mapping", "Gar.orm.yml", "App\\Gar:\n  type: entity\n  table: gar\n"],
+		["Eloquent $table property", "Art.php", "class Art extends Model { protected $table = \"art\"; }"],
+		["plain table assignment", "art.rb", "self.table = 'art'"],
+		["Laravel query builder", "Repo.php", "DB::table('art')->get(); $q->from('art');"],
+		["fluent .table() call", "repo.js", 'db.table("art").select()'],
+		["knex", "repo.ts", "await knex('art').where({ id })"],
+		["JPA @Table", "Art.java", '@Entity\n@Table(name = "art")\npublic class Art {}'],
+		["JPA @Entity with a table name", "Art.kt", '@Entity(name = "art")\nclass Art'],
+		["C# [Table]", "Art.cs", '[Table("art")]\npublic class Art {}'],
+		["SQLAlchemy __tablename__", "models.py", 'class Art(Base):\n    __tablename__ = "art"'],
+		["Django db_table", "models.py", "class Meta:\n    db_table = 'art'"],
+		["tableName option", "art.ts", 'sequelize.define("Art", {}, { tableName: "art" });\nconst x = { tableName = "art" };'],
+		["Doctrine XML entity", "Art.orm.xml", '<entity name="App\\Art" table="art">'],
+		["YAML mapping", "Art.orm.yml", "App\\Art:\n  type: entity\n  table: art\n"],
 	];
 	for (const [family, path, code] of declarations) {
 		test(`ORM declaration: ${family}`, async () => {
@@ -220,7 +220,7 @@ describe("findSchemaUsage", () => {
 			const usage = await findSchemaUsage("/app", erp, { files });
 			assert.deepEqual(
 				usage.matches.map((match) => match.name),
-				["gar"],
+				["art"],
 				code,
 			);
 		});
@@ -228,9 +228,9 @@ describe("findSchemaUsage", () => {
 
 	test("plain occurrences do not count: comments, prose, identifiers, help text", async () => {
 		const { files } = memoryFiles({
-			"src/a.ts": "// gar holds the articles\nconst gar = loadGar(gcl);\nconsole.log(\"Usa --help para ver gcv\");",
-			"src/b.php": "/* see gcl and gcv */ $gar->save(); echo 'gar';",
-			"src/c.yml": "name: gar\ndescription: the gcl table\n",
+			"src/a.ts": "// art holds the articles\nconst art = loadArt(cus);\nconsole.log(\"Usa --help para ver dln\");",
+			"src/b.php": "/* see cus and dln */ $art->save(); echo 'art';",
+			"src/c.yml": "name: art\ndescription: the cus table\n",
 		});
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.equal(usage.hasCode, true);
@@ -255,11 +255,11 @@ describe("findSchemaUsage", () => {
 			".circleci/config.yml",
 			"public/app.min.js",
 		];
-		const contents = Object.fromEntries(skipped.map((path) => [path, "SELECT * FROM gar"]));
-		const { files, reads } = memoryFiles({ ...contents, "src/app.js": "SELECT * FROM gcl" });
+		const contents = Object.fromEntries(skipped.map((path) => [path, "SELECT * FROM art"]));
+		const { files, reads } = memoryFiles({ ...contents, "src/app.js": "SELECT * FROM cus" });
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(reads, ["src/app.js"]);
-		assert.deepEqual(usage.matches.map((match) => match.name), ["gcl"]);
+		assert.deepEqual(usage.matches.map((match) => match.name), ["cus"]);
 	});
 
 	test("field case: ordinary-word table names in a project without database code match nothing", async () => {
@@ -286,60 +286,60 @@ describe("findSchemaUsage", () => {
 
 	test("field case, positive: a PHP model and a repository query", async () => {
 		const { files } = memoryFiles({
-			"app/Models/Articulo.php": "<?php\nclass Articulo extends Model\n{\n    protected $table = 'gar';\n}\n",
-			"app/Repositories/Ventas.php": '<?php\n$sql = "SELECT * FROM gcl JOIN gcv ON gcv.cliente = gcl.codigo";\n',
+			"app/Models/Articulo.php": "<?php\nclass Articulo extends Model\n{\n    protected $table = 'art';\n}\n",
+			"app/Repositories/Ventas.php": '<?php\n$sql = "SELECT * FROM cus JOIN dln ON dln.cliente = cus.codigo";\n',
 		});
 		const usage = await findSchemaUsage("/app", erp, { files });
 		assert.deepEqual(
 			usage.matches.map((match) => [match.name, match.files]),
 			[
-				["gar", ["app/Models/Articulo.php"]],
-				["gcl", ["app/Repositories/Ventas.php"]],
-				["gcv", ["app/Repositories/Ventas.php"]],
+				["art", ["app/Models/Articulo.php"]],
+				["cus", ["app/Repositories/Ventas.php"]],
+				["dln", ["app/Repositories/Ventas.php"]],
 			],
 		);
 	});
 
-	// Found on a real ERP written in Harbour (.prg): 23 files took 66 s because
+	// Large legacy sources (Harbour .prg) took seconds per file because
 	// the SQL rules looked back from every position of the file.
 	test("scans large legacy source files quickly: the time grows with the text, not text × lookback", async () => {
 		const filler = "  cVar := 'x' // from the old menu, select it\n".repeat(10_000); // ~470 KB, no statement ends
-		const source = `${filler}  cSql := "SELECT cod FROM gcl WHERE x = 1"\n${filler}`;
-		const { files } = memoryFiles({ "src/clientes.prg": source, "src/articulos.prg": `${filler}USE gar\nUPDATE gar SET pvp = 1\n` });
+		const source = `${filler}  cSql := "SELECT cod FROM cus WHERE x = 1"\n${filler}`;
+		const { files } = memoryFiles({ "src/clientes.prg": source, "src/articulos.prg": `${filler}USE art\nUPDATE art SET pvp = 1\n` });
 		const started = performance.now();
 		const usage = await findSchemaUsage("/app", erp, { files, limits: { maxFileBytes: 2 * 1024 * 1024 } });
 		const elapsed = performance.now() - started;
-		assert.deepEqual(usage.matches.map((match) => match.name).sort(), ["gar", "gcl"]);
+		assert.deepEqual(usage.matches.map((match) => match.name).sort(), ["art", "cus"]);
 		assert.equal(usage.truncated, false);
 		assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
 	});
 
 
-	// Real lines from a Harbour ERP: the database name is built by code, and the
+	// Harbour lines as legacy code writes them: the database name is built by code, and the
 	// table goes in variables named after "tabla". PHP and JS do the same.
 	test("SQL whose database prefix is built by code, and variables named after a table", async () => {
 		const { files } = memoryFiles({
-			"src/locales.prg": [
-				'oLocales:AnadeBrowse( "(SELECT gar.nom FROM "+cMySQLEmp+".gar WHERE plan.ref = gar.ref) AS Producto" , 200)',
-				'qUpd:cDirect := "UPDATE "+cMySqlEmp+".gar SET "+CRLF',
-				'cSql := "SELECT nom FROM "+cMySqlEmp+".gfa WHERE gar.fa=gfa.cod"',
-				'qUpd:cTabla := "gcv"',
+			"src/browse.prg": [
+				'oBrw:AddColumn( "(SELECT art.nom FROM "+cDb+".art WHERE lin.ref = art.ref) AS Product" , 200)',
+				'qUpd:cDirect := "UPDATE "+cDb+".art SET "+CRLF',
+				'cSql := "SELECT nom FROM "+cDb+".fam WHERE art.fa=fam.cod"',
+				'qUpd:cTabla := "dln"',
 			].join("\n"),
-			"src/Repo.php": "$sql = \"SELECT * FROM \" . $db . \".gcl WHERE cod = ?\";\n$tableName = 'ghc';",
-			"src/repo.ts": "const rows = await q(`SELECT * FROM ${db}.gpr WHERE cod = ?`);",
-			"src/menu.prg": 'cTitulo := "gfa" // a title, not a table variable',
+			"src/Repo.php": "$sql = \"SELECT * FROM \" . $db . \".cus WHERE cod = ?\";\n$tableName = 'mov';",
+			"src/repo.ts": "const rows = await q(`SELECT * FROM ${db}.sup WHERE cod = ?`);",
+			"src/menu.prg": 'cTitulo := "fam" // a title, not a table variable',
 		});
-		const tables = snapshot(["gar", "gcl", "gcv", "gfa", "ghc", "gpr"].map((name) => table(name)));
+		const tables = snapshot(["art", "cus", "dln", "fam", "mov", "sup"].map((name) => table(name)));
 		const usage = await findSchemaUsage("/app", tables, { files });
 		assert.deepEqual(
 			usage.matches.map((match) => [match.name, match.files]),
 			[
-				["gar", ["src/locales.prg"]],
-				["gcl", ["src/Repo.php"]],
-				["gcv", ["src/locales.prg"]],
-				["gfa", ["src/locales.prg"]],
-				["ghc", ["src/Repo.php"]],
-				["gpr", ["src/repo.ts"]],
+				["art", ["src/browse.prg"]],
+				["cus", ["src/Repo.php"]],
+				["dln", ["src/browse.prg"]],
+				["fam", ["src/browse.prg"]],
+				["mov", ["src/Repo.php"]],
+				["sup", ["src/repo.ts"]],
 			].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
 		);
 	});

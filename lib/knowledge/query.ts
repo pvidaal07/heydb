@@ -59,7 +59,7 @@ export function knowledgeForTable(knowledge: Knowledge, tableName: string): Tabl
 /**
  * The relationships of a knowledge file that point to `table` of another
  * connection, `connection`: crm's file stores crm.clientes(cod_erp) → erp's
- * gcl(cod), and erp's gcl must show it.
+ * cus(cod), and erp's cus must show it.
  */
 export function relationshipsInto(knowledge: Knowledge, connection: string, table: string): Relationship[] {
 	const into = (side: RelationshipSide) => side.connection === connection && side.table === table;

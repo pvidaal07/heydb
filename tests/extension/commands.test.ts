@@ -169,18 +169,18 @@ describe("/heydb:connect", () => {
 		);
 	});
 
-	test("turns a typed name like Eagle into a valid one and says so", async () => {
+	test("turns a typed name like Acme into a valid one and says so", async () => {
 		const pi = loadHeydb();
 		const root = project();
-		const ctx = fakeContext(root, { answers: ["Eagle", "mysql", "db.internal", "", "reader", "", ""] });
+		const ctx = fakeContext(root, { answers: ["Acme", "mysql", "db.internal", "", "reader", "", ""] });
 		await runCommand(pi, "heydb:connect", "", ctx);
-		assert.ok(loadConfig(root).connections.eagle, "saved as eagle");
+		assert.ok(loadConfig(root).connections.acme, "saved as acme");
 		assert.equal(
 			ctx.notifications[0]?.message,
-			'Saved connection "eagle" (mysql reader@db.internal:3306, all databases).\n' +
-				'Connection names are lowercase letters, digits, "-" and "_", so "Eagle" became "eagle".\n' +
-				"heydb never stores passwords: set HEYDB_EAGLE_PASSWORD in your shell or in .heydb/.env (ignored by git), " +
-				"then run /heydb:sync eagle.",
+			'Saved connection "acme" (mysql reader@db.internal:3306, all databases).\n' +
+				'Connection names are lowercase letters, digits, "-" and "_", so "Acme" became "acme".\n' +
+				"heydb never stores passwords: set HEYDB_ACME_PASSWORD in your shell or in .heydb/.env (ignored by git), " +
+				"then run /heydb:sync acme.",
 		);
 	});
 

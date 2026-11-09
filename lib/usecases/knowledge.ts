@@ -43,7 +43,7 @@ import { loadSnapshot } from "../store/snapshots.ts";
 // corrected or forgotten after a column is dropped.
 //
 // A relationship may cross connections (crm.clientes.cod_erp → erp's
-// gcl.cod). It is stored in the file of its "from" connection, and its "to"
+// cus.cod). It is stored in the file of its "from" connection, and its "to"
 // side names the other connection and is checked against that snapshot.
 
 export function annotate(
