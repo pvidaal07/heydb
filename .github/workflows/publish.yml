@@ -1,8 +1,13 @@
 name: Publish
 
-# Pushing a tag vX.Y.Z (or vX.Y.Z-beta.N) that matches package.json publishes
-# the package to npm and creates the GitHub release. Only maintainers can push
-# v* tags (the "release-tags" ruleset).
+# Pushing a tag vX.Y.Z (or vX.Y.Z-beta.N) that matches package.json stages the
+# package on npm and creates the GitHub release. Only maintainers can push v*
+# tags (the "release-tags" ruleset).
+#
+# Staged, not published: the version waits on npm until a maintainer approves
+# it with 2FA (npmjs.com → package → Staged Packages → Approve, or
+# `npm stage approve <stage-id>`). A stolen GitHub account alone cannot
+# release; the trusted publisher on npm only allows staging.
 #
 # Two jobs on purpose: dependencies are installed and tests run in a job with a
 # read-only token. The publish job installs nothing; it packs the checked-out
@@ -65,18 +70,18 @@ jobs:
         with:
           node-version: "24"
 
-      - name: npm supports trusted publishing
+      - name: npm supports staged trusted publishing
         run: |
           version="$(npm --version)"
           echo "npm ${version}"
-          if [ "$(printf '%s\n' 11.5.1 "${version}" | sort -V | head -n1)" != "11.5.1" ]; then
-            echo "::error::npm ${version} is older than 11.5.1, the first version with trusted publishing"
+          if [ "$(printf '%s\n' 11.15.0 "${version}" | sort -V | head -n1)" != "11.15.0" ]; then
+            echo "::error::npm ${version} is older than 11.15.0, the first version with staged publishing"
             exit 1
           fi
 
       # No dependency install here: the package ships its own sources and
       # nothing third-party runs with this job's permissions.
-      - name: Publish to npm
+      - name: Stage on npm
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
@@ -92,7 +97,8 @@ jobs:
           case "${version}" in
             *-*) case "${current}" in "" | *-*) ;; *) tag="beta" ;; esac ;;
           esac
-          npm publish --provenance --access public --tag "${tag}"
+          npm stage publish --provenance --access public --tag "${tag}"
+          echo "::notice::${name}@${version} is staged. Approve it on npmjs.com (Staged Packages) to make it public."
 
       - name: GitHub release
         env:

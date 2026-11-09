@@ -147,7 +147,7 @@ node --run db:down
 pi -e .                    # try the local copy in Pi
 ```
 
-Releases (maintainers): bump `version` in `package.json`, add the entry to `CHANGELOG.md`, merge, and push a tag `vX.Y.Z` on `main`; the publish workflow tests, publishes to npm through trusted publishing and creates the GitHub release.
+Releases (maintainers): bump `version` in `package.json`, add the entry to `CHANGELOG.md`, merge, and push a tag `vX.Y.Z` on `main`; the publish workflow tests, stages the version on npm through trusted publishing and creates the GitHub release. The version becomes public once a maintainer approves it on npmjs.com (Staged Packages) with 2FA.
 
 ## License
 
