@@ -1,19 +1,27 @@
 # Token benchmark
 
 How much context an agent spends to find the tables that answer a question,
-through the heydb tools or by querying `information_schema` itself.
+through the heydb tools or through the other ways people give an agent
+knowledge of a database: a schema document, a grep of the code, direct SQL,
+an ORM schema, a generic database MCP server.
 
 ```bash
-node bench/run.ts                     # synthetic legacy ERP, 10 company databases
+node bench/run.ts                     # synthetic legacy ERP, 10 company databases, and its code
 node bench/run.ts --companies 50      # the same with 50
 node bench/run.ts --json              # raw numbers
-node bench/run.ts --project ../app --questions questions.json [--connection erp]
-node bench/run.ts --learn             # any of the above, before and after noting each answer
+node bench/run.ts --project ../app --questions questions.json [--connection erp] [--code ../app/src]
+node bench/run.ts --learn             # any of the above, adding heydb after noting each answer
 ```
 
 `--project` reads a real heydb project: only its stored snapshot and notes,
-never the database. The questions and the report of a real project name real
-tables: keep them out of this repository.
+never the database. `--code` is the folder the code-grep strategy searches;
+without it that strategy is skipped (the synthetic run generates a tiny code
+and docs tree, `synthetic-code.ts`). The questions and the report of a real
+project name real tables: keep them out of this repository.
+
+The report is one table comparing every strategy (≈tokens, calls, expected
+tables found, their rank in the first call's output, time), then heydb's
+per-question report.
 
 ## What it measures
 
@@ -51,7 +59,84 @@ The `information_schema` side is what `mysql --batch` would print:
 
 Tokens are characters / 4: good enough to compare two runs, not a bill.
 
-## Limits
+## Strategies
+
+Each strategy is a module under `strategies/` with one interface,
+`run(question) → steps`, and runs every question with the same policy:
+
+1. search with each of the question's queries, in order, until every
+   expected table is named by what the search printed;
+2. if one never was, fall back to that strategy's way of browsing;
+3. read the definitions of the expected tables (the agent goes straight to the
+   right ones, however it got there).
+
+| strategy | simulates | search | fallback | read |
+|---|---|---|---|---|
+| heydb | the heydb tools, run for real | `heydb_search` | `heydb_overview` | `heydb_table` per table |
+| heydb-notes (`--learn`) | the same after one note per answer | as above | as above | as above |
+| schema-doc-full | a SCHEMA.md as schema-to-markdown tools write it (per table a heading, its comment and a column table name, type, null, key, comment), loaded whole | none: one read per question | — | — |
+| schema-doc-grep | the same file, grepped | `rg -i -n -C2` with the query's words | `rg -n '^## '`: every heading | the table's section, heading to next heading |
+| code-grep | `rg` over the project's code and docs (`--code`) | `rg -i -n` with the query's words | list the databases, then one database's tables with their comments (SQL) | the table's columns from information_schema |
+| db-smart | direct SQL as a capable agent writes it (simulated) | tables, then columns, whose name or comment is `LIKE '%word%'`, `LIMIT 100` each, in one call | one database's tables with their comments | the tables' columns from information_schema |
+| orm-schema | a Prisma-like `schema.prisma` generated from the snapshot: a model per table with `@@map`, typed fields, `@id`, `///` comments (the best case for an ORM) | `rg -i -n -C2` with the query's words | `rg -n '^model '`: every model | the model block |
+| db-mcp | a generic database MCP server (simulated): no search | `list_tables` of the database (names only; `list_databases` first when there are several) | — | `describe_table` per table |
+| info-schema-guided | the guided baseline (simulated) | list the databases, one database's tables with their comments | — | the tables' columns, one query |
+| info-schema-columns | one query over information_schema.columns (simulated) | none: one query per question | — | — |
+
+What the columns of the comparison mean:
+
+- **≈tokens**: characters returned to the model / 4, every call of every
+  question. heydb's tool definitions (≈1.6k tokens, sent every turn) are not
+  in it; grep, read and bash come with any agent, and a database MCP server's
+  tool definitions cost their own, also not counted.
+- **calls**: tool calls, each one a model round trip.
+- **found**: expected tables named by what the model read before reading their
+  definitions, whole name (letters, digits, `_`): `fac_cab_2019` does not name
+  `fac_cab`. A file or a query that holds the whole schema finds everything.
+  A pick from a list of names (db-mcp, and the guided listing, which also
+  shows comments) counts only by the **name-pick rule**: a part of the table's
+  name (split on `_` and digits) is a word of the question's queries, or is 3
+  letters or more and starts one (`fac` for "facturas"), or a listed comment
+  holds one; accents and plurals folded. It says the table is among the
+  candidates, not that the model would pick it: see the rank.
+- **first call: top 1 / top 5**: expected tables first, or in the first five,
+  of the tables the first call's output names, in the order it names them; for
+  a name pick, of the candidates in list order; for SQL, rows in snapshot
+  order, standing for the order a server returns them in (it promises none
+  without `ORDER BY`). `—` where the whole schema is in context.
+- **time**: wall clock of the calls on this machine. heydb and the file
+  strategies run for real (generating SCHEMA.md or schema.prisma once is not
+  counted); the database strategies (`*`) are simulated over the snapshot, so
+  their time is local work only: a real server adds a network round trip per
+  call, not included and not invented here.
+
+Words a search uses: the query's words of 3 letters or more, without a few
+stopwords, as typed. grep folds neither accents nor plurals, so "almacen"
+does not find "Almacén", as with `rg -i`; SQL `LIKE` ignores case and accents,
+as the usual `_ci` collations do. Every grep stops at 100 lines (as an agent
+piping to `head -100`) and cuts lines at 200 characters. code-grep is written
+in Node (no `rg` needed): it reads one file at a time, stops at the cap, and
+skips binary files (a NUL in the first 8 KB), files over 2 MB, `node_modules`,
+`.git`, `.heydb` (heydb's own notes) and `.env` files (secrets). Generated
+files go to a temporary folder; the measured project and the code folder are
+only read.
+
+### Honest limits
+
+- No real model: every strategy follows a fixed policy, and after a fallback
+  goes straight to the right table. A real agent makes more calls on all of
+  them, and may read around a grep hit instead of falling back.
+- The simulation favors strategies that work on exact names: a found by name
+  pick is a candidate, not a choice; ranks show how many candidates came first.
+- `-C2` rarely reaches a table's heading from a hit in its column table, so
+  schema-doc-grep and orm-schema mostly find tables through table comments.
+- The documents cover every database of the connection, as the tools generate
+  them; a hand-written doc might cover one company database.
+- Database latency is not included; heydb never connects to the database.
+- The synthetic schema, its comments and its code were written by hand: they
+  show trends, not truth. Run it on a real project too.
+
+## Limits (heydb side)
 
 - The simulated agent is generous to both sides: after the overview it goes
   straight to the right table, and the guided baseline never picks a wrong
@@ -152,3 +237,52 @@ same note. The notes repeat the questions word for word, so this is the upper
 bound of what a note buys; real notes use other words than the next question.
 Fixed tool text is ≈1.65k tokens (was ≈1.62k): the `heydb_annotate` guideline
 now asks for confirmed meanings in the words people search with.
+
+## Competitive comparison (synthetic ERP)
+
+`node bench/run.ts --learn`, 10 company databases (2,560 tables, 56,170
+columns), 10 questions, 11 expected tables, the synthetic code tree:
+
+| strategy | ≈tokens | calls | found | first call: top 1 / top 5 | time |
+|---|---|---|---|---|---|
+| heydb | ≈7.6k | 25 | 9 of 11 | 9 / 9 | ≈2.0 s |
+| heydb, one note per answer | ≈3.2k | 21 | 11 of 11 | 10 / 11 | ≈1.6 s |
+| schema-doc-full | ≈5.8M | 10 | 11 of 11 | — | ≈20 ms |
+| schema-doc-grep | ≈205k | 41 | 0 of 11 | 0 / 0 | ≈160 ms |
+| code-grep | ≈7.5k | 35 | 5 of 11 | 4 / 5 | ≈13 ms |
+| db-smart * | ≈11.1k | 27 | 8 of 11 | 0 / 3 | ≈185 ms |
+| orm-schema | ≈144k | 36 | 3 of 11 | 1 / 2 | ≈186 ms |
+| db-mcp * | ≈10.6k | 31 | 10 of 11 (name pick) | 0 / 3 | ≈0.2 ms |
+| info-schema-guided * | ≈11.4k | 30 | 10 of 11 (name pick) | 0 / 3 | ≈0.7 ms |
+| info-schema-columns * | ≈5.9M | 10 | 11 of 11 | — | ≈60 ms |
+
+`*` simulated: no network round trips in the time.
+
+With 1 and 50 companies, ≈tokens:
+
+| companies | heydb | heydb, notes | code-grep | db-smart | db-mcp | info-schema guided | schema-doc-grep | orm-schema | schema-doc-full |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | ≈4.7k | ≈3.0k | ≈7.4k | ≈6.4k | ≈10.4k | ≈11.2k | ≈25k | ≈16k | ≈581k |
+| 10 | ≈7.6k | ≈3.2k | ≈7.5k | ≈11.1k | ≈10.6k | ≈11.4k | ≈205k | ≈144k | ≈5.8M |
+| 50 | ≈20.6k | ≈3.2k | ≈7.9k | ≈13.1k | ≈11.4k | ≈12.2k | ≈1.0M | ≈717k | ≈29M |
+
+What it says:
+
+- Loading the schema whole (a SCHEMA.md or every column) finds everything and
+  costs everything: 580k tokens with one company, beyond any context window
+  with ten.
+- Grepping a schema document or an ORM schema finds little (a hit in a column
+  table does not show which table it is) and falls back to listing every
+  heading or model, which grows with the schema.
+- The cheap alternatives (code-grep, db-smart, db-mcp, guided) cost about the
+  same as heydb without notes, but rank the right table first far less often
+  (0 to 4 of 11 against 9 of 11) and need more calls (27 to 35 against 25).
+  Their "found" comes from exact words: code-grep finds what the code names on
+  the same line as the words, a name pick finds a candidate among dozens.
+- heydb's weak spot is the overview fallback, which grows with the number of
+  databases (≈20.6k tokens at 50 companies); with notes it stays at ≈3.2k,
+  ranks 10 of 11 first and needs no fallback. Those notes repeat the questions
+  word for word: the upper bound of what notes buy.
+- heydb is the slowest in time, ≈80 ms per call with 10 companies and ≈450 ms
+  with 50: each tool call reads and parses the stored snapshot again. Still
+  below one model round trip, but the next thing to make faster.
