@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { validateKnowledge } from "../../lib/knowledge/validate.ts";
+import { validateKnowledge, validateProjectKnowledge } from "../../lib/knowledge/validate.ts";
 import { annotation, knowledge, relationship } from "./fixtures.ts";
 
 function valid(): any {
@@ -73,5 +73,55 @@ describe("validateKnowledge", () => {
 
 	test("rejects a value that is not an object", () => {
 		assert.throws(() => validateKnowledge([]), { message: "knowledge must be an object" });
+	});
+});
+
+describe("validateKnowledge across connections", () => {
+	test("a file written before cross-connection relationships loads with no connection on either side", () => {
+		const [loaded] = validateKnowledge(valid()).relationships;
+		assert.equal(loaded !== undefined && "connection" in loaded.from, false);
+		assert.equal(loaded !== undefined && "connection" in loaded.to, false);
+	});
+
+	test("keeps the connection of a side that lives in another connection", () => {
+		const data = valid();
+		data.relationships[0].to.connection = "erp";
+		assert.deepEqual(validateKnowledge(data).relationships[0]?.to, {
+			connection: "erp",
+			table: "shop.shop.customers",
+			columns: ["id", "shop_id"],
+		});
+	});
+
+	test("rejects a connection that is not a non-empty string", () => {
+		for (const value of ["", 3]) {
+			const data = valid();
+			data.relationships[0].to.connection = value;
+			assert.throws(() => validateKnowledge(data), { message: "relationships[0].to.connection must be a non-empty string" });
+		}
+	});
+});
+
+describe("validateProjectKnowledge", () => {
+	const projectFile = (): any => structuredClone(knowledge([annotation("p1", "project"), annotation("p2", "project")]));
+
+	test("accepts notes whose target is the literal project", () => {
+		assert.deepEqual(validateProjectKnowledge(projectFile()), projectFile());
+	});
+
+	test("rejects a note on anything else, even a valid canonical name", () => {
+		const data = projectFile();
+		data.annotations[1].target = "shop.shop";
+		assert.throws(() => validateProjectKnowledge(data), {
+			message: 'annotations[1].target must be "project" in the project file: got "shop.shop"',
+		});
+	});
+
+	test("rejects relationships: they belong to a connection", () => {
+		const data = valid();
+		data.annotations = [];
+		assert.throws(() => validateProjectKnowledge(data), {
+			message: "relationships must be empty: the project file holds only project notes",
+		});
 	});
 });

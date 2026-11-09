@@ -8,10 +8,10 @@ import { afterEach, describe, test } from "node:test";
 import type { ConnectionConfig } from "../../lib/config/types.ts";
 import { loadConfig, saveConfig } from "../../lib/config/store.ts";
 import type { Snapshot } from "../../lib/model/snapshot.ts";
-import { loadKnowledge } from "../../lib/store/knowledge.ts";
+import { loadKnowledge, loadProjectKnowledge } from "../../lib/store/knowledge.ts";
 import { saveSnapshot } from "../../lib/store/snapshots.ts";
 import { initProject } from "../../lib/usecases/init.ts";
-import { annotate, relate } from "../../lib/usecases/knowledge.ts";
+import { annotate, annotateProject, relate } from "../../lib/usecases/knowledge.ts";
 import {
 	ProjectError,
 	buildConnection,
@@ -316,6 +316,13 @@ describe("forgetById", () => {
 	test("says no entry has an unknown id", () => {
 		const root = project();
 		assert.throws(() => forgetById(root, "local", "nope"), { message: 'no annotation or relationship has id "nope"' });
+	});
+
+	test("finds a project note too, whatever the connection", () => {
+		const root = project();
+		const note = annotateProject(root, { text: "One database per client.", author: "ana" }, fixedClock());
+		assert.deepEqual(forgetById(root, "local", note.id), { kind: "annotation", annotation: note });
+		assert.deepEqual(loadProjectKnowledge(root).annotations, []);
 	});
 });
 

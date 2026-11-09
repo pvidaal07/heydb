@@ -1,7 +1,7 @@
 import { formatName, parseName } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
 import { canonicalTable } from "./operations.ts";
-import type { Annotation, Knowledge, Relationship } from "./types.ts";
+import type { Annotation, Knowledge, Relationship, RelationshipSide } from "./types.ts";
 
 // Pure reads over Knowledge. Nothing here changes or deletes an entry.
 
@@ -14,6 +14,13 @@ export interface TableKnowledge {
 	readonly columns: Readonly<Record<string, readonly Annotation[]>>;
 	/** Implicit foreign keys where the table is on either side. */
 	readonly relationships: readonly Relationship[];
+}
+
+/** A relationship read from another connection's knowledge file. */
+export interface ExternalRelationship {
+	/** The connection whose file stores it; its sides without a connection are tables of that one. */
+	readonly connection: string;
+	readonly relationship: Relationship;
 }
 
 /**
@@ -44,8 +51,23 @@ export function knowledgeForTable(knowledge: Knowledge, tableName: string): Tabl
 		database,
 		table: tableNotes,
 		columns: Object.fromEntries(columns),
-		relationships: knowledge.relationships.filter((item) => item.from.table === table || item.to.table === table),
+		// A side in another connection is never a table of this one, even with the same name.
+		relationships: knowledge.relationships.filter((item) => isHere(item.from, table) || isHere(item.to, table)),
 	};
+}
+
+/**
+ * The relationships of a knowledge file that point to `table` of another
+ * connection, `connection`: crm's file stores crm.clientes(cod_erp) → erp's
+ * gcl(cod), and erp's gcl must show it.
+ */
+export function relationshipsInto(knowledge: Knowledge, connection: string, table: string): Relationship[] {
+	const into = (side: RelationshipSide) => side.connection === connection && side.table === table;
+	return knowledge.relationships.filter((item) => into(item.from) || into(item.to));
+}
+
+function isHere(side: RelationshipSide, table: string): boolean {
+	return side.connection === undefined && side.table === table;
 }
 
 export interface Orphans {
@@ -53,21 +75,37 @@ export interface Orphans {
 	readonly relationships: readonly Relationship[];
 }
 
+/** Answers "does this canonical name exist?" for one snapshot. */
+export type Lookup = (name: string) => boolean;
+
+/** The lookup of another connection, or null when it is gone or was never synced. */
+export type OtherConnections = (connection: string) => Lookup | null;
+
 /**
  * Knowledge whose database, table or column is no longer in the snapshot.
  * Only reported, never deleted: a note on a dropped column may still be the
  * only explanation of old rows, backups or the code that used it.
+ *
+ * A side in another connection is checked against `others`: a relationship
+ * whose other connection is gone or unsynced is reported too. Without
+ * `others`, those sides are not checked.
  */
-export function findOrphans(knowledge: Knowledge, snapshot: Snapshot): Orphans {
+export function findOrphans(knowledge: Knowledge, snapshot: Snapshot, others?: OtherConnections): Orphans {
 	const exists = snapshotLookup(snapshot);
+	const missing = (side: RelationshipSide): boolean => {
+		if (side.connection === undefined) return missingInSide(side, exists) !== null;
+		if (others === undefined) return false;
+		const lookup = others(side.connection);
+		return lookup === null || missingInSide(side, lookup) !== null;
+	};
 	return {
 		annotations: knowledge.annotations.filter((annotation) => !exists(annotation.target)),
-		relationships: knowledge.relationships.filter((relationship) => missingInRelationship(relationship, exists) !== null),
+		relationships: knowledge.relationships.filter((relationship) => missing(relationship.from) || missing(relationship.to)),
 	};
 }
 
 /** Answers "does this canonical name exist in the snapshot?" for databases, tables and columns. */
-export function snapshotLookup(snapshot: Snapshot): (name: string) => boolean {
+export function snapshotLookup(snapshot: Snapshot): Lookup {
 	const names = new Set<string>();
 	for (const database of snapshot.databases) {
 		for (const schema of database.schemas) {
@@ -83,13 +121,9 @@ export function snapshotLookup(snapshot: Snapshot): (name: string) => boolean {
 	return (name) => names.has(formatName(parseName(name)));
 }
 
-/** The first table or column of the relationship missing from the snapshot, or null. */
-export function missingInRelationship(relationship: Relationship, exists: (name: string) => boolean): string | null {
-	for (const side of [relationship.from, relationship.to]) {
-		const ref = parseName(side.table);
-		const names = [side.table, ...side.columns.map((column) => formatName({ ...ref, column }))];
-		const missing = names.find((name) => !exists(name));
-		if (missing !== undefined) return missing;
-	}
-	return null;
+/** The table, or else the first column, of one relationship side missing from a snapshot; null when all exist. */
+export function missingInSide(side: RelationshipSide, exists: Lookup): string | null {
+	const ref = parseName(side.table);
+	const names = [side.table, ...side.columns.map((column) => formatName({ ...ref, column }))];
+	return names.find((name) => !exists(name)) ?? null;
 }

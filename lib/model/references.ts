@@ -15,6 +15,10 @@ import type { Snapshot, Table } from "./snapshot.ts";
 //
 // A table never references itself here: its own foreign keys are shown as
 // outgoing relationships, and a self-reference says nothing about meaning.
+//
+// Only relationships between two tables of this snapshot count. One that
+// crosses into another connection names a table of a different database
+// server, even when the name is the same; heydb_table lists those apart.
 
 /** Guesses kept per table; the rest are only counted. */
 export const MAX_NAME_PATTERN_GUESSES = 200;
@@ -76,7 +80,7 @@ export function incomingReferences(snapshot: Snapshot, knowledge: Knowledge, tab
 		}
 	}
 
-	const implicit = knowledge.relationships
+	const implicit = local(knowledge)
 		.filter((relationship) => relationship.to.table === canonical && relationship.from.table !== canonical)
 		.map((relationship) => {
 			const from = tables.get(relationship.from.table)?.table;
@@ -123,7 +127,7 @@ export function incomingCounts(snapshot: Snapshot, knowledge: Knowledge): Map<st
 			if (to !== name) add(to);
 		}
 	}
-	for (const relationship of knowledge.relationships) {
+	for (const relationship of local(knowledge)) {
 		if (relationship.to.table !== relationship.from.table) add(relationship.to.table);
 	}
 
@@ -191,8 +195,15 @@ function coveredColumns(snapshot: Snapshot, knowledge: Knowledge): Set<string> {
 	for (const [name, { table }] of tableIndex(snapshot)) {
 		for (const key of table.foreignKeys) for (const column of key.columns) covered.add(columnKey(name, column));
 	}
-	for (const { from } of knowledge.relationships) for (const column of from.columns) covered.add(columnKey(from.table, column));
+	for (const { from } of knowledge.relationships) {
+		if (from.connection === undefined) for (const column of from.columns) covered.add(columnKey(from.table, column));
+	}
 	return covered;
+}
+
+/** The relationships whose two sides are tables of this connection. */
+function local(knowledge: Knowledge): Relationship[] {
+	return knowledge.relationships.filter(({ from, to }) => from.connection === undefined && to.connection === undefined);
 }
 
 function columnKey(table: string, column: string): string {

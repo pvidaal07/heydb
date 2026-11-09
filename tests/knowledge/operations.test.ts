@@ -3,13 +3,14 @@ import { describe, test } from "node:test";
 
 import {
 	addAnnotation,
+	addProjectNote,
 	addRelationship,
 	editAnnotation,
 	emptyKnowledge,
 	removeAnnotation,
 	removeRelationship,
 } from "../../lib/knowledge/operations.ts";
-import type { Knowledge } from "../../lib/knowledge/types.ts";
+import { type Knowledge, PROJECT_TARGET } from "../../lib/knowledge/types.ts";
 import { annotation, fixedClock, knowledge, relationship } from "./fixtures.ts";
 
 // Freezes the whole tree, so any attempt to mutate the input throws in strict mode.
@@ -221,5 +222,53 @@ describe("removeRelationship", () => {
 
 	test("rejects an unknown id", () => {
 		assert.throws(() => removeRelationship(emptyKnowledge(), "nope"), { message: 'unknown relationship id "nope"' });
+	});
+});
+
+describe("relationships across connections", () => {
+	const toErp = { ...ordersToCustomers, to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] } };
+
+	test("keeps the connection of the other side", () => {
+		const { relationship: added } = addRelationship(emptyKnowledge(), toErp, fixedClock());
+		assert.deepEqual(added.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.equal("connection" in added.from, false);
+	});
+
+	test("the same table name in another connection is a different side", () => {
+		const local = { ...ordersToCustomers, to: { table: "erp.erp.gcl", columns: ["cod"] } };
+		const { knowledge: once } = addRelationship(emptyKnowledge(), local, fixedClock());
+		const { knowledge: twice } = addRelationship(once, toErp, fixedClock());
+		assert.equal(twice.relationships.length, 2);
+		assert.throws(() => addRelationship(twice, toErp, fixedClock()), { message: /^relationship already exists/ });
+	});
+
+	test("rejects an empty connection", () => {
+		assert.throws(() => addRelationship(emptyKnowledge(), { ...toErp, to: { ...toErp.to, connection: " " } }, fixedClock()), {
+			message: "relationship to.connection must not be empty",
+		});
+	});
+});
+
+describe("addProjectNote", () => {
+	test("adds a note about the whole project, target project", () => {
+		const { knowledge: result, annotation: added } = addProjectNote(
+			frozen(emptyKnowledge()),
+			{ text: " One database per client. ", author: "ana" },
+			fixedClock(),
+		);
+		assert.deepEqual(added, {
+			id: "id-001",
+			target: PROJECT_TARGET,
+			text: "One database per client.",
+			author: "ana",
+			createdAt: "2026-11-06T10:00:00.000Z",
+			updatedAt: "2026-11-06T10:00:00.000Z",
+		});
+		assert.deepEqual(result, knowledge([added]));
+		assert.equal(PROJECT_TARGET, "project");
+	});
+
+	test("rejects empty text", () => {
+		assert.throws(() => addProjectNote(emptyKnowledge(), { text: "  ", author: "ana" }), { message: "annotation text must not be empty" });
 	});
 });

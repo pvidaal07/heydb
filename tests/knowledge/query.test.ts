@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { findOrphans, knowledgeForTable } from "../../lib/knowledge/query.ts";
+import { findOrphans, knowledgeForTable, relationshipsInto, snapshotLookup } from "../../lib/knowledge/query.ts";
+import type { Relationship } from "../../lib/knowledge/types.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 import { annotation, knowledge, relationship } from "./fixtures.ts";
 
@@ -85,5 +86,43 @@ describe("findOrphans", () => {
 		const legacyNote = annotation("d2", "legacy.legacy");
 		const result = findOrphans(knowledge([legacyNote, dbNote, customersNote, emailNote, tableNote], [fk]), onlyOrders);
 		assert.deepEqual(result, { annotations: [legacyNote, customersNote, emailNote], relationships: [fk] });
+	});
+});
+
+describe("relationships across connections", () => {
+	// Stored in crm's file: crm.clientes(cod_erp) → erp:gcl(cod).
+	const toErp: Relationship = {
+		...relationship("x1", "crm.crm.clientes", ["cod_erp"], "erp.erp.gcl", ["cod"]),
+		to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] },
+	};
+	const gcl = { ...customersTable(), name: "gcl", columns: [column("cod", 1)] };
+	const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [gcl], routines: [] }] }] });
+	const crmSnapshot = snapshot([], {
+		databases: [{ name: "crm", schemas: [{ name: "crm", tables: [{ ...gcl, name: "clientes", columns: [column("cod_erp", 1)] }], routines: [] }] }],
+	});
+
+	test("knowledgeForTable never takes a side in another connection for a table of this one", () => {
+		// The same canonical name, but in erp: crm's own erp.erp.gcl is not its target.
+		assert.deepEqual(knowledgeForTable(knowledge([], [toErp]), "erp.erp.gcl").relationships, []);
+		assert.deepEqual(knowledgeForTable(knowledge([], [toErp]), "crm.crm.clientes").relationships, [toErp]);
+	});
+
+	test("relationshipsInto finds what another connection's file says points to a table of this one", () => {
+		const local = relationship("x2", "erp.erp.gcl", ["cod"], "erp.erp.gcl", ["cod"]);
+		assert.deepEqual(relationshipsInto(knowledge([], [toErp, local]), "erp", "erp.erp.gcl"), [toErp]);
+		assert.deepEqual(relationshipsInto(knowledge([], [toErp]), "erp", "erp.erp.other"), []);
+		assert.deepEqual(relationshipsInto(knowledge([], [toErp]), "sales", "erp.erp.gcl"), []);
+	});
+
+	test("findOrphans checks the other side against the other connection's snapshot", () => {
+		const k = knowledge([], [toErp]);
+		assert.deepEqual(findOrphans(k, crmSnapshot, (name) => (name === "erp" ? snapshotLookup(erpSnapshot) : null)).relationships, []);
+		const dropped = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [{ ...gcl, columns: [column("id", 1)] }], routines: [] }] }] });
+		assert.deepEqual(findOrphans(k, crmSnapshot, () => snapshotLookup(dropped)).relationships, [toErp]);
+		assert.deepEqual(findOrphans(k, crmSnapshot, () => null).relationships, [toErp], "connection gone or never synced");
+	});
+
+	test("findOrphans without other connections leaves their sides unchecked", () => {
+		assert.deepEqual(findOrphans(knowledge([], [toErp]), crmSnapshot).relationships, []);
 	});
 });

@@ -505,3 +505,73 @@ describe("renderSearch", () => {
 		assert.equal(renderSearch({ results: [], total: 0 }), "No matches.");
 	});
 });
+
+describe("project notes and other connections", () => {
+	const gcl: Table = { ...customersTable(), name: "gcl", columns: [column("cod", 1)], primaryKey: ["cod"] };
+	const clientes: Table = { ...customersTable(), name: "clientes", columns: [column("id", 1), column("cod_erp", 2)] };
+	// Stored in crm's file: crm.clientes(cod_erp) → erp:gcl(cod).
+	const toErp = {
+		...relationship("r-9", "crm.crm.clientes", ["cod_erp"], "erp.erp.gcl", ["cod"]),
+		to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] },
+		note: "Same code.",
+	};
+
+	test("the overview shows project notes first, with their ids", () => {
+		const shop = snapshot([customersTable()]);
+		const projectNotes = [annotation("p-1", "project", { text: "One database per client.\nThe central one is eagle." })];
+		const text = renderOverview(shop, emptyKnowledge(), { connection: "local", projectNotes });
+		assert.deepEqual(text.split("\n").slice(0, 7), [
+			"# heydb · local",
+			"mysql 8.0.36 · captured 2026-11-03T10:00:00.000Z",
+			"",
+			"## Project notes",
+			"- One database per client.",
+			"  The central one is eagle. [id p-1 · ana · 2026-11-06]",
+			"",
+		]);
+		assert.equal(renderOverview(shop, emptyKnowledge(), { connection: "local", projectNotes: [] }), renderOverview(shop, emptyKnowledge(), { connection: "local" }));
+	});
+
+	test("a table shows relationships stored in other connections that point to it, with their connection", () => {
+		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(emptyKnowledge(), "erp.erp.gcl"), undefined, {
+			connection: "erp",
+			external: [{ connection: "crm", relationship: toErp }],
+		});
+		assert.match(
+			text,
+			/## Referenced by\n- crm: crm\.clientes\(cod_erp\) → \(cod\) · implicit, documented by ana · Same code\. \[id r-9 · connection crm · 2026-11-06\]\n/,
+		);
+	});
+
+	test("an outgoing relationship to another connection names that connection", () => {
+		const text = renderTable(clientes, "crm.crm.clientes", knowledgeForTable(knowledge([], [toErp]), "crm.crm.clientes"), undefined, {
+			connection: "crm",
+		});
+		assert.match(text, /## Relationships\n- \(cod_erp\) → erp: erp\.gcl\(cod\) · implicit, documented by ana · Same code\. \[id r-9 · 2026-11-06\]/);
+	});
+
+	test("a relationship into another connection is not shown on a same-named table of this one", () => {
+		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(knowledge([], [toErp]), "erp.erp.gcl"), undefined, { connection: "crm" });
+		assert.doesNotMatch(text, /r-9/);
+	});
+
+	test("says which knowledge files of other connections could not be read", () => {
+		const text = renderTable(gcl, "erp.erp.gcl", knowledgeForTable(emptyKnowledge(), "erp.erp.gcl"), undefined, {
+			connection: "erp",
+			unreadable: ["knowledge/crm.json is not valid JSON"],
+		});
+		assert.match(text, /## Referenced by\n- not read: knowledge\/crm\.json is not valid JSON/);
+	});
+
+	test("search shows the connection of a relationship side in another connection", () => {
+		const relationship = { from: { table: "crm.crm.clientes", columns: ["cod_erp"] }, to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] } };
+		const base = { snippet: "", inferred: false, columns: [], moreColumns: 0 };
+		assert.equal(
+			renderSearch({
+				results: [{ ...base, target: "x", object: "relationship", matchedIn: ["relationship note: code"], snippet: "code", relationship }],
+				total: 1,
+			}),
+			"1 match.\n- relationship crm.clientes(cod_erp) → erp: erp.gcl(cod) · relationship note: code",
+		);
+	});
+});

@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
 import { addAnnotation, emptyKnowledge } from "../../lib/knowledge/operations.ts";
-import { knowledgePath, loadKnowledge, saveKnowledge } from "../../lib/store/knowledge.ts";
+import {
+	knowledgeConnections,
+	knowledgePath,
+	loadKnowledge,
+	loadProjectKnowledge,
+	projectKnowledgePath,
+	saveKnowledge,
+	saveProjectKnowledge,
+} from "../../lib/store/knowledge.ts";
 import { annotation, fixedClock, knowledge, relationship } from "../knowledge/fixtures.ts";
 
 const roots: string[] = [];
@@ -185,5 +193,54 @@ describe("saveKnowledge / loadKnowledge", () => {
 		const root = projectRoot();
 		mkdirSync(knowledgePath(root, "local"), { recursive: true });
 		assert.throws(() => loadKnowledge(root, "local"), { code: "EISDIR" });
+	});
+});
+
+describe("knowledge across connections", () => {
+	test("drops a side's connection when it names the file's own connection", () => {
+		const root = projectRoot();
+		const own = relationship("r1", "shop.shop.orders", ["customer_id"], "shop.shop.customers", ["id"]);
+		saveKnowledge(root, "local", knowledge([], [{ ...own, to: { ...own.to, connection: "local" } }]));
+		assert.deepEqual(loadKnowledge(root, "local").relationships, [own]);
+	});
+
+	test("knowledgeConnections lists the connections that have a knowledge file, sorted, never the project file", () => {
+		const root = projectRoot();
+		saveKnowledge(root, "erp", knowledge());
+		saveKnowledge(root, "crm", knowledge());
+		saveProjectKnowledge(root, knowledge());
+		writeFileSync(join(root, ".heydb", "knowledge", "Notes.txt"), "not knowledge");
+		writeFileSync(join(root, ".heydb", "knowledge", "Bad Name.json"), "{}");
+		assert.deepEqual(knowledgeConnections(root), ["crm", "erp"]);
+		assert.deepEqual(knowledgeConnections(projectRoot()), []);
+	});
+});
+
+describe("project knowledge", () => {
+	const projectNote = annotation("p1", "project", { text: "One database per client; the central one is eagle." });
+
+	test("lives in .heydb/knowledge/_project.json and round-trips", () => {
+		const root = projectRoot();
+		assert.equal(projectKnowledgePath(root), join(root, ".heydb", "knowledge", "_project.json"));
+		assert.deepEqual(loadProjectKnowledge(root), emptyKnowledge());
+		saveProjectKnowledge(root, knowledge([projectNote]));
+		assert.deepEqual(loadProjectKnowledge(root), knowledge([projectNote]));
+	});
+
+	test("rejects a project file with a note on anything but the project", () => {
+		const root = projectRoot();
+		mkdirSync(join(root, ".heydb", "knowledge"));
+		writeFileSync(projectKnowledgePath(root), JSON.stringify(knowledge([projectNote, annotation("a1", "shop.shop")])));
+		assert.throws(() => loadProjectKnowledge(root), {
+			message: 'knowledge/_project.json is not a heydb knowledge file: annotations[1].target must be "project" in the project file: got "shop.shop"',
+		});
+	});
+
+	test("refuses to save a note on anything but the project, and writes nothing", () => {
+		const root = projectRoot();
+		assert.throws(() => saveProjectKnowledge(root, knowledge([annotation("a1", "shop.shop")])), {
+			message: 'annotations[0].target must be "project" in the project file: got "shop.shop"',
+		});
+		assert.deepEqual(loadProjectKnowledge(root), emptyKnowledge());
 	});
 });

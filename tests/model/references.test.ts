@@ -158,3 +158,16 @@ describe("incomingCounts", () => {
 		}
 	});
 });
+
+describe("relationships into another connection", () => {
+	// Stored here, but its target lives in the "other" connection, whose database is also called erp.
+	const cross = knowledge(
+		[],
+		[{ ...relationship("x-1", "erp.erp.stock", ["articulo"], "erp.erp.gar", ["id"]), to: { connection: "other", table: "erp.erp.gar", columns: ["id"] } }],
+	);
+
+	test("are not references to a same-named table of this connection", () => {
+		assert.deepEqual(incomingReferences(erp, cross, "erp.erp.gar").implicit, []);
+		assert.deepEqual(incomingCounts(erp, cross), incomingCounts(erp, emptyKnowledge()));
+	});
+});

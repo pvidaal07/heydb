@@ -166,7 +166,11 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 		}
 	}
 	const documented = new Map<string, string>(); // table + column → table it points to, from the team's relationships
-	for (const { from, to } of knowledge.relationships) for (const name of from.columns) documented.set(columnKey(from.table, name), to.table);
+	for (const { from, to } of knowledge.relationships) {
+		// A column pointing into another connection infers nothing about the tables of this one.
+		if (from.connection !== undefined || to.connection !== undefined) continue;
+		for (const name of from.columns) documented.set(columnKey(from.table, name), to.table);
+	}
 
 	// How many columns whose comment has the query as a word point to each table:
 	// the candidates for inferred meaning, before their summaries are read.
@@ -218,7 +222,9 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	}
 
 	for (const relationship of knowledge.relationships) {
-		if (wanted !== null && !wanted.has(schemaKeyOf(relationship.from.table)) && !wanted.has(schemaKeyOf(relationship.to.table))) continue;
+		// Only a side in this connection can be in one of its databases.
+		const here = [relationship.from, relationship.to].filter((item) => item.connection === undefined);
+		if (wanted !== null && !here.some((item) => wanted.has(schemaKeyOf(item.table)))) continue;
 		const signals = textSignal("relationship note", textMatch(relationship.note, q, SNIPPET_LENGTH), SCORE.statedText, SCORE.definitionText);
 		if (signals.length === 0) continue;
 		results.push({
@@ -493,8 +499,8 @@ function notesByTarget(annotations: readonly Annotation[]): Map<string, Annotati
 	return notes;
 }
 
-function side({ table, columns }: RelationshipSide): string {
-	return `${table}(${columns.join(", ")})`;
+function side({ connection, table, columns }: RelationshipSide): string {
+	return `${connection === undefined ? "" : `${connection}: `}${table}(${columns.join(", ")})`;
 }
 
 function schemaKey(database: string, schema: string): string {

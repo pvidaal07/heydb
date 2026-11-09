@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { formatName, parseName } from "../model/names.ts";
-import type { Annotation, Knowledge, Relationship, RelationshipSide } from "./types.ts";
+import { type Annotation, type Knowledge, PROJECT_TARGET, type Relationship, type RelationshipSide } from "./types.ts";
 
 // Pure operations on Knowledge: each returns a new value and never mutates its
 // input, so a failed validation can never leave half-applied changes behind,
@@ -48,9 +48,26 @@ export function addAnnotation(
 	input: AnnotationInput,
 	options: KnowledgeOptions = {},
 ): { knowledge: Knowledge; annotation: Annotation } {
-	const { now = realClock, newId = randomUUID } = options;
 	// Stored in canonical form, so '"shop".shop' and 'shop.shop' are the same target.
-	const target = formatName(parseName(input.target));
+	return withAnnotation(knowledge, formatName(parseName(input.target)), input, options);
+}
+
+/** A note about the whole project, for the project file; it has no target to resolve. */
+export function addProjectNote(
+	knowledge: Knowledge,
+	input: Omit<AnnotationInput, "target">,
+	options: KnowledgeOptions = {},
+): { knowledge: Knowledge; annotation: Annotation } {
+	return withAnnotation(knowledge, PROJECT_TARGET, input, options);
+}
+
+function withAnnotation(
+	knowledge: Knowledge,
+	target: string,
+	input: Omit<AnnotationInput, "target">,
+	options: KnowledgeOptions,
+): { knowledge: Knowledge; annotation: Annotation } {
+	const { now = realClock, newId = randomUUID } = options;
 	const text = cleanText(input.text, "annotation text", { allowEmpty: false });
 	const author = cleanAuthor(input.author);
 	const timestamp = now();
@@ -175,7 +192,11 @@ function cleanSide(side: RelationshipSide, label: "from" | "to"): RelationshipSi
 		if (column === "") throw new Error(`relationship ${label}.columns[${index}] must not be empty`);
 		if (side.columns.indexOf(column) !== index) throw new Error(`relationship ${label}.columns repeats "${column}"`);
 	});
-	return { table, columns: [...side.columns] };
+	if (side.connection === undefined) return { table, columns: [...side.columns] };
+	// Whether the connection exists is checked by the caller, which has the config.
+	const connection = side.connection.trim();
+	if (connection === "") throw new Error(`relationship ${label}.connection must not be empty`);
+	return { connection, table, columns: [...side.columns] };
 }
 
 /**
@@ -189,7 +210,7 @@ export function canonicalTable(name: string): string | null {
 }
 
 function sameSide(a: RelationshipSide, b: RelationshipSide): boolean {
-	return a.table === b.table && a.columns.length === b.columns.length && a.columns.every((column, index) => column === b.columns[index]);
+	return a.connection === b.connection && a.table === b.table && a.columns.length === b.columns.length && a.columns.every((column, index) => column === b.columns[index]);
 }
 
 function compareKeys(a: readonly string[], b: readonly string[]): number {

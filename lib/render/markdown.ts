@@ -1,5 +1,5 @@
-import type { TableKnowledge } from "../knowledge/query.ts";
-import type { Annotation, Knowledge, Relationship } from "../knowledge/types.ts";
+import type { ExternalRelationship, TableKnowledge } from "../knowledge/query.ts";
+import type { Annotation, Knowledge, Relationship, RelationshipSide } from "../knowledge/types.ts";
 import type { Change } from "../model/diff.ts";
 import { displayName, displayNameOf, formatName, parseName } from "../model/names.ts";
 import type { IncomingReferences } from "../model/references.ts";
@@ -47,18 +47,23 @@ function round(value: number): string {
 export interface OverviewOptions {
 	readonly connection: string;
 	readonly maxTables?: number;
+	/** Notes about the whole project, shown before anything else. */
+	readonly projectNotes?: readonly Annotation[];
 }
 
 /** Under this share of commented tables, comments are not a reliable map of the schema. */
 const LOW_COMMENT_COVERAGE = 0.2;
 
 export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options: OverviewOptions): string {
-	const { connection, maxTables = 50 } = options;
+	const { connection, maxTables = 50, projectNotes = [] } = options;
 	const firstNote = firstNotes(knowledge);
 	const stats = schemaStats(snapshot, knowledge);
 	const blocks: string[][] = [
 		[`# heydb · ${connection}`, `${snapshot.engine.kind} ${snapshot.engine.version} · captured ${snapshot.capturedAt}`],
 	];
+
+	// What holds for every database ("one database per client") frames the rest.
+	if (projectNotes.length > 0) blocks.push(["## Project notes", ...projectNotes.map((note) => `- ${indented(note.text)} ${noteTag(note)}`)]);
 
 	if (stats.length > 0) blocks.push(["## Databases", ...stats.flatMap((schema) => databaseLines(schema, firstNote))]);
 
@@ -137,6 +142,12 @@ export interface TableOptions {
 	readonly columns?: "all" | number;
 	/** Only columns whose name or comment contains this text, ignoring case and accents. */
 	readonly columnFilter?: string;
+	/** The connection the table belongs to; sides in other connections are prefixed with theirs. */
+	readonly connection?: string;
+	/** Relationships stored in other connections' knowledge files that point to this table. */
+	readonly external?: readonly ExternalRelationship[];
+	/** Why some of those files could not be read. */
+	readonly unreadable?: readonly string[];
 }
 
 /** Enough for a normal table whole; a 540-column legacy table shows its most telling 60. */
@@ -176,18 +187,27 @@ export function renderTable(
 	];
 	if (notes.length > 0) blocks.push(["## Notes", ...notes]);
 
-	const outgoing = knowledge.relationships.filter((relationship) => relationship.from.table === canonicalName);
+	const here = (side: RelationshipSide) => side.connection === undefined && side.table === canonicalName;
+	const outgoing = knowledge.relationships.filter((relationship) => here(relationship.from));
+	const external = options.external ?? [];
 	const relationships = [
 		...table.foreignKeys.map((key) => {
 			const { database, schema, table: target, columns } = key.references;
 			const to = `${displayName({ database, schema, table: target })}${list(columns)}`;
 			return `- ${key.name}: ${list(key.columns)} → ${to} · on delete ${key.onDelete} · on update ${key.onUpdate}`;
 		}),
-		...outgoing.map((relationship) => implicitRelationship(relationship, canonicalName)),
+		...outgoing.map((relationship) => implicitRelationship(relationship, canonicalName, options.connection)),
 	];
 	if (relationships.length > 0) blocks.push(["## Relationships", ...relationships]);
 
-	const referencedBy = incomingBlock(incoming, canonicalName);
+	const fromOtherConnections = [
+		...external
+			.slice(0, MAX_INCOMING)
+			.map(({ connection, relationship }) => implicitRelationship(relationship, canonicalName, options.connection, connection)),
+		...more(external.length - MAX_INCOMING, "relationship from another connection"),
+		...(options.unreadable ?? []).map((reason) => `- not read: ${reason}`),
+	];
+	const referencedBy = incomingBlock(incoming, canonicalName, options.connection, fromOtherConnections);
 	if (referencedBy.length > 0) blocks.push(["## Referenced by", ...referencedBy]);
 
 	if (table.triggers.length > 0) {
@@ -199,7 +219,8 @@ export function renderTable(
 	const related = new Set([
 		...table.foreignKeys.flatMap((key) => key.columns),
 		...outgoing.flatMap((relationship) => relationship.from.columns),
-		...knowledge.relationships.filter((relationship) => relationship.to.table === canonicalName).flatMap((relationship) => relationship.to.columns),
+		...knowledge.relationships.filter((relationship) => here(relationship.to)).flatMap((relationship) => relationship.to.columns),
+		...external.flatMap(({ relationship }) => [relationship.from, relationship.to].filter((side) => side.connection === options.connection)).flatMap((side) => side.columns),
 		...incoming.declared.flatMap((reference) => reference.toColumns),
 	]);
 	blocks.push(columnsBlock(table, knowledge.columns, related, options));
@@ -215,7 +236,12 @@ export function renderTable(
 
 // The comments of the columns that point here come first: on a table without
 // comment, "Artículo" ×12 says more than any name.
-function incomingBlock(incoming: IncomingReferences, canonicalName: string): string[] {
+function incomingBlock(
+	incoming: IncomingReferences,
+	canonicalName: string,
+	connection: string | undefined,
+	fromOtherConnections: readonly string[],
+): string[] {
 	const lines: string[] = [];
 	if (incoming.summary.length > 0) {
 		lines.push(`Referencing columns are commented as: ${incoming.summary.map(({ comment, count: n }) => `"${comment}" ×${n}`).join(", ")}`);
@@ -225,8 +251,9 @@ function incomingBlock(incoming: IncomingReferences, canonicalName: string): str
 			.slice(0, MAX_INCOMING)
 			.map((reference) => `- ${displayNameOf(reference.table)}${list(reference.columns)} → ${list(reference.toColumns)} · foreign key ${reference.name}`),
 		...more(incoming.declared.length - MAX_INCOMING, "foreign key"),
-		...incoming.implicit.slice(0, MAX_INCOMING).map(({ relationship }) => implicitRelationship(relationship, canonicalName)),
+		...incoming.implicit.slice(0, MAX_INCOMING).map(({ relationship }) => implicitRelationship(relationship, canonicalName, connection)),
 		...more(incoming.implicit.length - MAX_INCOMING, "implicit relationship"),
+		...fromOtherConnections,
 	);
 	if (incoming.guesses.length > 0) {
 		lines.push(
@@ -243,8 +270,9 @@ function incomingBlock(incoming: IncomingReferences, canonicalName: string): str
 
 // Without the snapshot, only what the team documented can point here.
 function documentedOnly(knowledge: TableKnowledge, canonicalName: string): IncomingReferences {
+	const local = (side: RelationshipSide) => side.connection === undefined;
 	const implicit = knowledge.relationships
-		.filter((relationship) => relationship.to.table === canonicalName && relationship.from.table !== canonicalName)
+		.filter(({ from, to }) => local(from) && local(to) && to.table === canonicalName && from.table !== canonicalName)
 		.map((relationship) => ({ relationship, comment: "" }));
 	return { declared: [], implicit, guesses: [], moreGuesses: 0, summary: [] };
 }
@@ -293,7 +321,7 @@ export function renderSearch(search: SearchResults): string {
 		const target =
 			relationship === undefined
 				? displayText(result.target)
-				: `${displayText(relationship.from.table)}${list(relationship.from.columns)} → ${displayText(relationship.to.table)}${list(relationship.to.columns)}`;
+				: `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
 		return [`- ${result.object} ${target}`, ...result.matchedIn].join(" · ");
 	});
 	const inferred = search.results.some((result) => result.inferred) ? [INFERRED_NOTE] : [];
@@ -370,18 +398,37 @@ function columnType(column: Column): string {
 	return parts.join(" ");
 }
 
-// Seen from this table: its own side is written without the table name.
-function implicitRelationship(relationship: Relationship, tableName: string): string {
+/**
+ * Seen from this table of `connection`: its own side is written without the
+ * table name, and a side in any other connection starts with that
+ * connection's name. `storedIn` is the connection whose file stores the
+ * relationship, when it is not this one; its id is only usable there.
+ */
+function implicitRelationship(relationship: Relationship, tableName: string, connection?: string, storedIn?: string): string {
 	const { from, to } = relationship;
-	const left = from.table === tableName ? list(from.columns) : `${displayText(from.table)}${list(from.columns)}`;
-	const right = to.table === tableName && from.table !== tableName ? list(to.columns) : `${displayText(to.table)}${list(to.columns)}`;
+	const connectionOf = (side: RelationshipSide) => side.connection ?? storedIn ?? connection;
+	const isThisTable = (side: RelationshipSide) => side.table === tableName && connectionOf(side) === connection;
+	const named = (side: RelationshipSide) => sideText({ ...side, connection: connectionOf(side) }, connection);
+	const left = isThisTable(from) ? list(from.columns) : named(from);
+	const right = isThisTable(to) && !isThisTable(from) ? list(to.columns) : named(to);
 	const note = relationship.note === "" ? "" : ` · ${oneLine(relationship.note)}`;
-	return `- ${left} → ${right} · implicit, documented by ${relationship.author}${note} [id ${relationship.id} · ${day(relationship.createdAt)}]`;
+	const where = storedIn === undefined ? "" : ` · connection ${storedIn}`;
+	return `- ${left} → ${right} · implicit, documented by ${relationship.author}${note} [id ${relationship.id}${where} · ${day(relationship.createdAt)}]`;
+}
+
+/** "erp: erp.gcl(cod)" for a side in another connection than `current`, "shop.orders(id)" otherwise. */
+function sideText(side: RelationshipSide, current?: string): string {
+	const prefix = side.connection === undefined || side.connection === current ? "" : `${side.connection}: `;
+	return `${prefix}${displayText(side.table)}${list(side.columns)}`;
+}
+
+function noteLine(scope: string, note: Annotation): string {
+	return `- ${scope}: ${indented(note.text)} ${noteTag(note)}`;
 }
 
 // Multi-line notes keep their lines, indented so they stay inside the list item.
-function noteLine(scope: string, note: Annotation): string {
-	return `- ${scope}: ${note.text.split(/\r\n|\r|\n/).join("\n  ")} ${noteTag(note)}`;
+function indented(text: string): string {
+	return text.split(/\r\n|\r|\n/).join("\n  ");
 }
 
 function noteTag(note: Annotation): string {

@@ -1,6 +1,6 @@
 import { formatName, parseName } from "../model/names.ts";
 import { canonicalTable } from "./operations.ts";
-import type { Annotation, Knowledge, Relationship, RelationshipSide } from "./types.ts";
+import { type Annotation, type Knowledge, PROJECT_TARGET, type Relationship, type RelationshipSide } from "./types.ts";
 
 // Knowledge files are committed and edited by people, merges and older
 // heydb versions, so every field is checked once, at the boundary, like
@@ -12,20 +12,40 @@ import type { Annotation, Knowledge, Relationship, RelationshipSide } from "./ty
 // is private to that module; sharing one is a follow-up.
 
 export function validateKnowledge(data: unknown): Knowledge {
+	return validate(data, (target, path) => canonical(target, path, (name) => formatName(parseName(name))));
+}
+
+/**
+ * The project file: the same shape, but only notes about the whole project.
+ * A note on a database there would be found by nobody looking at that
+ * database, and relationships always belong to a connection.
+ */
+export function validateProjectKnowledge(data: unknown): Knowledge {
+	const knowledge = validate(data, (target, path) => {
+		if (target !== PROJECT_TARGET) throw new Error(`${path} must be "${PROJECT_TARGET}" in the project file: got "${target}"`);
+		return target;
+	});
+	if (knowledge.relationships.length > 0) throw new Error("relationships must be empty: the project file holds only project notes");
+	return knowledge;
+}
+
+type TargetReader = (target: string, path: string) => string;
+
+function validate(data: unknown, readTarget: TargetReader): Knowledge {
 	const root = object(data, "knowledge");
 	if (root.formatVersion !== 1) throw new Error("formatVersion must be 1");
-	const annotations = list(root, "annotations", validateAnnotation);
+	const annotations = list(root, "annotations", (record, path) => validateAnnotation(record, path, readTarget));
 	const relationships = list(root, "relationships", validateRelationship);
 	unique(annotations, "annotations");
 	unique(relationships, "relationships");
 	return { formatVersion: 1, annotations, relationships };
 }
 
-function validateAnnotation(record: Record<string, unknown>, path: string): Annotation {
+function validateAnnotation(record: Record<string, unknown>, path: string, readTarget: TargetReader): Annotation {
 	const target = string(record, "target", path);
 	return {
 		id: id(record, path),
-		target: canonical(target, `${path}.target`, (name) => formatName(parseName(name))),
+		target: readTarget(target, `${path}.target`),
 		text: string(record, "text", path),
 		author: string(record, "author", path),
 		createdAt: string(record, "createdAt", path),
@@ -60,7 +80,13 @@ function side(parent: Record<string, unknown>, key: "from" | "to", parentPath: s
 	const columns = read(record, "columns", path);
 	if (!Array.isArray(columns)) throw new Error(`${path}.columns must be a list`);
 	if (columns.length === 0) throw new Error(`${path}.columns must not be empty`);
+	// Optional: files written before relationships could cross connections have none.
+	const connection = record.connection;
+	if (connection !== undefined && (typeof connection !== "string" || connection === "")) {
+		throw new Error(`${path}.connection must be a non-empty string`);
+	}
 	return {
+		...(connection !== undefined && { connection }),
 		table,
 		columns: columns.map((column, index) => {
 			if (typeof column !== "string") throw new Error(`${path}.columns[${index}] must be a string`);

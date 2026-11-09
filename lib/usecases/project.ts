@@ -14,11 +14,11 @@ import type { Snapshot } from "../model/snapshot.ts";
 import { ENV_FILE, type SecretSource, referenceVariable, resolveSecret, secretSource, suggestedReference } from "../secrets.ts";
 import { removeEnvValue, setEnvValue } from "../store/envfile.ts";
 import { assertConnectionName } from "../store/guards.ts";
-import { knowledgePath, loadKnowledge } from "../store/knowledge.ts";
+import { knowledgePath, loadKnowledge, loadProjectKnowledge } from "../store/knowledge.ts";
 import { HEYDB_DIR, findProjectRoot } from "../store/project.ts";
 import { loadSnapshot, storedSnapshotPath } from "../store/snapshots.ts";
 import { ensureEnvIgnored } from "./init.ts";
-import { forgetAnnotation, forgetRelationship } from "./knowledge.ts";
+import { forgetAnnotation, forgetProjectNote, forgetRelationship } from "./knowledge.ts";
 import { resolveColumn, resolveTable } from "./resolve.ts";
 
 // The steps every entry point (Pi today, a CLI or MCP server later) repeats
@@ -62,8 +62,7 @@ export function openConnection(cwd: string, name?: string): OpenedConnection {
 
 /** The project above `cwd` and its config, which must have at least one connection. */
 function openProject(cwd: string): { root: string; config: Config } {
-	const root = findProjectRoot(cwd);
-	if (root === null) throw new ProjectError("not_initialized", "no heydb project here (no .heydb/ in this folder or above)");
+	const root = openProjectRoot(cwd);
 	const config = loadConfig(root);
 	if (Object.keys(config.connections).length === 0) {
 		throw new ProjectError("no_connections", "no connections are configured in this heydb project");
@@ -83,6 +82,13 @@ export function openSnapshot(cwd: string, name?: string): OpenedSnapshot {
 		);
 	}
 	return { ...opened, snapshot, knowledge: loadKnowledge(opened.root, opened.name) };
+}
+
+/** The root of the project above `cwd`, which may have no connections yet. */
+export function openProjectRoot(cwd: string): string {
+	const root = findProjectRoot(cwd);
+	if (root === null) throw new ProjectError("not_initialized", "no heydb project here (no .heydb/ in this folder or above)");
+	return root;
 }
 
 /** The project above `cwd` and its connection names, sorted; null outside a project. */
@@ -280,7 +286,11 @@ export type Forgotten =
 	| { readonly kind: "annotation"; readonly annotation: Annotation }
 	| { readonly kind: "relationship"; readonly relationship: Relationship };
 
-/** Ids are unique across both lists (random UUIDs), so one id names one entry. */
+/**
+ * Ids are unique across both lists and the project file (random UUIDs), so
+ * one id names one entry. The connection's file is searched first, then the
+ * project notes, which belong to no connection.
+ */
 export function forgetById(root: string, connection: string, id: string): Forgotten {
 	const knowledge = loadKnowledge(root, connection);
 	if (knowledge.annotations.some((item) => item.id === id)) {
@@ -288,6 +298,9 @@ export function forgetById(root: string, connection: string, id: string): Forgot
 	}
 	if (knowledge.relationships.some((item) => item.id === id)) {
 		return { kind: "relationship", relationship: forgetRelationship(root, connection, id) };
+	}
+	if (loadProjectKnowledge(root).annotations.some((item) => item.id === id)) {
+		return { kind: "annotation", annotation: forgetProjectNote(root, id) };
 	}
 	throw new Error(`no annotation or relationship has id "${id}"`);
 }

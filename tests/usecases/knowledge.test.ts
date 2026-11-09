@@ -1,19 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
+import { saveConfig } from "../../lib/config/store.ts";
 import { emptyKnowledge } from "../../lib/knowledge/operations.ts";
-import { knowledgePath, loadKnowledge, saveKnowledge } from "../../lib/store/knowledge.ts";
+import { knowledgePath, loadKnowledge, loadProjectKnowledge, saveKnowledge } from "../../lib/store/knowledge.ts";
 import { saveSnapshot } from "../../lib/store/snapshots.ts";
 import {
 	annotate,
+	annotateProject,
 	editNote,
 	forgetAnnotation,
+	forgetProjectNote,
 	forgetRelationship,
 	orphanedKnowledge,
+	projectNotes,
 	relate,
+	relationshipsFromOtherConnections,
 	tableKnowledge,
 } from "../../lib/usecases/knowledge.ts";
 import { annotation, fixedClock, knowledge, relationship } from "../knowledge/fixtures.ts";
@@ -173,5 +178,149 @@ describe("orphanedKnowledge", () => {
 		assert.throws(() => orphanedKnowledge(projectRoot(false), "local"), {
 			message: 'connection "local" was never synced: run sync first',
 		});
+	});
+});
+
+// Two connections: "local" (shop) and "erp", whose gcl table holds the customer codes.
+const gcl = { ...customersTable(), name: "gcl", columns: [column("cod", 1), column("nombre", 2)] };
+const erpSnapshot = snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [gcl], routines: [] }] }] });
+const connection = { engine: "mysql" as const, host: "127.0.0.1", port: 3306, user: "root", databases: null };
+
+function twoConnections({ erpSynced = true } = {}): string {
+	const root = projectRoot();
+	saveConfig(root, {
+		formatVersion: 1,
+		defaultConnection: "local",
+		connections: {
+			local: { ...connection, password: "env:HEYDB_LOCAL_PASSWORD" },
+			erp: { ...connection, password: "env:HEYDB_ERP_PASSWORD" },
+		},
+	});
+	if (erpSynced) saveSnapshot(root, "erp", erpSnapshot);
+	return root;
+}
+
+const customersToErp = {
+	from: { table: "shop.shop.customers", columns: ["id"] },
+	to: { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] },
+	note: "Same customer code in both.",
+	author: "ana",
+};
+
+describe("relate across connections", () => {
+	test("stores the relationship in the from connection's file, naming the other connection", () => {
+		const root = twoConnections();
+		const link = relate(root, "local", customersToErp, fixedClock());
+		assert.deepEqual(link.to, { connection: "erp", table: "erp.erp.gcl", columns: ["cod"] });
+		assert.deepEqual(loadKnowledge(root, "local").relationships, [link]);
+		assert.deepEqual(loadKnowledge(root, "erp"), emptyKnowledge());
+	});
+
+	test("a to.connection naming the from connection is a plain relationship", () => {
+		const root = twoConnections();
+		const link = relate(root, "local", { ...ordersToCustomers, to: { ...ordersToCustomers.to, connection: "local" } }, fixedClock());
+		assert.equal("connection" in link.to, false);
+	});
+
+	test("refuses an unknown connection, naming the configured ones", () => {
+		const root = twoConnections();
+		assert.throws(() => relate(root, "local", { ...customersToErp, to: { ...customersToErp.to, connection: "crm" } }, fixedClock()), {
+			message: 'unknown connection "crm"; configured: erp, local',
+		});
+		assert.deepEqual(loadKnowledge(root, "local"), emptyKnowledge());
+	});
+
+	test("refuses a connection that was never synced", () => {
+		const root = twoConnections({ erpSynced: false });
+		assert.throws(() => relate(root, "local", customersToErp, fixedClock()), {
+			message: 'connection "erp" was never synced: run sync first',
+		});
+		assert.deepEqual(loadKnowledge(root, "local"), emptyKnowledge());
+	});
+
+	test("checks each side against its own connection's snapshot", () => {
+		const root = twoConnections();
+		assert.throws(() => relate(root, "local", { ...customersToErp, to: { ...customersToErp.to, columns: ["codigo"] } }, fixedClock()), {
+			message: 'erp.erp.gcl.codigo does not exist in the snapshot of "erp"; if it was created recently, run sync first',
+		});
+		// shop.shop.customers exists in local, not in erp.
+		assert.throws(() => relate(root, "local", { ...customersToErp, to: { ...customersToErp.from, connection: "erp" } }, fixedClock()), {
+			message: 'shop.shop.customers does not exist in the snapshot of "erp"; if it was created recently, run sync first',
+		});
+		assert.deepEqual(loadKnowledge(root, "local"), emptyKnowledge());
+	});
+
+	test("refuses a from side in another connection: the relationship is stored with its from side", () => {
+		const root = twoConnections();
+		assert.throws(() => relate(root, "local", { ...customersToErp, from: { ...customersToErp.from, connection: "erp" } }, fixedClock()), {
+			message: 'a relationship is stored in its "from" connection: relate it from connection "erp"',
+		});
+	});
+});
+
+describe("relationshipsFromOtherConnections", () => {
+	test("finds relationships stored in other connections' files that point to the table", () => {
+		const root = twoConnections();
+		const link = relate(root, "local", customersToErp, fixedClock());
+		assert.deepEqual(relationshipsFromOtherConnections(root, "erp", "erp.erp.gcl"), {
+			relationships: [{ connection: "local", relationship: link }],
+			unreadable: [],
+		});
+		assert.deepEqual(relationshipsFromOtherConnections(root, "local", "erp.erp.gcl"), { relationships: [], unreadable: [] });
+	});
+
+	test("reports an unreadable file instead of failing", () => {
+		const root = twoConnections();
+		relate(root, "local", customersToErp, fixedClock());
+		writeFileSync(knowledgePath(root, "crm"), "{");
+		const result = relationshipsFromOtherConnections(root, "erp", "erp.erp.gcl");
+		assert.equal(result.relationships.length, 1);
+		assert.deepEqual(result.unreadable, [`knowledge/crm.json is not valid JSON (${knowledgePath(root, "crm")})`]);
+	});
+});
+
+describe("orphanedKnowledge across connections", () => {
+	test("reports a relationship whose other side's column was dropped, and keeps it", () => {
+		const root = twoConnections();
+		const link = relate(root, "local", customersToErp, fixedClock());
+		assert.deepEqual(orphanedKnowledge(root, "local"), { annotations: [], relationships: [] });
+		saveSnapshot(root, "erp", snapshot([], { databases: [{ name: "erp", schemas: [{ name: "erp", tables: [{ ...gcl, columns: [column("id", 1)] }], routines: [] }] }] }));
+		const before = readFileSync(knowledgePath(root, "local"), "utf8");
+		assert.deepEqual(orphanedKnowledge(root, "local"), { annotations: [], relationships: [link] });
+		assert.equal(readFileSync(knowledgePath(root, "local"), "utf8"), before);
+	});
+
+	test("reports a relationship whose other connection is gone", () => {
+		const root = twoConnections();
+		const link = relate(root, "local", customersToErp, fixedClock());
+		saveConfig(root, { formatVersion: 1, defaultConnection: "local", connections: { local: { ...connection, password: "env:HEYDB_LOCAL_PASSWORD" } } });
+		assert.deepEqual(orphanedKnowledge(root, "local").relationships, [link]);
+	});
+});
+
+describe("project notes", () => {
+	test("annotateProject saves a note about the whole project, without any snapshot", () => {
+		const root = projectRoot(false);
+		const note = annotateProject(root, { text: "One database per client; the central one is eagle.", author: "ana" }, fixedClock());
+		assert.equal(note.target, "project");
+		assert.deepEqual(projectNotes(root), [note]);
+		assert.deepEqual(loadProjectKnowledge(root).annotations, [note]);
+	});
+
+	test("editNote finds a project note by id from any connection, and keeps its author", () => {
+		const root = projectRoot();
+		const clock = fixedClock();
+		const note = annotateProject(root, { text: "Old.", author: "ana" }, clock);
+		const edited = editNote(root, "local", { id: note.id, text: "New." }, clock);
+		assert.deepEqual(edited, { ...note, text: "New.", updatedAt: "2026-11-06T10:00:01.000Z" });
+		assert.deepEqual(projectNotes(root), [edited]);
+		assert.throws(() => editNote(root, "local", { id: "nope", text: "x" }, clock), { message: 'unknown annotation id "nope"' });
+	});
+
+	test("forgetProjectNote removes it", () => {
+		const root = projectRoot(false);
+		const note = annotateProject(root, { text: "x", author: "ana" }, fixedClock());
+		assert.deepEqual(forgetProjectNote(root, note.id), note);
+		assert.deepEqual(projectNotes(root), []);
 	});
 });
