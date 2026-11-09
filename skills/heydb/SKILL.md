@@ -46,4 +46,6 @@ Never invent. If you are not sure, ask the user or leave it unsaved. Notes you w
 
 If a tool says the project is not initialized, has no connections or was never synced, tell the user which command to run: `/heydb:init`, `/heydb:connect`, `/heydb:sync`. You cannot run them.
 
-Never ask for, repeat or store database passwords, not in notes, files, commands or chat. heydb reads them from `HEYDB_<NAME>_PASSWORD` in the user's environment or `.heydb/.env`, which is never committed.
+A project may have several connections (say `dev` and `prod`), each with its own snapshot and notes. Tools use the default one; pass `connection` to read another, and save a note on the connection it is true for. `/heydb:connections` (the user's) lists them and changes the default.
+
+Never ask for, repeat or store database passwords, not in notes, files, commands or chat. If one is missing, tell the user to run `/heydb:password <connection>`: it asks for it hidden and keeps it in `.heydb/.env`, which is never committed.

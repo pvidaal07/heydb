@@ -25,16 +25,31 @@ pi -e /path/to/heydb      # loads the extension and the heydb skill
 In Pi, from your project folder:
 
 1. `/heydb:init` creates `.heydb/`.
-2. `/heydb:connect` asks for name, engine, host, port, user and databases. It never asks for the password.
+2. `/heydb:connect` asks for name, engine, host, port, user and databases, and last for the password, in an input that shows `•` instead of what you type.
    For PostgreSQL it asks for exactly one database, because a PostgreSQL connection only reaches the database it opens, and optionally which schemas to capture (empty for every non-system schema). Add one connection per database.
-3. Set the password where heydb looks for it, for a connection named `local`:
-   ```sh
-   export HEYDB_LOCAL_PASSWORD='…'                      # in your shell, or
-   echo "HEYDB_LOCAL_PASSWORD='…'" >> .heydb/.env       # ignored by git
-   ```
-4. `/heydb:sync` captures the schema. Run it again after migrations; the snapshot is only rewritten when the structure changed.
+3. `/heydb:sync` captures the schema. Run it again after migrations; the snapshot is only rewritten when the structure changed.
 
 `/heydb:status` compares the live database with the snapshot without writing anything. `/heydb:about` prints the version.
+
+### Passwords
+
+The password you type is saved in `.heydb/.env` as `HEYDB_<NAME>_PASSWORD` (for a connection `local`, `HEYDB_LOCAL_PASSWORD`). That file is ignored by git (heydb checks `.heydb/.gitignore` before writing) and readable only by your user (permissions `600`; on Windows it keeps the folder's permissions). `config.json` only names the variable, never the value. Change it later with `/heydb:password [connection]`.
+
+Leave the password empty, or use Pi without its terminal UI (RPC), and set the variable yourself:
+
+```sh
+export HEYDB_LOCAL_PASSWORD='…'   # in your shell; it wins over .heydb/.env
+```
+
+Anyone who can read your files can read `.heydb/.env`: it keeps the password out of git and out of the chat, not away from your own user account.
+
+### Several connections
+
+A project can have as many connections as it needs, for example `dev` and `prod`. `/heydb:connections` lists them (default, whether the password is set, whether it was synced); `/heydb:connections use prod` changes the default; `/heydb:connections remove prod` removes one and its password, and keeps its snapshot and notes on disk. Commands and tools use the default unless you name a connection: `/heydb:sync prod`.
+
+Each connection has its own snapshot and its own notes, also `dev` and `prod` of the same application: a note is about the database you looked at.
+
+Microservices with a database each: give every service its own `.heydb/` (run `/heydb:init` in its folder). heydb uses the `.heydb/` nearest to the folder Pi runs in, going up, so starting Pi in a service picks that service's connections. A single `.heydb/` at the repository root with one connection per service also works.
 
 ## What your agent gets
 
@@ -57,6 +72,8 @@ The tools only read and write files in `.heydb/`; they never connect to the data
 | `.heydb/snapshots/` | Yes: the schema, reviewable in pull requests |
 | `.heydb/knowledge/` | Yes: the team's notes and relationships |
 | `.heydb/.env` | Never: local passwords; `.heydb/.gitignore` excludes it |
+
+Removing a connection keeps its files in `.heydb/snapshots/` and `.heydb/knowledge/`; delete them yourself if you no longer need them.
 
 ## Development
 
