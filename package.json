@@ -1,10 +1,13 @@
 {
 	"name": "heydb",
-	"version": "2.0.0-alpha.0",
-	"private": true,
+	"version": "2.0.0-beta.0",
 	"description": "Database schema context for AI agents: introspect MySQL, MariaDB and PostgreSQL, keep a local snapshot, and share annotated knowledge through git.",
 	"license": "MIT",
 	"author": "pvidaal07",
+	"homepage": "https://github.com/pvidaal07/heydb#readme",
+	"bugs": {
+		"url": "https://github.com/pvidaal07/heydb/issues"
+	},
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/pvidaal07/heydb.git"
@@ -16,7 +19,9 @@
 		"schema",
 		"mysql",
 		"mariadb",
-		"postgresql"
+		"postgresql",
+		"ai-agent",
+		"legacy"
 	],
 	"type": "module",
 	"engines": {
@@ -36,6 +41,7 @@
 		"lib",
 		"skills",
 		"README.md",
+		"CHANGELOG.md",
 		"LICENSE"
 	],
 	"scripts": {
