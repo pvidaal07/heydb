@@ -88,6 +88,8 @@ export function fakeContext(
 	{ hasUI = true, mode = (hasUI ? "tui" : "print") as Mode, answers = [] as (string | undefined)[], idle = true } = {},
 ) {
 	const notifications: Notification[] = [];
+	// Footer status texts as Pi would show them, by key; undefined means cleared.
+	const statuses = new Map<string, string | undefined>();
 	const dialogs: Dialog[] = [];
 	const screens: string[] = [];
 	const queue = [...answers];
@@ -101,6 +103,9 @@ export function fakeContext(
 		ui: {
 			notify(message: string, level = "info") {
 				notifications.push({ message, level });
+			},
+			setStatus(key: string, text: string | undefined) {
+				statuses.set(key, text);
 			},
 			async input(title: string, placeholder = "") {
 				dialogs.push({ kind: "input", title, hint: placeholder });
@@ -144,6 +149,7 @@ export function fakeContext(
 		command: ctx as unknown as ExtensionCommandContext,
 		tool: ctx as unknown as ExtensionToolContext,
 		notifications,
+		statuses,
 		dialogs,
 		screens,
 	};

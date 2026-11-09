@@ -561,6 +561,9 @@ async function status(deps: HeydbDeps, args: string, ctx: ExtensionCommandContex
 }
 
 /** Opens the connection named in `args` (or the default), captures its live schema and hands both to `work`. */
+/** Footer status slot heydb uses while it reads a database. */
+const PROGRESS_KEY = "heydb";
+
 async function withLive(
 	deps: HeydbDeps,
 	args: string,
@@ -575,11 +578,20 @@ async function withLive(
 		const opened = openConnection(ctx.cwd, words[0]);
 		// Config and password errors explain themselves; a driver error such as
 		// "connect ECONNREFUSED" also needs to say what was being attempted.
+		// Reading a large server takes seconds, so the footer says what heydb is
+		// doing until it finishes or fails.
 		const introspect: HeydbDeps["introspect"] = async (entry, password) => {
+			const doing = action === "sync" ? "syncing" : "checking";
+			ctx.ui.setStatus(
+				PROGRESS_KEY,
+				`heydb: ${doing} ${opened.name} · reading the structure of ${entry.host}:${entry.port}…`,
+			);
 			try {
 				return await deps.introspect(entry, password);
 			} catch (error) {
 				throw new Error(`heydb ${action} ${opened.name} failed: ${message(error)}`, { cause: error });
+			} finally {
+				ctx.ui.setStatus(PROGRESS_KEY, undefined);
 			}
 		};
 		await work(opened, await captureLive(opened, { env: deps.env, introspect }));

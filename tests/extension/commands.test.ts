@@ -659,6 +659,38 @@ describe("extra arguments", () => {
 });
 
 describe("/heydb:sync", () => {
+	test("shows what it is doing while it reads the database, and clears it afterwards", async () => {
+		const seen: (string | undefined)[] = [];
+		let statuses: Map<string, string | undefined> | undefined;
+		const pi = loadHeydb({
+			introspect: async () => {
+				seen.push(statuses?.get("heydb"));
+				return live;
+			},
+			env: { HEYDB_LOCAL_PASSWORD: "s3cret" },
+		});
+		const ctx = fakeContext(project());
+		statuses = ctx.statuses;
+		await runCommand(pi, "heydb:sync", "", ctx);
+
+		assert.equal(seen.length, 1);
+		assert.match(seen[0] ?? "", /^heydb: syncing local · reading the structure of [^ ]+:\d+…$/);
+		assert.equal(ctx.statuses.get("heydb"), undefined, "cleared when done");
+	});
+
+	test("clears the progress status when the database cannot be read", async () => {
+		const pi = loadHeydb({
+			introspect: async () => {
+				throw new Error("connect ECONNREFUSED");
+			},
+			env: { HEYDB_LOCAL_PASSWORD: "s3cret" },
+		});
+		const ctx = fakeContext(project());
+		await runCommand(pi, "heydb:sync", "", ctx);
+		assert.equal(ctx.statuses.has("heydb"), true, "a status was shown");
+		assert.equal(ctx.statuses.get("heydb"), undefined, "and cleared after the error");
+	});
+
 	test("captures the live schema with the resolved password and reports the first sync", async () => {
 		const { introspect, passwords } = fakeIntrospect(live);
 		const pi = loadHeydb({ introspect, env: { HEYDB_LOCAL_PASSWORD: "s3cret" } });
