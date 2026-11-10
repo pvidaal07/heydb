@@ -19,6 +19,9 @@ const DATABASES = 4;
 const TABLES = 500;
 const COLUMNS = 50;
 const BUDGET_MS = 500;
+// The first search on a snapshot also finds the copies of every table, once,
+// and keeps them for the snapshot's later searches; slow CI runners need room.
+const FIRST_SEARCH_BUDGET_MS = 2_000;
 
 function largeSnapshot(): Snapshot {
 	return {
@@ -82,6 +85,8 @@ describe("a huge legacy schema", () => {
 	});
 
 	test("a search renders fast and answers in about 250 tokens", () => {
+		const first = timed(() => searchSchema(large, knowledge, "cliente"));
+		assert.ok(first.ms < FIRST_SEARCH_BUDGET_MS, `first search took ${first.ms.toFixed(0)} ms`);
 		for (const query of ["articulo", "precio", "articulo precio"]) {
 			const { value: text, ms } = timed(() => renderSearch(searchSchema(large, knowledge, query)));
 			assert.ok(ms < BUDGET_MS, `${query}: search took ${ms.toFixed(0)} ms`);
