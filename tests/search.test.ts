@@ -655,3 +655,41 @@ describe("searchSchema: copies of a table in the same database", () => {
 		assert.equal(searchSchema(data, emptyKnowledge(), "nombre").total, 2);
 	});
 });
+
+describe("searchSchema: project notes", () => {
+	const projectNotes = [
+		annotation("p-1", "project", { text: "Los pedidos de venta pasan por\nalbarán antes de factura. (docs: docs/ventas.md)" }),
+		annotation("p-2", "project", { text: "Una base de datos por empresa." }),
+	];
+
+	test("finds a project note like a note, one result per note, with its id and text on one line", () => {
+		const found = searchSchema(legacy, emptyKnowledge(), "albarán", { projectNotes });
+		assert.deepEqual(
+			found.results.map((result) => [result.object, result.target, result.noteId, result.about, result.matchedIn]),
+			[
+				[
+					"project",
+					"project",
+					"p-1",
+					"Los pedidos de venta pasan por albarán antes de factura. (docs: docs/ventas.md)",
+					["project note: Los pedidos de venta pasan por albarán antes de factura. (docs: docs/ventas.md)"],
+				],
+			],
+		);
+	});
+
+	test("an exact table name still comes before a project note that says it", () => {
+		const found = searchSchema(legacy, emptyKnowledge(), "orders", { projectNotes: [annotation("p-3", "project", { text: "orders are never deleted" })] });
+		assert.equal(found.results[0]?.target, "shop.shop.orders");
+		assert.ok(found.results.some((result) => result.noteId === "p-3"));
+	});
+
+	test("project notes belong to no database: a database filter leaves them out", () => {
+		assert.equal(searchSchema(legacy, emptyKnowledge(), "empresa", { projectNotes, database: "shop" }).total, 0);
+		assert.equal(searchSchema(legacy, emptyKnowledge(), "empresa", { projectNotes }).total, 1);
+	});
+
+	test("without project notes, results are the same as before", () => {
+		assert.deepEqual(searchSchema(legacy, notes, "pedidos", { projectNotes: [] }), searchSchema(legacy, notes, "pedidos"));
+	});
+});

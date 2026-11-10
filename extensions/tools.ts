@@ -56,9 +56,9 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 	return {
 		name: "heydb_overview",
 		label: "heydb overview",
-		description: "Project notes; per database: comment coverage, name prefixes, core tables; warnings; tables.",
-		promptSnippet: "Map of the schema and project notes",
-		promptGuidelines: ["Use heydb_overview for a map of an unknown schema or the project notes, not to look up one concept."],
+		description: "Per database: comment coverage, name prefixes, core tables; warnings; tables; project notes.",
+		promptSnippet: "Map of an unknown schema",
+		promptGuidelines: ["Use heydb_overview only to map an unknown schema, never for a question that names a table or concept."],
 		parameters: OVERVIEW_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -159,7 +159,11 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 				}
 				const opened = openSnapshot(ctx.cwd, params.connection);
 				// Without a limit, searchSchema leaves out the far weaker matches; with one, it lists that many.
-				const options = { ...(limit !== undefined && { limit }), ...(params.database !== undefined && { database: params.database }) };
+				const options = {
+					...(limit !== undefined && { limit }),
+					...(params.database !== undefined && { database: params.database }),
+					projectNotes: projectNotes(opened.root),
+				};
 				return ok(renderSearch(searchSchema(opened.snapshot, opened.knowledge, params.query, options)), opened.name);
 			});
 		},

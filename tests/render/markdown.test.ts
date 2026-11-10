@@ -550,6 +550,12 @@ describe("renderSearch", () => {
 		);
 	});
 
+	test("a project note: its text cut like any other, and its id to edit it", () => {
+		const note: SearchResult = { ...base, target: "project", object: "project", about: `${"x".repeat(100)} (docs: docs/x.md)`, noteId: "p-1" };
+		assert.equal(renderSearch({ results: [note], total: 1 }), `1 match.\n- project note — ${"x".repeat(79)}… [id p-1]`);
+		assert.equal(renderSearch({ results: [{ ...note, about: "Short." }], total: 1 }), "1 match.\n- project note — Short. [id p-1]");
+	});
+
 	test("cuts what a result is at 80 characters and lists at most 3 columns", () => {
 		const columns = ["a", "b", "c", "d", "e"].map((name) => ({ name, snippet: "" }));
 		assert.equal(

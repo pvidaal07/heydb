@@ -96,6 +96,13 @@ describe("tool registration", () => {
 		assert.match(search, /heydb_search first/);
 	});
 
+	test("the overview is only for an unknown schema, never for a question naming a table or concept", () => {
+		const overview = loadHeydb().tools.get("heydb_overview");
+		assert.equal(overview?.description, "Per database: comment coverage, name prefixes, core tables; warnings; tables; project notes.");
+		assert.equal(overview?.promptSnippet, "Map of an unknown schema");
+		assert.deepEqual(overview?.promptGuidelines, ["Use heydb_overview only to map an unknown schema, never for a question that names a table or concept."]);
+	});
+
 	test("heydb_annotate says where a note comes from: the code file, or the user", () => {
 		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
 		assert.match(guidelines, /\(code: [^)]+\)/);
@@ -571,6 +578,20 @@ describe("relationships across connections", () => {
 });
 
 describe("project notes", () => {
+	test("heydb_search finds project notes, with their id, unless it keeps to one database", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		await runTool(pi, "heydb_annotate", { scope: "project", text: "Pedidos pasan por albarán. (docs: docs/ventas.md)" }, root);
+		assert.deepEqual(await runTool(pi, "heydb_search", { query: "albaran" }, root), {
+			isError: false,
+			text: "1 match.\n- project note — Pedidos pasan por albarán. (docs: docs/ventas.md) [id id-001]",
+		});
+		assert.deepEqual(await runTool(pi, "heydb_search", { query: "albaran", database: "shop" }, root), {
+			isError: false,
+			text: 'No matches for "albaran". Try synonyms, another language (English or Spanish) or single words.',
+		});
+	});
+
 	test("heydb_annotate with scope project saves a project note; the overview shows it first", async () => {
 		const pi = loadHeydb();
 		const root = project();

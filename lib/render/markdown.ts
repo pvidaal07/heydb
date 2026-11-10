@@ -128,7 +128,7 @@ const PROJECT_NOTE_LENGTH = 300;
 /** Where project notes are stored: the agent can read the ones the overview cuts. */
 const PROJECT_NOTES_FILE = ".heydb/knowledge/_project.json";
 
-// Project notes are not searchable, so what is cut says where to read it whole.
+// What is cut says where to read it whole: search shows a note cut too.
 function projectNoteLines(notes: readonly Annotation[]): string[] {
 	let cut = false;
 	const lines = notes.slice(0, MAX_PROJECT_NOTES).map((note) => {
@@ -420,6 +420,7 @@ const SEARCH_COLUMNS = 3;
 // How it matched is left out, except what the agent must treat with care:
 // meaning inferred from other tables, and a name that only looks like the word.
 function searchLine(result: SearchResult, named: Set<string>): string {
+	if (result.object === "project") return `- project note — ${shorten(result.about, ABOUT_LENGTH)} [id ${result.noteId}]`;
 	const { relationship } = result;
 	const target = relationship === undefined ? displayText(result.target) : `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
 	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${structuralCopies(result.copies ?? [])}${result.abbreviated ? " (abbreviated name)" : ""}`;

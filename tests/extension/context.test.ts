@@ -42,7 +42,8 @@ test("adds one short line about heydb inside a project with connections", async 
 	assert.deepEqual(await promptSections(nested), {
 		heydb:
 			"This project has a heydb schema snapshot (connections: local, prod). " +
-			"Before writing SQL, find tables with heydb_search and check them with heydb_table; heydb_overview maps an unknown schema.",
+			"Before writing SQL, find tables with heydb_search and check them with heydb_table. " +
+			"When a heydb note cites docs or code and you can read files, read that source instead of listing every column.",
 	});
 });
 
