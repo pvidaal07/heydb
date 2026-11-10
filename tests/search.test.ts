@@ -115,11 +115,11 @@ describe("searchSchema: the field report", () => {
 		assert.ok(searchSchema(erp, emptyKnowledge(), "clientes").results.slice(0, 3).some((result) => result.target === "gestion.gestion.cus"));
 	});
 
-	test('"artículo" and "articulos" find art, whose own comment says "Productos"', () => {
+	test('"artículo" and "articulos" find art, whose own comment says "Productos", also as an abbreviation', () => {
 		for (const query of ["artículo", "articulos", "ARTICULO"]) {
 			const [first] = searchSchema(erp, emptyKnowledge(), query).results;
 			assert.equal(first?.target, "gestion.gestion.art", query);
-			assert.deepEqual(first?.matchedIn, ['referenced as "Artículo" ×3 (inferred)'], query);
+			assert.deepEqual(first?.matchedIn, ['referenced as "Artículo" ×3 (inferred)', "name (abbreviation)"], query);
 		}
 	});
 
@@ -143,7 +143,7 @@ describe("searchSchema: the field report", () => {
 });
 
 describe("searchSchema: ranking", () => {
-	test("exact name, then stated meaning, then inferred meaning, then name prefix, then columns", () => {
+	test("exact name, then stated meaning, then a word of the name, then inferred meaning, then columns", () => {
 		const ranked: Snapshot = snapshot([
 			table("cliente_tmp", [column("id", 1)]),
 			table("cus", [column("id", 1)]),
@@ -154,8 +154,8 @@ describe("searchSchema: ranking", () => {
 		assert.deepEqual(lines(searchSchema(ranked, emptyKnowledge(), "cliente").results), [
 			"table shop.shop.clientes · name",
 			"table shop.shop.socios · table comment: Clientes con cuota",
-			'table shop.shop.cus · referenced as "Cliente" ×1 (inferred)',
 			"table shop.shop.cliente_tmp · name",
+			'table shop.shop.cus · referenced as "Cliente" ×1 (inferred)',
 			'table shop.shop.dln · columns: cod_cus ("Cliente")',
 		]);
 	});
@@ -218,9 +218,10 @@ describe("searchSchema: what it covers", () => {
 			"database shop.shop · name",
 			"view shop.shop.v_orders · definition: select `id` from `shop`.`orders` where `status` = 'DEVUELTO'",
 		]);
+		// The shorter text that matches ranks first.
 		assert.deepEqual(lines(searchSchema(legacy, notes, "tienda").results), [
-			"database shop.shop · note: Base principal de la tienda online",
 			"table shop.shop.orders · table comment: Pedidos de la tienda",
+			"database shop.shop · note: Base principal de la tienda online",
 		]);
 		const [link] = searchSchema(legacy, notes, "myisam").results;
 		assert.deepEqual(link, {
@@ -228,7 +229,9 @@ describe("searchSchema: what it covers", () => {
 			object: "relationship",
 			matchedIn: ["relationship note: Sin FK: tablas MyISAM"],
 			snippet: "Sin FK: tablas MyISAM",
+			about: "Sin FK: tablas MyISAM",
 			inferred: false,
+			abbreviated: false,
 			columns: [],
 			moreColumns: 0,
 			relationship: { from: { table: "shop.shop.orders", columns: ["customer_id"] }, to: { table: "shop.shop.customers", columns: ["id"] } },
@@ -244,12 +247,13 @@ describe("searchSchema: what it covers", () => {
 		assert.match(result.snippet, /^….* la facturación anual .*…$/);
 	});
 
-	test("returns the first `limit` results and the total", () => {
+	test("returns the first `limit` results (10 by default) and the total", () => {
 		const tables = Array.from({ length: 30 }, (_, index) => ordersTable({ name: `t_${String(index).padStart(2, "0")}`, columns: [] }));
 		const many = snapshot(tables);
 		const page = searchSchema(many, emptyKnowledge(), "t_");
 		assert.equal(page.total, 30);
-		assert.equal(page.results.length, 20);
+		assert.equal(page.results.length, 10);
+		assert.equal(page.weaker, 0);
 		assert.equal(page.results[0]?.target, "shop.shop.t_00");
 		assert.equal(searchSchema(many, emptyKnowledge(), "t_", { limit: 5 }).results.length, 5);
 	});
@@ -311,7 +315,7 @@ describe("searchSchema: performance", () => {
 			return { name, schemas: [{ name, tables: [...tables, table("cus", [column("id", 1)])], routines: [] }] };
 		});
 		const large = snapshot([], { databases });
-		for (const query of ["cliente", "articulo", "campo"]) {
+		for (const query of ["cliente", "articulo", "campo", "articulo relacionado del cliente habitual", "tabla de comentarios"]) {
 			const started = performance.now();
 			const found = searchSchema(large, emptyKnowledge(), query);
 			const elapsed = performance.now() - started;
@@ -319,5 +323,329 @@ describe("searchSchema: performance", () => {
 			assert.ok(elapsed < 500, `${query}: ${elapsed.toFixed(0)} ms`);
 		}
 		assert.equal(searchSchema(large, emptyKnowledge(), "cliente").results[0]?.target, "db0.db0.cus");
+	});
+});
+
+// A legacy schema with abbreviated names: what the words of a question must
+// reach without being typed in the same order, or at all.
+const abbreviated: Snapshot = snapshot([
+	table("fac_cab", [column("id", 1), column("num_fac", 2), column("cod_cli", 3, { comment: "Cliente" }), column("fec", 4)], {
+		comment: "Cabecera de facturas emitidas",
+	}),
+	table("fac_lin", [column("num_fac", 1, { comment: "Número de factura" }), column("lin", 2), column("can", 3, { comment: "Cantidad" })]),
+	table("alb_cab", [column("num_alb", 1), column("cod_cli", 2, { comment: "Cliente" }), column("fec", 3)]),
+	table("alb_lin", [column("num_alb", 1), column("lin", 2), column("can", 3, { comment: "Cantidad" })]),
+	table("ped_cab", [column("num_ped", 1), column("cod_cli", 2, { comment: "Cliente" })]),
+	table("cli", [column("cod_cli", 1), column("nom", 2, { comment: "Nombre" })], { comment: "Clientes" }),
+	table("res_anu", [column("id", 1)], { comment: "Resumen de facturación por año" }),
+	table("ven_a", [column("id", 1)], { comment: "Factura de venta" }),
+	table("ven_b", [column("id", 1)], { comment: "Venta de material, factura aparte" }),
+]);
+
+function targets(query: string, data: Snapshot = abbreviated): string[] {
+	return searchSchema(data, emptyKnowledge(), query).results.map((result) => result.target);
+}
+
+describe("searchSchema: words", () => {
+	test("finds a table whose text has every word of the query, in any order", () => {
+		assert.equal(targets("facturas emitidas cabecera")[0], "shop.shop.fac_cab");
+	});
+
+	test("ignores stopwords and meta words, and does not report them as unmatched", () => {
+		const found = searchSchema(abbreviated, emptyKnowledge(), "tabla donde se guardan las líneas del albarán");
+		assert.equal(found.results[0]?.target, "shop.shop.alb_lin");
+		assert.deepEqual(found.unmatched, []);
+		assert.deepEqual(
+			found.results.map((result) => result.target),
+			targets("lineas albaran"),
+		);
+	});
+
+	test("keeps a table that matches only some words, below those that match more", () => {
+		// The limit lists the weak matches too: by default cli scores too far below ped_cab to be shown.
+		const found = searchSchema(abbreviated, emptyKnowledge(), "pedido cliente", { limit: 50 }).results.map((result) => result.target);
+		assert.equal(found[0], "shop.shop.ped_cab");
+		assert.ok(found.includes("shop.shop.cli"), found.join("\n"));
+	});
+
+	test("reads abbreviated name parts: albaran finds alb_cab, factura finds fac_cab", () => {
+		const [cab] = searchSchema(abbreviated, emptyKnowledge(), "albaran cabecera").results;
+		assert.equal(cab?.target, "shop.shop.alb_cab");
+		assert.equal(cab?.matchedIn[0], "name (abbreviation)");
+		assert.ok(targets("factura").includes("shop.shop.fac_cab"));
+		assert.equal(targets("lineas albaran")[0], "shop.shop.alb_lin");
+	});
+
+	test("a column name part repeating its table's abbreviation is not listed again", () => {
+		const [cab] = searchSchema(abbreviated, emptyKnowledge(), "albaran", { limit: 50 }).results.filter((result) => result.target === "shop.shop.alb_cab");
+		assert.deepEqual([cab?.matchedIn, cab?.columns], [["name (abbreviation)"], []]);
+		const client = searchSchema(abbreviated, emptyKnowledge(), "cliente").results.find((result) => result.target === "shop.shop.alb_cab");
+		assert.deepEqual(client?.columns, [{ name: "cod_cli", snippet: "Cliente" }]);
+	});
+
+	test("a query word of 4 letters or more finds the longer words it starts", () => {
+		const [first] = searchSchema(abbreviated, emptyKnowledge(), "factur año").results;
+		assert.equal(first?.target, "shop.shop.res_anu");
+		assert.equal(first?.matchedIn[0], "table comment: Resumen de facturación por año");
+	});
+
+	test("the query as a phrase ranks above the same words apart", () => {
+		const found = targets("factura de venta");
+		assert.ok(found.indexOf("shop.shop.ven_a") >= 0 && found.indexOf("shop.shop.ven_a") < found.indexOf("shop.shop.ven_b"), found.join("\n"));
+	});
+
+	test("says which words matched nothing, with or without results", () => {
+		const none = searchSchema(abbreviated, emptyKnowledge(), "xyzzy de plugh");
+		assert.deepEqual({ total: none.total, results: none.results, unmatched: none.unmatched }, { total: 0, results: [], unmatched: ["xyzzy", "plugh"] });
+		const some = searchSchema(abbreviated, emptyKnowledge(), "facturas xyzzy");
+		assert.ok(some.total > 0);
+		assert.deepEqual(some.unmatched, ["xyzzy"]);
+	});
+});
+
+describe("searchSchema: identical databases", () => {
+	const facCab = (extra: Column[] = []) =>
+		table("fac_cab", [column("num_fac", 1, { type: "int(11)" }), column("cod_cli", 2, { comment: "Cliente" }), ...extra], { comment: "Facturas" });
+	const companies: Snapshot = snapshot([], {
+		databases: ["emp_001", "emp_002", "emp_003", "emp_004"].map((name, index) => ({
+			name,
+			schemas: [{ name, routines: [], tables: [facCab(index === 2 ? [column("extra", 3)] : [])] }],
+		})),
+	});
+
+	test("one result per table repeated with the same columns, naming the other databases", () => {
+		const found = searchSchema(companies, emptyKnowledge(), "facturas");
+		assert.equal(found.total, 2);
+		assert.deepEqual(
+			found.results.map((result) => [result.target, result.alsoIn]),
+			[
+				["emp_001.emp_001.fac_cab", ["emp_002", "emp_004"]],
+				["emp_003.emp_003.fac_cab", undefined],
+			],
+		);
+	});
+
+	test("the database filter keeps only its own copy", () => {
+		const found = searchSchema(companies, emptyKnowledge(), "facturas", { database: "emp_002" });
+		assert.deepEqual(
+			found.results.map((result) => [result.target, result.alsoIn]),
+			[["emp_002.emp_002.fac_cab", undefined]],
+		);
+	});
+});
+
+describe("searchSchema: what a result says", () => {
+	test("says what the table is: its comment, else its team note, whatever matched", () => {
+		const team = knowledge([annotation("n-1", "shop.shop.alb_cab", { text: "Albaranes de venta.\nUno por envío." })]);
+		const found = searchSchema(abbreviated, team, "cliente", { limit: 50 }).results;
+		const about = (name: string) => found.find((result) => result.target === `shop.shop.${name}`)?.about;
+		assert.equal(about("fac_cab"), "Cabecera de facturas emitidas");
+		assert.equal(about("alb_cab"), "Albaranes de venta. Uno por envío.");
+		assert.equal(about("ped_cab"), "");
+		const [database] = searchSchema(legacy, notes, "principal").results;
+		assert.equal(database?.about, "Base principal de la tienda online");
+	});
+
+	test("marks a table found only by an abbreviation of its name", () => {
+		const [cab] = searchSchema(abbreviated, emptyKnowledge(), "albaran cabecera").results;
+		assert.equal(cab?.target, "shop.shop.alb_cab");
+		assert.equal(cab?.abbreviated, true);
+		const [fac] = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas").results;
+		assert.equal(fac?.target, "shop.shop.fac_cab");
+		assert.equal(fac?.abbreviated, false);
+	});
+
+	test("an inferred result carries the comments it was inferred from", () => {
+		const cus = searchSchema(erp, emptyKnowledge(), "cliente").results.find((result) => result.target === "gestion.gestion.cus");
+		assert.deepEqual(cus?.inferredFrom, [
+			{ comment: "Cliente Habitual", count: 5 },
+			{ comment: "Cliente", count: 2 },
+		]);
+		assert.equal(searchSchema(erp, emptyKnowledge(), "cliente").results[0]?.inferredFrom, undefined);
+	});
+});
+
+describe("searchSchema: how many results", () => {
+	test("leaves out matches far weaker than the best and counts them; an explicit limit lists them", () => {
+		const found = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas cabecera");
+		assert.deepEqual(
+			found.results.map((result) => result.target),
+			["shop.shop.fac_cab"],
+		);
+		assert.ok(found.total > 1, String(found.total));
+		assert.equal(found.weaker, found.total - 1);
+		const all = searchSchema(abbreviated, emptyKnowledge(), "facturas emitidas cabecera", { limit: 50 });
+		assert.deepEqual([all.results.length, all.weaker], [found.total, 0]);
+	});
+});
+
+// What the team learns, written down, must steer the next search: cst means
+// nothing until someone notes it is the customer master, and from then on
+// "clientes" finds it first, ahead of tables that only mention customers in
+// a column comment or a name.
+describe("searchSchema: the learning loop", () => {
+	const gclColumns = () => [column("id", 1), column("nom", 2), column("nif", 3, { type: "varchar(15)" }), column("pob", 4, { type: "varchar(60)" })];
+	const learned: Snapshot = snapshot([
+		table("cst", gclColumns(), { rowEstimate: 48_000 }),
+		// A temporary copy of cst that happens to carry the word in its name.
+		table("clientes_tmp", gclColumns(), { rowEstimate: 12 }),
+		...Array.from({ length: 30 }, (_, index) =>
+			table(`doc_${String(index).padStart(2, "0")}`, [column("id", 1), column("cod_cst", 2, { comment: "Cliente" }), column("fec", 3, { type: "date" })]),
+		),
+		...["Artículos", "Almacenes", "Pedidos", "Bancos"].map((comment, index) => table(`t${index}`, [column("id", 1)], { comment })),
+	]);
+	const note = knowledge([annotation("n-cst", "shop.shop.cst", { text: "Maestro de clientes: ficha de gestión de clientes" })]);
+
+	test("a note on a table makes it the first result for the words it uses", () => {
+		for (const query of ["clientes", "cliente", "ficha de clientes"]) {
+			const [first] = searchSchema(learned, note, query).results;
+			assert.equal(first?.target, "shop.shop.cst", `${query}\n${lines(searchSchema(learned, note, query).results).join("\n")}`);
+			assert.equal(first?.about, "Maestro de clientes: ficha de gestión de clientes", query);
+		}
+	});
+
+	test("a long note outweighs the same word in another table's name", () => {
+		const long = [
+			"Fichero histórico que la aplicación de escritorio rellena cada noche con los movimientos de los clientes",
+			"para el informe anual; se conserva porque contabilidad lo consulta a mano y no tiene otro uso conocido.",
+		].join(" ");
+		const data: Snapshot = snapshot([
+			table("x01", [column("id", 1), column("a", 2), column("b", 3)]),
+			table("clientes_hist", [column("id", 1), column("fecha", 2, { type: "date" }), column("importe", 3, { type: "decimal(12,2)" })]),
+			...["Artículos", "Almacenes", "Pedidos"].map((comment, index) => table(`t${index}`, [column("id", 1)], { comment })),
+		]);
+		const team = knowledge([
+			annotation("n-1", "shop.shop.x01", { text: long }),
+			annotation("n-2", "shop.shop.t0", { text: "Maestro." }),
+			annotation("n-3", "shop.shop.t1", { text: "Stock." }),
+		]);
+		assert.deepEqual(
+			searchSchema(data, team, "clientes").results.map((result) => result.target),
+			["shop.shop.x01", "shop.shop.clientes_hist"],
+		);
+	});
+
+	test("a note outweighs column comments that say the same word", () => {
+		const data: Snapshot = snapshot([
+			table("zz", [column("id", 1), column("c1", 2)]),
+			table("mov", [
+				column("id", 1),
+				column("cod_cli", 2, { comment: "Cliente" }),
+				column("cli_fac", 3, { comment: "Cliente de facturación" }),
+				column("cli_env", 4, { comment: "Cliente de envío" }),
+			]),
+		]);
+		const team = knowledge([annotation("n-1", "shop.shop.zz", { text: "Clientes potenciales captados en ferias." })]);
+		assert.equal(searchSchema(data, team, "cliente").results[0]?.target, "shop.shop.zz");
+	});
+});
+
+// Legacy databases keep copies of a table next to it (one per year, a
+// backup, a temporary one), named however each company likes. They are
+// recognized by their columns, never by their names.
+describe("searchSchema: copies of a table in the same database", () => {
+	const facColumns = (extra: Column[] = []) => [
+		column("id", 1),
+		column("num_fac", 2),
+		column("cod_cli", 3, { comment: "Cliente" }),
+		column("fec", 4, { type: "date" }),
+		column("tot", 5, { type: "decimal(12,2)" }),
+		...extra,
+	];
+	const yearly: Snapshot = snapshot([
+		table("fac_cab", facColumns(), { rowEstimate: 175_000 }),
+		...[2019, 2020, 2021].map((year) => table(`fac_cab_${year}`, facColumns(), { rowEstimate: 50_000 })),
+		table("fac_lin", [column("num_fac", 1), column("lin", 2), column("can", 3, { comment: "Cantidad" })]),
+	]);
+
+	test("a copy that matches only what it shares with its original is folded under it and counted once", () => {
+		const found = searchSchema(yearly, emptyKnowledge(), "cliente");
+		assert.deepEqual(
+			found.results.map((result) => [result.target, result.copies]),
+			[["shop.shop.fac_cab", ["fac_cab_2019", "fac_cab_2020", "fac_cab_2021"]]],
+		);
+		assert.equal(found.total, 1);
+	});
+
+	test("a copy whose own name word is asked for is a result of its own", () => {
+		const found = searchSchema(yearly, emptyKnowledge(), "facturas 2019", { limit: 50 }).results;
+		assert.equal(found[0]?.target, "shop.shop.fac_cab_2019");
+		assert.equal(found[0]?.copies, undefined);
+		assert.deepEqual(
+			found.find((result) => result.target === "shop.shop.fac_cab")?.copies,
+			["fac_cab_2020", "fac_cab_2021"],
+		);
+	});
+
+	test("a copy with its own matching note or column is a result of its own", () => {
+		const team = knowledge([annotation("n-1", "shop.shop.fac_cab_2020", { text: "Cliente: facturas rectificadas a mano." })]);
+		const noted = searchSchema(yearly, team, "cliente").results.map((result) => result.target);
+		assert.ok(noted.includes("shop.shop.fac_cab_2020"), noted.join("\n"));
+		const wider: Snapshot = snapshot([
+			table("fac_cab", facColumns(), { rowEstimate: 175_000 }),
+			table("fac_cab_ant", facColumns([column("cli_ant", 6, { comment: "Cliente anterior" })])),
+		]);
+		// fac_cab_ant has 5 of its 6 columns in fac_cab: under 90%, not a copy.
+		assert.deepEqual(
+			searchSchema(wider, emptyKnowledge(), "cliente")
+				.results.map((result) => [result.target, result.copies])
+				.sort(),
+			[
+				["shop.shop.fac_cab", undefined],
+				["shop.shop.fac_cab_ant", undefined],
+			],
+		);
+	});
+
+	test("a near-total copy (90% of its columns in the original) is folded too", () => {
+		const many = Array.from({ length: 10 }, (_, index) => column(`c${index}`, index + 1, { comment: index === 3 ? "Cliente" : "" }));
+		const data: Snapshot = snapshot([
+			table("ventas", many, { rowEstimate: 900 }),
+			table("ventas_sel", many.slice(0, 9)),
+			table("x", many.slice(0, 2)),
+		]);
+		assert.deepEqual(
+			searchSchema(data, emptyKnowledge(), "cliente").results.map((result) => [result.target, result.copies]),
+			[["shop.shop.ventas", ["ventas_sel"]]],
+		);
+	});
+
+	test("the original is the shortest name, then the one with most rows", () => {
+		const data: Snapshot = snapshot([
+			table("cli_a", facColumns(), { rowEstimate: 10 }),
+			table("cli_b", facColumns(), { rowEstimate: 500 }),
+			table("cli_old", facColumns(), { rowEstimate: 90_000 }),
+		]);
+		assert.deepEqual(
+			searchSchema(data, emptyKnowledge(), "cliente").results.map((result) => [result.target, result.copies]),
+			[["shop.shop.cli_b", ["cli_a", "cli_old"]]],
+		);
+	});
+
+	test('"rectificación de asistencia" finds the copy whose name abbreviates it; same prefix and other columns is no copy', () => {
+		const clock = () => [column("id", 1), column("cod_emp", 2, { comment: "Empleado" }), column("fec", 3, { type: "date" }), column("hor_ent", 4), column("hor_sal", 5)];
+		const data: Snapshot = snapshot([
+			table("asistencia", clock(), { rowEstimate: 900_000 }),
+			table("asistencia_rec", clock(), { rowEstimate: 3_000 }),
+			table("asistencia_partes", [column("id", 1), column("cod_emp", 2, { comment: "Empleado" }), column("parte", 3), column("horas", 4)]),
+		]);
+		const found = searchSchema(data, emptyKnowledge(), "rectificación de asistencia").results;
+		assert.equal(found[0]?.target, "shop.shop.asistencia_rec", lines(found).join("\n"));
+		assert.equal(found[0]?.copies, undefined);
+		assert.deepEqual(
+			searchSchema(data, emptyKnowledge(), "asistencia").results.map((result) => [result.target, result.copies]),
+			[
+				["shop.shop.asistencia", ["asistencia_rec"]],
+				["shop.shop.asistencia_partes", undefined],
+			],
+		);
+	});
+
+	test("tables with a single column or two in common are never copies", () => {
+		const data: Snapshot = snapshot([
+			table("provincias", [column("id", 1), column("nom", 2, { comment: "Nombre" })]),
+			table("paises", [column("id", 1), column("nom", 2, { comment: "Nombre" })]),
+		]);
+		assert.equal(searchSchema(data, emptyKnowledge(), "nombre").total, 2);
 	});
 });

@@ -89,6 +89,12 @@ describe("tool registration", () => {
 		assert.match(guidelines, /\(told by the user\)/);
 		assert.match(guidelines, /inference.*confirm/i);
 	});
+
+	test("heydb_annotate asks to save what the user confirms in the words people search with", () => {
+		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
+		assert.match(guidelines, /user confirms what a table or column means or which table holds a concept/);
+		assert.match(guidelines, /words people search with/);
+	});
 });
 
 describe("tools outside a usable project", () => {
@@ -256,6 +262,8 @@ describe("reading tools", () => {
 			text: renderSearch(searchSchema(stored, knowledge, "id", { limit: 1 })),
 		});
 		assert.match((await runTool(pi, "heydb_search", { query: "id", limit: 1 }, root)).text, /^Showing 1 of \d+ matches/);
+		const limit = (pi.tools.get("heydb_search")?.parameters as { properties: { limit: { description: string } } }).properties.limit;
+		assert.equal(limit.description, "Maximum results (default 10; set it to list weaker matches too).");
 	});
 
 	test("heydb_search filters by database and refuses an unknown one", async () => {

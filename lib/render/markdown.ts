@@ -5,7 +5,7 @@ import { displayName, displayNameOf, formatName, parseName } from "../model/name
 import type { IncomingReferences } from "../model/references.ts";
 import type { Column, Snapshot, Table } from "../model/snapshot.ts";
 import { type SchemaStats, schemaStats } from "../model/stats.ts";
-import { normalizeText, type SearchResults } from "../search.ts";
+import { normalizeText, type SearchResult, type SearchResults } from "../search.ts";
 import type { StatusResult } from "../usecases/status.ts";
 
 // Markdown written for agents. Every character returned here is read by a
@@ -155,6 +155,10 @@ export const DEFAULT_COLUMN_LIMIT = 60;
 const MAX_DEFINITION_LENGTH = 3000;
 const MAX_INCOMING = 20;
 const MAX_GUESSES_SHOWN = 15;
+/** Foreign keys, triggers and indexes listed; a legacy table may have dozens of each. */
+const MAX_LISTED = 10;
+/** Column comments and notes, unless a column_filter asked for those columns. */
+const COLUMN_TEXT_LENGTH = 100;
 
 const NO_EVIDENCE =
 	"No table comment or team note: meaning must be inferred from columns and references; say it is an inference and ask the user to confirm.";
@@ -191,11 +195,12 @@ export function renderTable(
 	const outgoing = knowledge.relationships.filter((relationship) => here(relationship.from));
 	const external = options.external ?? [];
 	const relationships = [
-		...table.foreignKeys.map((key) => {
+		...table.foreignKeys.slice(0, MAX_LISTED).map((key) => {
 			const { database, schema, table: target, columns } = key.references;
 			const to = `${displayName({ database, schema, table: target })}${list(columns)}`;
 			return `- ${key.name}: ${list(key.columns)} → ${to} · on delete ${key.onDelete} · on update ${key.onUpdate}`;
 		}),
+		...more(table.foreignKeys.length - MAX_LISTED, "foreign key"),
 		...outgoing.map((relationship) => implicitRelationship(relationship, canonicalName, options.connection)),
 	];
 	if (relationships.length > 0) blocks.push(["## Relationships", ...relationships]);
@@ -211,7 +216,11 @@ export function renderTable(
 	if (referencedBy.length > 0) blocks.push(["## Referenced by", ...referencedBy]);
 
 	if (table.triggers.length > 0) {
-		blocks.push(["## Triggers", ...table.triggers.map((trigger) => `- ${trigger.name}: ${trigger.timing} ${trigger.events.join(", ")}`)]);
+		blocks.push([
+			"## Triggers",
+			...table.triggers.slice(0, MAX_LISTED).map((trigger) => `- ${trigger.name}: ${trigger.timing} ${trigger.events.join(", ")}`),
+			...more(table.triggers.length - MAX_LISTED, "trigger"),
+		]);
 	}
 	if (table.kind === "view") blocks.push(definitionBlock(table.viewDefinition));
 
@@ -228,7 +237,8 @@ export function renderTable(
 	if (table.indexes.length > 0) {
 		blocks.push([
 			"## Indexes",
-			...table.indexes.map((index) => `- ${index.name} ${list(index.columns)}${index.unique ? " unique" : ""} ${index.method}`),
+			...table.indexes.slice(0, MAX_LISTED).map((index) => `- ${index.name} ${list(index.columns)}${index.unique ? " unique" : ""} ${index.method}`),
+			...more(table.indexes.length - MAX_LISTED, "index"),
 		]);
 	}
 	return render(blocks);
@@ -311,22 +321,71 @@ export function renderChanges(changes: readonly Change[], { max = 50 }: { readon
 }
 
 export function renderSearch(search: SearchResults): string {
-	if (search.total === 0) return "No matches.";
+	const unmatched = (search.unmatched ?? []).map((word) => `"${word}"`).join(", ");
+	if (search.total === 0) {
+		return unmatched === "" ? "No matches." : `No matches for ${unmatched}. Try synonyms, another language (English or Spanish) or single words.`;
+	}
 	const header =
 		search.results.length < search.total
-			? `Showing ${search.results.length} of ${search.total} matches; refine the query to narrow them.`
+			? `Showing ${search.results.length} of ${search.total} matches; refine the query or pass a higher limit for more.`
 			: `${count(search.total, "match")}.`;
-	const lines = search.results.map((result) => {
-		const { relationship } = result;
-		const target =
-			relationship === undefined
-				? displayText(result.target)
-				: `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
-		return [`- ${result.object} ${target}`, ...result.matchedIn].join(" · ");
-	});
+	const partial = unmatched === "" ? [] : [`Nothing matches ${unmatched}; these results match the other words.`];
+	const named = new Set<string>();
+	const lines = search.results.map((result) => searchLine(result, named));
+	const weaker = search.weaker ?? 0;
+	const footer = weaker > 0 ? [`… ${weaker} weaker ${plural(weaker, "match")} not shown.`] : [];
 	const inferred = search.results.some((result) => result.inferred) ? [INFERRED_NOTE] : [];
-	return [header, ...lines, ...inferred].join("\n");
+	return [header, ...partial, ...lines, ...footer, ...inferred].join("\n");
 }
+
+const ABOUT_LENGTH = 80;
+const SEARCH_COLUMNS = 3;
+
+// One line that often answers the question by itself: what the table is (its
+// comment or note, cut), then the columns that matched, with their comments.
+// How it matched is left out, except what the agent must treat with care:
+// meaning inferred from other tables, and a name that only looks like the word.
+function searchLine(result: SearchResult, named: Set<string>): string {
+	const { relationship } = result;
+	const target = relationship === undefined ? displayText(result.target) : `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
+	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${structuralCopies(result.copies ?? [])}${result.abbreviated ? " (abbreviated name)" : ""}`;
+	const about = result.about === "" ? result.snippet : result.about;
+	if (about !== "") line += ` — ${shorten(about, ABOUT_LENGTH)}`;
+	const from = result.inferredFrom ?? [];
+	if (from.length > 0) line += ` · referenced as ${from.map(({ comment, count: n }) => `"${comment}" ×${n}`).join(", ")} (inferred)`;
+	if (result.columns.length > 0) {
+		const shown = result.columns.slice(0, SEARCH_COLUMNS).map(({ name, snippet }) => (snippet === "" ? name : `${name} "${snippet}"`));
+		const rest = result.columns.length - SEARCH_COLUMNS + result.moreColumns;
+		line += ` · columns: ${shown.join(", ")}${rest > 0 ? ` (+${rest})` : ""}`;
+	}
+	return line;
+}
+
+/**
+ * " (+9 identical: emp_002, emp_003, emp_004, …)": the other databases of a
+ * repeated table, the first few named. One database per company repeats
+ * every table in the same databases, so a list already named is not named
+ * again: " (+9 identical)".
+ */
+function copies(alsoIn: readonly string[], named: Set<string>): string {
+	if (alsoIn.length === 0) return "";
+	const key = alsoIn.join("\u0000");
+	if (named.has(key)) return ` (+${alsoIn.length} identical)`;
+	named.add(key);
+	const names = alsoIn.slice(0, IDENTICAL_NAMED).join(", ");
+	return ` (+${alsoIn.length} identical: ${names}${alsoIn.length > IDENTICAL_NAMED ? ", …" : ""})`;
+}
+
+const IDENTICAL_NAMED = 3;
+
+/** " (+3 copies: fac_cab_2019, fac_cab_2020, …)": tables of the same database with this one's columns, matched only by what they share with it. */
+function structuralCopies(names: readonly string[]): string {
+	if (names.length === 0) return "";
+	const shown = names.slice(0, COPIES_NAMED).join(", ");
+	return ` (+${names.length} ${names.length === 1 ? "copy" : "copies"}: ${shown}${names.length > COPIES_NAMED ? ", …" : ""})`;
+}
+
+const COPIES_NAMED = 2;
 
 // Said once under the results, only when one of them is inferred.
 const INFERRED_NOTE =
@@ -335,8 +394,10 @@ const INFERRED_NOTE =
 // Which columns, and in which order: the filter first; then, when there are
 // more than the limit, the ones that say most about the table (primary key,
 // keys and relationships, commented or noted), shown in table order with
-// their position so gaps are visible. Comment and notes columns are only
-// printed when a shown column has something in them.
+// their position (#12) so gaps are visible. One line per column, "- name
+// type", then only what carries information: PK, auto, generated, null,
+// =default, the comment and notes. Long comments and notes are cut, except
+// for the columns a column_filter asked for.
 function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: ReadonlySet<string>, options: TableOptions): string[] {
 	const notesOf = (column: Column) => (Object.hasOwn(notes, column.name) ? (notes[column.name] ?? []) : []);
 	const total = table.columns.length;
@@ -369,33 +430,32 @@ function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: R
 		return [heading, filter === "" ? "none" : 'No column matches; try another column_filter or columns: "all".'];
 	}
 
-	const withComments = shown.some((column) => column.comment !== "");
-	const withNotes = shown.some((column) => notesOf(column).length > 0);
-	const headers = ["#", "column", "type", "null", "default", ...(withComments ? ["comment"] : []), ...(withNotes ? ["notes"] : [])];
-	const rows = shown.map((column) =>
-		row([
-			String(column.position),
-			column.name,
-			columnType(column),
-			column.nullable ? "yes" : "no",
-			// An empty-string default is shown as '' so it differs from no default at all.
-			column.default === null ? "" : column.default === "" ? "''" : column.default,
-			...(withComments ? [column.comment] : []),
-			...(withNotes ? [notesOf(column).map((note) => `${note.text} ${noteTag(note)}`).join("\n")] : []),
-		]),
-	);
+	const keys = new Set(table.primaryKey);
+	const numbered = shown.length < total;
+	let cut = false;
+	const text = (value: string) => {
+		const line = oneLine(value);
+		if (filter !== "") return line;
+		const short = shorten(line, COLUMN_TEXT_LENGTH);
+		cut ||= short !== line;
+		return short;
+	};
+	const lines = shown.map((column) => {
+		const parts = [`- ${numbered ? `#${column.position} ` : ""}${column.name}`, column.type];
+		if (keys.has(column.name)) parts.push("PK");
+		if (column.autoIncrement) parts.push("auto");
+		if (column.generated !== null) parts.push(`generated (${column.generated.expression}) ${column.generated.stored ? "stored" : "virtual"}`);
+		if (column.nullable) parts.push("null");
+		// An empty-string default is shown as '' so it differs from no default at all.
+		if (column.default !== null) parts.push(`=${column.default === "" ? "''" : column.default}`);
+		const comment = column.comment.trim() === "" ? "" : ` — "${text(column.comment)}"`;
+		const notes = notesOf(column).map((note) => ` · note: ${text(note.text)} ${noteTag(note)}`);
+		return `${parts.join(" ")}${comment}${notes.join("")}`;
+	});
 	const hidden = matching.length - shown.length;
 	const footer = hidden > 0 ? [`… ${count(hidden, "more column")} — call heydb_table with columns: "all" or a column_filter`] : [];
-	return [heading, row(headers), `|${headers.map(() => "---").join("|")}|`, ...rows, ...footer];
-}
-
-function columnType(column: Column): string {
-	const parts = [column.type];
-	if (column.autoIncrement) parts.push("auto_increment");
-	if (column.generated !== null) {
-		parts.push(`generated (${column.generated.expression}) ${column.generated.stored ? "stored" : "virtual"}`);
-	}
-	return parts.join(" ");
+	const cutNote = cut ? ["Long comments and notes are cut; a column_filter shows them whole."] : [];
+	return [heading, ...lines, ...footer, ...cutNote];
 }
 
 /**
@@ -445,6 +505,12 @@ function firstNotes(knowledge: Knowledge): Map<string, string> {
 	return notes;
 }
 
+/** One line, at most `length` characters, "…" last when cut. */
+function shorten(text: string, length: number): string {
+	const characters = [...oneLine(text).replace(/\s+/g, " ")];
+	return characters.length <= length ? characters.join("") : `${characters.slice(0, length - 1).join("")}…`;
+}
+
 function preview(text: string): string {
 	const line = text.split(/\r\n|\r|\n/)[0]?.trim() ?? "";
 	const characters = [...line];
@@ -491,7 +557,7 @@ function count(n: number, noun: string): string {
 
 function plural(n: number, noun: string): string {
 	if (n === 1) return noun;
-	return noun.endsWith("ch") || noun.endsWith("s") ? `${noun}es` : `${noun}s`;
+	return noun.endsWith("ch") || noun.endsWith("s") || noun.endsWith("x") ? `${noun}es` : `${noun}s`;
 }
 
 /** "… 3 more tables" when a list was cut, nothing when it was not. */

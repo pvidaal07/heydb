@@ -48,7 +48,7 @@ test("init → connect → sync → overview, table, search and annotate via too
 	assert.match(table.text, /Includes VAT, in euros\. \[id id-001 · Ana \(via agent\) · 2026-11-06\]/);
 
 	const search = await runTool(pi, "heydb_search", { query: "euros" }, app);
-	assert.equal(search.text, '1 match.\n- table shop.orders · columns: total ("Includes VAT, in euros.")');
+	assert.equal(search.text, '1 match.\n- table shop.orders · columns: total "Includes VAT, in euros."');
 
 	assert.equal(loadKnowledge(root, "local").annotations[0]?.author, "Ana (via agent)");
 });

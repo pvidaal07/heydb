@@ -6,7 +6,8 @@ import { emptyKnowledge } from "../../lib/knowledge/operations.ts";
 import { knowledgeForTable } from "../../lib/knowledge/query.ts";
 import { incomingReferences } from "../../lib/model/references.ts";
 import type { Column, Snapshot, Table } from "../../lib/model/snapshot.ts";
-import { renderOverview, renderTable } from "../../lib/render/markdown.ts";
+import { renderOverview, renderSearch, renderTable } from "../../lib/render/markdown.ts";
+import { searchSchema } from "../../lib/search.ts";
 import { column, customersTable } from "../fixtures/snapshot.ts";
 
 // A schema the size of a large legacy one (MySQL 5.7, ~1,500 tables,
@@ -18,6 +19,9 @@ const DATABASES = 4;
 const TABLES = 500;
 const COLUMNS = 50;
 const BUDGET_MS = 500;
+// The first search on a snapshot also finds the copies of every table, once,
+// and keeps them for the snapshot's later searches; slow CI runners need room.
+const FIRST_SEARCH_BUDGET_MS = 2_000;
 
 function largeSnapshot(): Snapshot {
 	return {
@@ -74,9 +78,20 @@ describe("a huge legacy schema", () => {
 			return renderTable(large.databases[0]!.schemas[0]!.tables[TABLES]!, "db0.db0.art", knowledgeForTable(knowledge, "db0.db0.art"), incoming);
 		});
 		assert.ok(ms < BUDGET_MS, `table took ${ms.toFixed(0)} ms`);
-		assert.ok(text.length < 12_000, `table has ${text.length} characters`);
+		assert.ok(text.length < 4_500, `table has ${text.length} characters`);
 		assert.match(text, /\nReferencing columns are commented as: "Artículo" ×500\n/);
 		assert.match(text, /\n… 485 more name-pattern guesses\n/);
 		assert.match(text, /\n… 540 more columns — call heydb_table/);
+	});
+
+	test("a search renders fast and answers in about 250 tokens", () => {
+		const first = timed(() => searchSchema(large, knowledge, "cliente"));
+		assert.ok(first.ms < FIRST_SEARCH_BUDGET_MS, `first search took ${first.ms.toFixed(0)} ms`);
+		for (const query of ["articulo", "precio", "articulo precio"]) {
+			const { value: text, ms } = timed(() => renderSearch(searchSchema(large, knowledge, query)));
+			assert.ok(ms < BUDGET_MS, `${query}: search took ${ms.toFixed(0)} ms`);
+			assert.ok(text.length <= 1_000, `${query}: search has ${text.length} characters\n${text}`);
+		}
+		assert.match(renderSearch(searchSchema(large, knowledge, "precio")), /\n- table db0\.art \(\+3 identical: db1, db2, db3\) · columns: id/);
 	});
 });
