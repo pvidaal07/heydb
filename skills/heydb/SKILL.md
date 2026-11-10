@@ -33,9 +33,9 @@ How:
 - Process, in the team's language: `Process: <name in business words> (entry: file:function). Reads: table (columns), … Writes: table (columns), … (code: src/…)`. A Spanish-speaking team writes `Proceso: alta de factura (entrada: …). Lee: … Escribe: …`.
 - Meaning: what it holds, with the synonyms people use (see "Save what you learn").
 - Warning: one sentence with what goes wrong and what to do instead.
-- Always end with the source. Read the table's notes first; if a similar note exists, extend it with `heydb_edit_note` instead of adding another.
+- Always end with the source. Read the table's notes first; if a note on the same thing exists (the same process, the same meaning), extend it with `heydb_edit_note` instead of adding another. A process goes in its own note, never appended to the table's meaning.
 
-Recall: before reading code about the database, search heydb (`heydb_search`, then `heydb_table`). Use a note that answers the question. If you still had to read code, complete that note with what it lacked.
+Recall: before reading code about the database, search heydb (`heydb_search`, then `heydb_table`). Use a note that answers the question. A note that only says what a table holds does not answer what a process does: for a process question with no process note, read the code and save the process. If you still had to read code, complete that note with what it lacked.
 
 ## Never guess a meaning from a table name
 
