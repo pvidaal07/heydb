@@ -7,6 +7,7 @@
 - `heydb_search` with a 3-letter word that is the whole name of a table ("exh") also finds the tables named after it (`exhl`, `exhcab`), marked "(name starts with the query)" and ranked below real matches; other 3-letter words and column names still need the whole word.
 - What a `heydb_search` result says the table or database is comes from the comment or note that covers the most query words (the comment on a tie, then the earlier note), not the first note that matches, so a newer process note is shown when the question is about the process; with no match it is still the comment, else the first note.
 - The first three tables `heydb_search` returns list their neighbourhood on a second line, "related: references … · referenced by … · named like it …": declared foreign keys both ways, the team's relationships in the same connection and the tables whose name starts with theirs, at most 6 per group, so a process can be followed from one table.
+- Agents learn while they work: the `heydb_annotate` and `heydb_relate` guidelines ask them to save what they had to read code or docs (or ask the user) for, as a process note on its main table (entry file:function, tables read and written, their columns), a meaning or a join with its condition, citing the source and extending a similar note instead of adding another; the prompt line asks them to search heydb before reading code about the database, and the skill gains "Learn while you work" with the note formats. The tool text sent every turn stays under 4,400 characters (4,396).
 
 ## [2.0.0-beta.2]
 

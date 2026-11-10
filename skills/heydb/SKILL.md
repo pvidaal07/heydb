@@ -17,6 +17,26 @@ Never guess table or column names from memory when heydb can answer.
 
 When a note answers the question, use it. If it cites `(docs: …)` or `(code: …)` and you can read files, read that source only for what the note does not cover, instead of asking `heydb_table` for every column.
 
+## Learn while you work
+
+Save only what you had to leave heydb to find: in the code, the docs or from the user. Never save what `heydb_table` already shows, and never a guess.
+
+| You had to… | Save |
+|---|---|
+| read code to follow a process (an invoice, a stock move) | a process note on its main table with `heydb_annotate` |
+| find in code or queries how two tables join without a foreign key | `heydb_relate` with the joining columns, plus any extra condition (`tipo = 'F'`) and how you know in `note` |
+| learn what a table or column means | a meaning note in the words people search with |
+| hit a trap (a value that means "never", a column the app no longer writes) | a warning in the team's language, `Ojo: …` |
+
+How:
+
+- Process, in the team's language: `Process: <name in business words> (entry: file:function). Reads: table (columns), … Writes: table (columns), … (code: src/…)`. A Spanish-speaking team writes `Proceso: alta de factura (entrada: …). Lee: … Escribe: …`.
+- Meaning: what it holds, with the synonyms people use (see "Save what you learn").
+- Warning: one sentence with what goes wrong and what to do instead.
+- Always end with the source. Read the table's notes first; if a similar note exists, extend it with `heydb_edit_note` instead of adding another.
+
+Recall: before reading code about the database, search heydb (`heydb_search`, then `heydb_table`). Use a note that answers the question. If you still had to read code, complete that note with what it lacked.
+
 ## Never guess a meaning from a table name
 
 Legacy names lie. A table named `art` looks like artwork; it holds the articles. Before you say what a table is, read the `heydb_table` header, strongest evidence first:
@@ -48,7 +68,7 @@ When the conversation or the code teaches you something the schema does not say,
 - If the save result says git ignores the notes, tell the user: the note stays on their machine until the project shares `.heydb/knowledge/`.
 - End every note with its source: `(code: src/Models/Order.php)` when code shows it, `(docs: docs/tables.md)` when the project's docs say it, `(told by the user)` when the user said it. An inference is saved only after the user confirms it.
 - After `/heydb:sync` (or `/heydb:learn-code`) the user may ask you to read the project's code and docs. That message lists the tables that most need a note first: go down it, at most one note per listed table in business words and synonyms as above, and follow its rules. What the code or docs do not make explicit is a question for the user, not a note. End by telling the user, in one line, how many tables still need a note and that running `/heydb:learn-code` again covers the next ones (noted tables go last), or that the code has been fully covered.
-- Read the existing notes first (`heydb_table`). Fix a wrong note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that contradicts the first.
+- Read the existing notes first (`heydb_table`). Fix or extend a note with `heydb_edit_note`; remove an obsolete one with `heydb_forget`. Do not add a second note that repeats or contradicts the first.
 
 Good notes are short, factual and verifiable:
 
