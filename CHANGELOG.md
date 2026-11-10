@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.0.0-beta.2]
+
 - `/heydb:learn-code` (and the offer after a sync) spends the agent's notes where they help search most: tables with no comment and no note come first, then commented ones, then those already noted, and within each group cryptic names (short, vowel-less or mostly 3-letter parts), tables many others point to and tables much code uses first. Documentation that defines a table (`` `cst` = … ``, `| tda | Almacenes |`, `cst: …` at the start of a line) is evidence too; passing mentions are not. The agent is asked for one note per table in business words with the synonyms people use, citing `(code: …)` or `(docs: …)`, and to ask instead of guessing.
 - `/heydb:learn-code` works in rounds: the agent writes at most one note per listed table (no longer stopping after about 20) and ends by telling the user how many tables used in the code still have no description and that running `/heydb:learn-code` again covers the next ones, since noted tables go last; when none remain it says the code has been fully covered. `bench/learn-code.ts` shows that count.
 - `/heydb:learn-code` reads documentation before code: docs get at most a quarter of the file, byte and time limits while code waits (code gets the rest), so a large codebase that comes first in folder order no longer uses up the scan before the docs that define the tables are read.
