@@ -74,7 +74,7 @@ None of them connects to the database; they read and write files in `.heydb/`.
 |---|---|
 | `heydb_overview` | Map of an unknown schema: size, comment coverage, name prefixes, most referenced tables, warnings and project notes; databases with the same structure shown once |
 | `heydb_table` | One table: evidence of meaning first (comment, notes, who references it), then keys, relationships and up to 60 columns, with a column filter |
-| `heydb_search` | Search by words, not exact phrases: names (abbreviations too), comments, notes (project notes too) and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
+| `heydb_search` | Search by words, not exact phrases: names (abbreviations too, and `exhl` for `exh` when `exh` is a table), comments, notes (project notes too) and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
 | `heydb_annotate` | Save a note on the project, a database, table or column |
 | `heydb_relate` | Record a join that has no foreign key, also across connections |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |

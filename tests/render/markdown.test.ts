@@ -583,6 +583,13 @@ describe("renderSearch", () => {
 		);
 	});
 
+	test("marks a table found only because its name starts with a table name in the query", () => {
+		assert.equal(
+			renderSearch({ results: [{ ...base, target: "shop.shop.exhl", object: "table", abbreviated: true, matchedIn: ["name (prefix)"] }], total: 1 }),
+			"1 match.\n- table shop.exhl (name starts with the query)",
+		);
+	});
+
 	test("shows relationship sides by display name, with their note", () => {
 		const relationship = { from: { table: "shop.shop.refunds", columns: ["order_id"] }, to: { table: "shop.shop.orders", columns: ["id"] } };
 		const target = "shop.shop.refunds(order_id) → shop.shop.orders(id)";

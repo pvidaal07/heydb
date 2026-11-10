@@ -409,6 +409,78 @@ describe("searchSchema: words", () => {
 	});
 });
 
+// Legacy ERPs name tables with three cryptic letters and extend them for the
+// related ones: exh holds expense invoices, exhl their VAT breakdown. A
+// three-letter word does not find the longer words it starts ("fac" would
+// find half the schema), but when it is the name of a table, the tables whose
+// name starts with it are its family.
+describe("searchSchema: name prefixes", () => {
+	const family: Snapshot = snapshot([
+		table("exh", [column("id", 1)], { comment: "Facturas de gasto" }),
+		table("exhl", [column("id", 1)], { comment: "" }),
+		table("exh_doc", [column("id", 1)], { comment: "" }),
+		table("pmt", [column("id", 1)], { comment: "" }),
+		table("gcl", [column("id", 1)], { comment: "" }),
+	]);
+
+	test('"exh", a table name, also finds exhl, below the tables that have the word', () => {
+		const found = searchSchema(family, emptyKnowledge(), "exh");
+		assert.deepEqual(lines(found.results), ["table shop.shop.exh · name", "table shop.shop.exh_doc · name", "table shop.shop.exhl · name (prefix)"]);
+		assert.deepEqual(
+			found.results.map((result) => result.abbreviated),
+			[false, false, true],
+		);
+		assert.deepEqual([found.total, found.weaker, found.unmatched], [3, 0, []]);
+	});
+
+	test("ignores case and accents, and splits digits from letters", () => {
+		const upper: Snapshot = snapshot([
+			table("EXH", [column("id", 1)]),
+			table("EXHCAB", [column("id", 1)]),
+			table("exh2", [column("id", 1)]),
+		]);
+		assert.deepEqual(lines(searchSchema(upper, emptyKnowledge(), "exh").results), [
+			"table shop.shop.EXH · name",
+			"table shop.shop.exh2 · name",
+			"table shop.shop.EXHCAB · name (prefix)",
+		]);
+	});
+
+	test("column names and comments never match by prefix", () => {
+		const columns: Snapshot = snapshot([
+			table("exh", [column("id", 1)]),
+			table("pay", [column("exhl_id", 1), column("exhcab", 2, { comment: "exhl" })], { comment: "Ver exhl" }),
+		]);
+		const found = searchSchema(columns, emptyKnowledge(), "exh", { limit: 50 });
+		assert.deepEqual(lines(found.results), ["table shop.shop.exh · name"]);
+	});
+
+	test("a word that names no table searched gains no prefix matches", () => {
+		const found = searchSchema(snapshot([table("facl", [column("id", 1)])]), emptyKnowledge(), "fac", { limit: 50 });
+		assert.deepEqual([found.results, found.total, found.unmatched], [[], 0, ["fac"]]);
+		const split: Snapshot = snapshot([], {
+			databases: [
+				{ name: "one", schemas: [{ name: "one", routines: [], tables: [table("exh", [column("id", 1)])] }] },
+				{ name: "two", schemas: [{ name: "two", routines: [], tables: [table("exhl", [column("id", 1)])] }] },
+			],
+		});
+		assert.deepEqual(searchSchema(split, emptyKnowledge(), "exh", { database: "two", limit: 50 }).results, []);
+		assert.deepEqual(lines(searchSchema(split, emptyKnowledge(), "exh", { limit: 50 }).results), [
+			"table one.one.exh · name",
+			"table two.two.exhl · name (prefix)",
+		]);
+	});
+
+	test("a word of 4 letters or more keeps finding the longer words it starts, as before", () => {
+		const found = searchSchema(snapshot([table("fact", [column("id", 1)]), table("factl", [column("id", 1)])]), emptyKnowledge(), "fact");
+		assert.deepEqual(lines(found.results), ["table shop.shop.fact · name", "table shop.shop.factl · name"]);
+		assert.deepEqual(
+			found.results.map((result) => result.abbreviated),
+			[false, false],
+		);
+	});
+});
+
 describe("searchSchema: identical databases", () => {
 	const facCab = (extra: Column[] = []) =>
 		table("fac_cab", [column("num_fac", 1, { type: "int(11)" }), column("cod_cli", 2, { comment: "Cliente" }), ...extra], { comment: "Facturas" });

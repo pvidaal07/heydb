@@ -44,6 +44,11 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // abbreviations, so "albaran" finds alb_lin and "factura" fac_cab (0.5, shown
 // as "name (abbreviation)"). A column name part that only repeats an
 // abbreviation of its own table (num_fac in fac_cab) does not count again.
+// A word of 3 letters finds no longer words ("fac" would find half the
+// schema), except one that is the whole name of a table searched: legacy
+// ERPs extend a cryptic name for its related tables (exh, exhl, exh_doc), so
+// "exh" also finds the table names with a part that starts with it (0.4,
+// shown as "name (prefix)"; never column names or text).
 //
 // The score is BM25F: per query word, the weighted matches of all fields
 // (each field normalized by its length against the average, so a short
@@ -118,7 +123,7 @@ export interface SearchResult {
 	readonly target: string;
 	readonly object: SearchObject;
 	/**
-	 * Why it matched, strongest first: "name", "name (abbreviation)",
+	 * Why it matched, strongest first: "name", "name (abbreviation)", "name (prefix)",
 	 * "table comment: …", "note: …", 'referenced as "Cliente Habitual" ×7 (inferred)', "columns: …".
 	 */
 	readonly matchedIn: readonly string[];
@@ -134,7 +139,7 @@ export interface SearchResult {
 	readonly inferred: boolean;
 	/** The comments of the referencing columns that matched, when inferred. */
 	readonly inferredFrom?: readonly CommentCount[];
-	/** True when the only thing that matched is an abbreviation in its name (alb_cab for "albarán"). */
+	/** True when the only thing that matched is an abbreviation in its name (alb_cab for "albarán") or a prefix (exhl for "exh"). */
 	readonly abbreviated: boolean;
 	/** Matching columns of a table or view, best first, at most MAX_COLUMNS. */
 	readonly columns: readonly ColumnMatch[];
@@ -195,7 +200,7 @@ const FIELDS: Readonly<Record<Field, { readonly weight: number; readonly b: numb
 };
 const FIELD_NAMES = Object.keys(FIELDS) as Field[];
 
-const MATCH = { exact: 1, extension: 0.7, abbreviation: 0.5 } as const;
+const MATCH = { exact: 1, extension: 0.7, abbreviation: 0.5, prefix: 0.4 } as const;
 /** Shortest query word that finds the longer words it starts; shortest name part read as an abbreviation. */
 const MIN_EXTENSION = 4;
 const MIN_ABBREVIATION = 3;
@@ -250,7 +255,6 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	const wanted = databaseFilter(snapshot, options.database);
 	if (q.words.length === 0) return { results: [], total: 0, weaker: 0, unmatched: [q.needle] };
 
-	const match = matcher(q);
 	const notes = notesByTarget(knowledge.annotations);
 	const docs: Doc[] = [];
 	const byTarget = new Map<string, Doc>();
@@ -258,17 +262,22 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	// Per database, lowercased table name → canonical names: where a column
 	// named cod_cus may point. Two entries when names differ only by case.
 	const byName = new Map<string, Map<string, string[]>>();
+	// Normalized names of the tables searched: a query word that is one finds the names it starts.
+	const searched = new Set<string>();
 	for (const database of snapshot.databases) {
 		const names = new Map<string, string[]>();
 		byName.set(database.name, names);
 		for (const schema of database.schemas) {
+			const included = wanted === null || wanted.has(schemaKey(database.name, schema.name));
 			for (const table of schema.tables) {
 				const name = formatName({ database: database.name, schema: schema.name, table: table.name });
 				const lower = table.name.toLowerCase();
 				names.set(lower, [...(names.get(lower) ?? []), name]);
+				if (included) searched.add(normalizeText(table.name));
 			}
 		}
 	}
+	const match = matcher(q, searched);
 	const documented = new Map<string, string>(); // table + column → table it points to, from the team's relationships
 	for (const { from, to } of knowledge.relationships) {
 		// A column pointing into another connection infers nothing about the tables of this one.
@@ -420,8 +429,10 @@ interface Matched {
 	readonly length: number;
 	/** Per query word, the sum of its matches' weights; null when no word matched. */
 	readonly tf: readonly number[] | null;
-	/** True when the only matches were abbreviations. */
+	/** True when the only matches were abbreviations or prefixes. */
 	readonly abbreviated: boolean;
+	/** True when the only matches were prefixes. */
+	readonly prefixed: boolean;
 	/** The first word that matched, as folded: where the snippet is cut. */
 	readonly first: string;
 	/** Every word that matched, as folded. */
@@ -433,6 +444,8 @@ interface Matched {
 interface Matcher {
 	/** A table or column name: split on "_", digits and camelCase; abbreviations count. */
 	name(name: string): Matched;
+	/** A table name: like a column name, and also the parts that start a query word naming a table searched. */
+	table(name: string): Matched;
 	/** Comments, notes, definitions and database names: words only. */
 	text(text: string): Matched;
 	/** True when `name` is the query, plurals and separators aside. */
@@ -441,8 +454,9 @@ interface Matcher {
 
 // Legacy schemas repeat the same column names and comments thousands of
 // times ("cod_cli", "Cliente"): each distinct text and word is matched once.
-function matcher(q: Query): Matcher {
-	const tokens = (abbreviations: boolean, split: (text: string) => string[]) => {
+function matcher(q: Query, tables: ReadonlySet<string>): Matcher {
+	const prefixes = q.words.map((word) => word.length >= MIN_ABBREVIATION && tables.has(word));
+	const tokens = (abbreviations: boolean, prefix: boolean, split: (text: string) => string[]) => {
 		const byWord = new Map<string, Float64Array | null>();
 		const quality = (token: string): Float64Array | null => {
 			let found = byWord.get(token);
@@ -456,7 +470,9 @@ function matcher(q: Query): Matcher {
 							? MATCH.extension
 							: abbreviations && token.length >= MIN_ABBREVIATION && word.startsWith(token)
 								? MATCH.abbreviation
-								: 0;
+								: prefix && prefixes[index] === true && token.startsWith(word)
+									? MATCH.prefix
+									: 0;
 				if (value === 0) continue;
 				found ??= new Float64Array(q.words.length);
 				found[index] = value;
@@ -488,6 +504,7 @@ function matcher(q: Query): Matcher {
 				length: content.length,
 				tf,
 				abbreviated: tf !== null && best <= MATCH.abbreviation,
+				prefixed: tf !== null && best <= MATCH.prefix,
 				first: hits[0] ?? "",
 				hits,
 				phrase: tf !== null && q.words.length > 1 && containsWords(folded, q.words),
@@ -496,10 +513,12 @@ function matcher(q: Query): Matcher {
 			return matched;
 		};
 	};
-	const name = tokens(true, nameWords);
-	const text = tokens(false, (raw) => normalizeText(raw).split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ""));
+	const name = tokens(true, false, nameWords);
+	const table = tokens(true, true, nameWords);
+	const text = tokens(false, false, (raw) => normalizeText(raw).split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ""));
 	return {
 		name,
+		table,
 		text,
 		isExactName: (raw) => {
 			const words = nameWords(raw);
@@ -583,7 +602,7 @@ function newDoc(target: string, object: SearchObject, order: number): Doc {
 
 function collectTable(table: Table, tableName: string, notes: Notes, match: Matcher, order: number, original?: Table): Doc {
 	const doc = newDoc(tableName, table.kind, order);
-	const own = match.name(table.name);
+	const own = match.table(table.name);
 	addName(doc, [own]);
 	doc.exactName = match.isExactName(table.name);
 	addText(doc, "stated", "table comment", table.comment, match.text(table.comment), SNIPPET_LENGTH);
@@ -658,18 +677,21 @@ function addName(doc: Doc, matched: readonly Matched[]): void {
 	let length = 0;
 	let any = false;
 	let abbreviated = true;
+	let prefixed = true;
 	for (const item of matched) {
 		length = Math.max(length, item.length);
 		if (item.tf === null) continue;
 		any = true;
 		abbreviated &&= item.abbreviated;
+		prefixed &&= item.prefixed;
 		// A database named like its schema matches once: the best of the two.
 		item.tf.forEach((value, index) => {
 			tf[index] = Math.max(tf[index] ?? 0, value);
 		});
 	}
 	doc.lengths.name += length;
-	if (any) addEvidence(doc, { field: "name", label: abbreviated ? "name (abbreviation)" : "name", snippet: "", tf, length: 0 });
+	const label = prefixed ? "name (prefix)" : abbreviated ? "name (abbreviation)" : "name";
+	if (any) addEvidence(doc, { field: "name", label, snippet: "", tf, length: 0 });
 }
 
 function addText(doc: Doc, field: Field, label: string, raw: string, matched: Matched, length: number): void {
@@ -811,7 +833,7 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 	lines.sort((a, b) => b.weight - a.weight);
 	const abbreviated =
 		doc.evidence.length > 0 &&
-		doc.evidence.every((evidence) => evidence.label === "name (abbreviation)") &&
+		doc.evidence.every((evidence) => evidence.label === "name (abbreviation)" || evidence.label === "name (prefix)") &&
 		doc.columns.every((column) => column.abbreviated);
 	return {
 		target: doc.target,
