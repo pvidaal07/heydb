@@ -52,6 +52,8 @@ export interface Step {
 	readonly tool: string;
 	readonly args: string;
 	readonly chars: number;
+	/** Wall-clock milliseconds of the call on this machine. */
+	readonly ms: number;
 }
 
 export interface QuestionResult {
@@ -62,6 +64,8 @@ export interface QuestionResult {
 	readonly firstRanks: readonly (number | null)[];
 	/** True when every expected table came up in some search, without the overview. */
 	readonly found: boolean;
+	/** Expected tables that came up in some search. */
+	readonly seen: number;
 	/** Characters of the information_schema baseline that lists one database's tables, then their columns. */
 	readonly guidedChars: number;
 }
@@ -100,14 +104,16 @@ export function fixedToolChars(tools: Map<string, AnyTool>): number {
 	return chars;
 }
 
-async function call(tools: Map<string, AnyTool>, cwd: string, name: string, params: Record<string, unknown>): Promise<string> {
+async function call(tools: Map<string, AnyTool>, cwd: string, name: string, params: Record<string, unknown>): Promise<{ text: string; ms: number }> {
 	const tool = tools.get(name);
 	if (tool === undefined) throw new Error(`no tool ${name}`);
 	const execute = tool.execute as unknown as (...args: unknown[]) => Promise<ToolResult>;
+	const start = performance.now();
 	const result = await execute("bench", params, undefined, undefined, { cwd });
+	const ms = performance.now() - start;
 	const text = result.content.map((part) => part.text ?? "").join("\n");
 	if (result.isError === true) throw new Error(`${name} ${JSON.stringify(params)} failed: ${text}`);
-	return text;
+	return { text, ms };
 }
 
 export async function measure(cwd: string, questions: readonly Question[], connection?: string): Promise<Report> {
@@ -115,7 +121,7 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 	const opened = openSnapshot(cwd, connection);
 	const { snapshot, knowledge } = opened;
 	const withConnection = (params: Record<string, unknown>) => (connection === undefined ? params : { ...params, connection });
-	const overview = await call(tools, cwd, "heydb_overview", withConnection({}));
+	const { text: overview, ms: overviewMs } = await call(tools, cwd, "heydb_overview", withConnection({}));
 
 	const results: QuestionResult[] = [];
 	for (const question of questions) {
@@ -123,8 +129,8 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 		const located = new Map<string, string>();
 		let firstRanks: (number | null)[] = [];
 		for (const [index, query] of question.queries.entries()) {
-			const text = await call(tools, cwd, "heydb_search", withConnection({ query }));
-			steps.push({ tool: "heydb_search", args: query, chars: text.length });
+			const { text, ms } = await call(tools, cwd, "heydb_search", withConnection({ query }));
+			steps.push({ tool: "heydb_search", args: query, chars: text.length, ms });
 			// Ranked with the tool's own defaults, and counted only when the text the
 			// model read names the table: a result the tool cut is not a find.
 			const targets = searchSchema(snapshot, knowledge, query)
@@ -140,12 +146,13 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 			if (located.size === question.expect.length) break;
 		}
 		const found = located.size === question.expect.length;
-		if (!found) steps.push({ tool: "heydb_overview", args: "", chars: overview.length });
+		// The overview is the same text every time: its first call's time stands for each.
+		if (!found) steps.push({ tool: "heydb_overview", args: "", chars: overview.length, ms: overviewMs });
 		for (const expected of question.expect) {
 			const name = located.get(expected) ?? firstTable(snapshot, expected)?.name;
 			if (name === undefined) throw new Error(`question ${question.id}: no table ${expected} in the snapshot`);
-			const text = await call(tools, cwd, "heydb_table", withConnection({ table: name }));
-			steps.push({ tool: "heydb_table", args: name, chars: text.length });
+			const { text, ms } = await call(tools, cwd, "heydb_table", withConnection({ table: name }));
+			steps.push({ tool: "heydb_table", args: name, chars: text.length, ms });
 		}
 		results.push({
 			id: question.id,
@@ -153,6 +160,7 @@ export async function measure(cwd: string, questions: readonly Question[], conne
 			chars: steps.reduce((sum, step) => sum + step.chars, 0),
 			firstRanks,
 			found,
+			seen: located.size,
 			guidedChars: guidedBaseline(snapshot, question.expect),
 		});
 	}
@@ -177,7 +185,7 @@ function names(text: string, name: string): boolean {
 }
 
 /** "emp_001.emp_001.fac_cab" matches "fac_cab" and "emp_001.fac_cab". */
-function matches(canonical: string, expected: string): boolean {
+export function matches(canonical: string, expected: string): boolean {
 	const parts = canonical.split(".");
 	const wanted = expected.split(".");
 	return wanted.every((part, index) => parts[parts.length - wanted.length + index] === part);
@@ -189,7 +197,7 @@ export interface Located {
 	readonly table: Table;
 }
 
-function allTables(snapshot: Snapshot): Located[] {
+export function allTables(snapshot: Snapshot): Located[] {
 	return snapshot.databases.flatMap((database) =>
 		database.schemas.flatMap((schema) =>
 			schema.tables.map((table) => ({ schema: schema.name, name: [database.name, schema.name, table.name].join("."), table })),
@@ -197,7 +205,7 @@ function allTables(snapshot: Snapshot): Located[] {
 	);
 }
 
-function firstTable(snapshot: Snapshot, expected: string): Located | undefined {
+export function firstTable(snapshot: Snapshot, expected: string): Located | undefined {
 	return allTables(snapshot).find((entry) => matches(entry.name, expected));
 }
 
@@ -208,10 +216,17 @@ function firstTable(snapshot: Snapshot, expected: string): Located | undefined {
 export function guidedBaseline(snapshot: Snapshot, expect: readonly string[]): number {
 	const tables = allTables(snapshot);
 	const targets = expect.map((expected) => tables.find((entry) => matches(entry.name, expected))).filter((entry) => entry !== undefined);
-	const schema = targets[0]?.schema;
-	const databases = ["SCHEMA_NAME", ...new Set(tables.map((entry) => entry.schema))].join("\n");
-	const listed = ["TABLE_NAME\tTABLE_COMMENT", ...tables.filter((entry) => entry.schema === schema).map((entry) => `${entry.table.name}\t${entry.table.comment}`)].join("\n");
-	return databases.length + listed.length + columnsDump(targets, false).length;
+	return databasesList(tables).length + tablesList(tables, targets[0]?.schema).length + columnsDump(targets, false).length;
+}
+
+/** `SELECT SCHEMA_NAME FROM information_schema.schemata`, batch output. */
+export function databasesList(tables: readonly Located[]): string {
+	return ["SCHEMA_NAME", ...new Set(tables.map((entry) => entry.schema))].join("\n");
+}
+
+/** `SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.tables WHERE table_schema = …`, batch output. */
+export function tablesList(tables: readonly Located[], schema: string | undefined): string {
+	return ["TABLE_NAME\tTABLE_COMMENT", ...tables.filter((entry) => entry.schema === schema).map((entry) => `${entry.table.name}\t${entry.table.comment}`)].join("\n");
 }
 
 /** `SELECT [TABLE_SCHEMA,] TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY, COLUMN_COMMENT FROM information_schema.columns`, batch output. */
@@ -242,27 +257,43 @@ export interface LearningReport {
  * measured is only read.
  */
 export async function measureLearning(cwd: string, questions: readonly Question[], connection?: string): Promise<LearningReport> {
-	const opened = openSnapshot(cwd, connection);
 	const root = mkdtempSync(join(tmpdir(), "heydb-bench-learn-"));
 	try {
-		initProject(root);
-		saveConfig(root, { formatVersion: 1, defaultConnection: opened.name, connections: { [opened.name]: opened.connection } });
-		saveSnapshot(root, opened.name, opened.snapshot);
-		for (const name of knowledgeConnections(opened.root)) saveKnowledge(root, name, loadKnowledge(opened.root, name));
-		const before = await measure(root, questions, opened.name);
-		let notes = 0;
-		for (const [index, question] of questions.entries()) {
-			const read = before.questions[index]?.steps.filter((step) => step.tool === "heydb_table") ?? [];
-			for (const step of read) {
-				annotate(root, opened.name, { target: step.args, text: question.ask, author: "bench" });
-				notes += 1;
-			}
-		}
-		const after = await measure(root, questions, opened.name);
+		const name = copyProject(cwd, root, connection);
+		const before = await measure(root, questions, name);
+		const notes = noteAnswers(root, name, questions, before);
+		const after = await measure(root, questions, name);
 		return { before, after, notes };
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Makes `root` a heydb project holding one connection of the project above
+ * `cwd`: its config, its stored snapshot and every knowledge file. Returns
+ * the connection's name. The source is only read.
+ */
+export function copyProject(cwd: string, root: string, connection?: string): string {
+	const opened = openSnapshot(cwd, connection);
+	initProject(root);
+	saveConfig(root, { formatVersion: 1, defaultConnection: opened.name, connections: { [opened.name]: opened.connection } });
+	saveSnapshot(root, opened.name, opened.snapshot);
+	for (const name of knowledgeConnections(opened.root)) saveKnowledge(root, name, loadKnowledge(opened.root, name));
+	return opened.name;
+}
+
+/** Notes on each table read for a question the question's `ask`, as an agent does once the user confirms it. Returns the notes added. */
+export function noteAnswers(root: string, connection: string, questions: readonly Question[], report: Report): number {
+	let notes = 0;
+	for (const [index, question] of questions.entries()) {
+		const read = report.questions[index]?.steps.filter((step) => step.tool === "heydb_table") ?? [];
+		for (const step of read) {
+			annotate(root, connection, { target: step.args, text: question.ask, author: "bench" });
+			notes += 1;
+		}
+	}
+	return notes;
 }
 
 export const tokens = (chars: number): number => Math.round(chars / 4);
