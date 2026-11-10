@@ -77,7 +77,7 @@ const TABLE_PARAMETERS = {
 		table: { type: "string", description: '"orders" or "shop.orders".' },
 		columns: {
 			anyOf: [{ type: "string", const: "all" }, { type: "integer", minimum: 1 }],
-			description: 'Columns to list (default 60, most telling first) or "all".',
+			description: 'Columns to list (default 60, most telling first) or "all" (costly when wide).',
 		},
 		column_filter: { type: "string", description: "Only columns whose name or comment contains this text." },
 		connection: CONNECTION,

@@ -373,7 +373,30 @@ describe("renderTable columns", () => {
 		const text = render(wide, world, notes, "shop.shop.orders");
 		assert.match(text, /\n## Columns \(60 of 600; keys, relationships and commented first\)\n/);
 		assert.deepEqual(positions(text), [...Array.from({ length: 55 }, (_, index) => index + 1), 300, 400, 450, 500, 520]);
-		assert.match(text, /\n… 540 more columns — call heydb_table with columns: "all" or a column_filter/);
+		const shown = new Set(positions(text));
+		const hidden = Array.from({ length: 600 }, (_, index) => index + 1)
+			.filter((position) => !shown.has(position))
+			.map((position) => `- #${position} ${position === 401 ? "precio_coste" : `c${position}`} int`);
+		assert.ok(text.includes(`\n… 540 more columns (~${kb(hidden)} KB) — narrow with a column_filter (text in the name or comment); columns: "all" lists them all`), text);
+		assert.doesNotMatch(text, /cheaper/);
+	});
+
+	test("one hidden column is counted in the singular and weighs at least 1 KB", () => {
+		const text = render(wide, world, notes, "shop.shop.orders", { columns: 599 });
+		assert.match(text, /\n… 1 more column \(~1 KB\) — narrow with a column_filter/);
+	});
+
+	test("up to 150 columns keep the usual heading; more without a filter carry their size and point to column_filter", () => {
+		assert.match(render(wide, world, notes, "shop.shop.orders", { columns: 150 }), /\n## Columns \(150 of 600; keys, relationships and commented first\)\n/);
+		const many = render(wide, world, notes, "shop.shop.orders", { columns: 151 });
+		assert.ok(many.includes(`\n## Columns (151 of 600, ~${kb(columnLines(many))} KB; a column_filter is cheaper)\n`), many);
+		const all = render(wide, world, notes, "shop.shop.orders", { columns: "all" });
+		assert.ok(all.includes(`\n## Columns (all 600, ~${kb(columnLines(all))} KB; a column_filter is cheaper)\n`), all);
+		const few = ordersTable({ columns: Array.from({ length: 150 }, (_, index) => column(`c${index + 1}`, index + 1)), primaryKey: [], indexes: [], foreignKeys: [] });
+		assert.match(render(few, snapshot([customersTable(), few]), emptyKnowledge(), "shop.shop.orders", { columns: "all" }), /\n## Columns\n/);
+		const filtered = render(wide, world, notes, "shop.shop.orders", { columns: "all", columnFilter: "c" });
+		assert.match(filtered, /\n## Columns matching "c" \(600 of 600\)\n/);
+		assert.doesNotMatch(filtered, /cheaper/);
 	});
 
 	test("a smaller limit keeps the strongest columns", () => {
@@ -384,7 +407,7 @@ describe("renderTable columns", () => {
 	test('columns: "all" shows every column and no footer', () => {
 		const text = render(wide, world, notes, "shop.shop.orders", { columns: "all" });
 		assert.equal(text.split("\n").filter((line) => /^- \w+ int\b/.test(line)).length, 600);
-		assert.match(text, /\n## Columns\n/);
+		assert.match(text, /\n## Columns \(all 600, ~\d+ KB; a column_filter is cheaper\)\n/);
 		assert.doesNotMatch(text, /more columns/);
 	});
 
@@ -429,6 +452,19 @@ describe("renderTable stays short", () => {
 		assert.match(text, /\n- idx_9 \(estado\) BTREE\n… 5 more indexes$/);
 	});
 });
+
+/** The column lines of a rendered table: every "- " line after the "## Columns" heading. */
+function columnLines(text: string): string[] {
+	const lines = text.split("\n");
+	const start = lines.findIndex((line) => line.startsWith("## Columns"));
+	const end = lines.findIndex((line, index) => index > start && !line.startsWith("- "));
+	return lines.slice(start + 1, end === -1 ? undefined : end);
+}
+
+/** KB as the renderer counts them: UTF-8 bytes with newlines, rounded up, at least 1. */
+function kb(lines: readonly string[]): number {
+	return Math.max(1, Math.ceil(lines.reduce((sum, line) => sum + Buffer.byteLength(`${line}\n`), 0) / 1024));
+}
 
 const NO_EVIDENCE =
 	"No table comment or team note: meaning must be inferred from columns and references; say it is an inference and ask the user to confirm.";

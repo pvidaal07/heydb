@@ -268,6 +268,13 @@ describe("reading tools", () => {
 		}
 	});
 
+	test("heydb_table steers wide tables to column_filter and keeps \"all\" for when every column is needed", () => {
+		const tool = loadHeydb().tools.get("heydb_table");
+		const properties = (tool?.parameters as { properties: Record<string, { description: string }> }).properties;
+		assert.equal(properties.columns?.description, 'Columns to list (default 60, most telling first) or "all" (costly when wide).');
+		assert.equal(properties.column_filter?.description, "Only columns whose name or comment contains this text.");
+	});
+
 	test("heydb_table answers an unknown table with a short error and suggestions", async () => {
 		const pi = loadHeydb();
 		const root = project();
