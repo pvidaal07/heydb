@@ -4,6 +4,8 @@
 
 - `heydb_table` says what it leaves out: "… 230 more columns (~18 KB) — narrow with a column_filter (text in the name or comment); columns: "all" lists them all", and listing more than 150 columns without a filter says what they weigh in the heading. The `columns` parameter and the skill steer agents to `column_filter` on wide tables instead of `columns: "all"`.
 - `heydb_search` finds project notes, one result per note with its id, unless a `database` is given; `heydb_overview` is described as the map of an unknown schema only, and the prompt line no longer offers it in the recipe. The prompt line and the skill ask agents that can read files to read the docs or code a note cites instead of listing every column.
+- `heydb_search` with a 3-letter word that is the whole name of a table ("exh") also finds the tables named after it (`exhl`, `exhcab`), marked "(name starts with the query)" and ranked below real matches; other 3-letter words and column names still need the whole word.
+- The first three tables `heydb_search` returns list their neighbourhood on a second line, "related: references … · referenced by … · named like it …": declared foreign keys both ways, the team's relationships in the same connection and the tables whose name starts with theirs, at most 6 per group, so a process can be followed from one table.
 
 ## [2.0.0-beta.2]
 
