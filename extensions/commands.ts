@@ -518,7 +518,9 @@ async function offerCode(
 
 /**
  * The agent's instructions: which tables, in the order a note helps most,
- * and what is worth a note. Bounded by the scan's top 30 tables. Notes are
+ * and what is worth a note. Bounded by the scan's top 30 tables, at most one
+ * note each; the tables left out wait for the next run, which lists them
+ * first because noted tables go last, and the user is told how many. Notes are
  * what heydb_search finds a cryptic table by, so they must say what the table
  * is in the words people search with. The rules are in English, so the
  * language rule comes first: the person may well be writing in Spanish.
@@ -547,9 +549,22 @@ export function learnMessage(connection: string, usage: SchemaUsage, folder?: Co
 			"Record joins the code makes without a foreign key with heydb_relate.",
 		`- End every note with its source, like "(code: ${example})"${doc === undefined ? "" : ` or "(docs: ${doc})"`}.`,
 		"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.",
-		"- A few valuable notes beat many; stop after about 20.",
+		"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.",
 		"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.",
+		nextRound(connection, usage.remaining, folder),
 	].join("\n");
+}
+
+/** The last rule: how many tables still need a note and how to cover them, or that none do. */
+function nextRound(connection: string, remaining: number, folder?: CodeFolder): string {
+	if (remaining === 0) {
+		return "- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described.";
+	}
+	const again = folder === undefined ? connection : `${connection} ${folder.typed}`;
+	return (
+		`- Then tell the user, in one line, that ${count(remaining, "more table")} in the code still ${remaining === 1 ? "needs" : "need"} a note ` +
+		`and that running /heydb:learn-code ${again} again covers the next ones.`
+	);
 }
 
 /** `- shop.orders (1 use, has a note): src/a.php; docs: docs/tables.md` */

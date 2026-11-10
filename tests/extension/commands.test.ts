@@ -13,6 +13,8 @@ import { initProject } from "../../lib/usecases/init.ts";
 import { annotate } from "../../lib/usecases/knowledge.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
+import { learnMessage } from "../../extensions/commands.ts";
+import type { SchemaUsage } from "../../lib/usecases/code-scan.ts";
 import { fakeContext, fakeIntrospect, loadHeydb, runCommand, tempDirs } from "./fake-pi.ts";
 
 const tempDir = tempDirs("heydb-commands-");
@@ -971,8 +973,9 @@ const LEARN_RULES =
 	"Record joins the code makes without a foreign key with heydb_relate.\n" +
 	'- End every note with its source, like "(code: src/Models/Customer.php)".\n' +
 	"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.\n" +
-	"- A few valuable notes beat many; stop after about 20.\n" +
-	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.";
+	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n" +
+	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.\n" +
+	"- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described.";
 const LEARN_MESSAGE =
 	'heydb: the user agreed that you learn about the database of connection "local" from this project\'s code.\n\n' +
 	LEARN_FILES +
@@ -1003,6 +1006,36 @@ describe("learning from code", () => {
 				options: { triggerTurn: true, deliverAs: "followUp" },
 			},
 		]);
+	});
+
+	// Rounds: one note per listed table, then the next run lists the next tables (noted ones go last).
+	test("asks for one note per listed table and says how many tables still need one and how to cover them", () => {
+		const usage: SchemaUsage = {
+			hasCode: true,
+			filesScanned: 1,
+			docsScanned: 0,
+			filesMatched: 1,
+			tablesMatched: 42,
+			matches: [{ table: "shop.cst", name: "cst", files: ["src/a.sql"], hits: 1, docs: [], described: "nothing", cryptic: true, referenced: 0 }],
+			remaining: 12,
+			truncated: false,
+		};
+		const message = learnMessage("erp", usage);
+		assert.ok(!message.includes("about 20"), message);
+		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n"), message);
+		assert.ok(
+			message.endsWith(
+				"\n- Then tell the user, in one line, that 12 more tables in the code still need a note and that running /heydb:learn-code erp again covers the next ones.",
+			),
+			message,
+		);
+		const one = learnMessage("erp", { ...usage, remaining: 1 }, { root: "/srv/legacy", typed: "../legacy" });
+		assert.ok(one.endsWith("that 1 more table in the code still needs a note and that running /heydb:learn-code erp ../legacy again covers the next ones."), one);
+		const done = learnMessage("erp", { ...usage, remaining: 0 });
+		assert.ok(
+			done.endsWith("\n- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described."),
+			done,
+		);
 	});
 
 	test("comes after the message with the changes when the sync wrote the snapshot", async () => {

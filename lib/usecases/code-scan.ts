@@ -26,10 +26,12 @@ import { HEYDB_DIR } from "../store/project.ts";
 // quarter of each limit while code waits, so code early in the walk cannot
 // use up the limits before the docs are reached, and huge docs cannot either.
 //
-// The agent has a budget of about 20 notes, so the tables come in the order a
-// note helps most: first those with no comment and no note, then those with a
-// comment, then those that already have a note; within each group cryptic
-// names (cst, fac_cab), many references and much code first.
+// The agent writes at most one note per listed table, so the tables come in
+// the order a note helps most: first those with no comment and no note, then
+// those with a comment, then those that already have a note; within each group
+// cryptic names (cst, fac_cab), many references and much code first. The work
+// comes in rounds: the tables noted in one run go last in the next, so running
+// it again lists the next tables, and `remaining` says how many still wait.
 
 export interface ScanLimits {
 	/** Source files read at most. */
@@ -176,6 +178,8 @@ export interface SchemaUsage {
 	/** Tables used or defined by at least one file; `matches` keeps the 30 that most need a note. */
 	readonly tablesMatched: number;
 	readonly matches: readonly TableUsage[];
+	/** Matched tables with no description (no useful comment, no note) left out of `matches`: the next rounds. */
+	readonly remaining: number;
 	/** A limit stopped the scan: more code may use these tables. */
 	readonly truncated: boolean;
 }
@@ -278,6 +282,7 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 		filesMatched,
 		tablesMatched: matches.length,
 		matches: matches.slice(0, MAX_MATCHES),
+		remaining: matches.slice(MAX_MATCHES).filter((match) => match.described === "nothing").length,
 		truncated,
 	};
 }

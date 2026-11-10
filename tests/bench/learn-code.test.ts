@@ -88,7 +88,7 @@ describe("bench/learn-code.ts", () => {
 		assert.ok(preview.message.includes("- shop.cst (1 use): src/Cst.php; docs: docs/tablas.md\n"), preview.message);
 		assert.equal(preview.tokens, Math.round(preview.message.length / 4));
 		const report = renderPreview(preview);
-		assert.match(report, /^learn-code erp: 2 code files and 1 docs read, 3 tables used or defined, 3 listed, message ≈\d+ tokens\n/);
+		assert.match(report, /^learn-code erp: 2 code files and 1 docs read, 3 tables used or defined, 3 listed, 0 more need a note, message ≈\d+ tokens\n/);
 		assert.ok(report.includes("| 1 | shop.cst | nothing | yes | 1 | 1 | src/Cst.php | docs/tablas.md |"), report);
 	});
 

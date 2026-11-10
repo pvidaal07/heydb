@@ -76,6 +76,7 @@ describe("findSchemaUsage", () => {
 				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
 				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
 			],
+			remaining: 0,
 			truncated: false,
 		});
 		// README.md is read as documentation; "art cus dln" only names the tables, so it is no evidence.
@@ -119,6 +120,7 @@ describe("findSchemaUsage", () => {
 			filesMatched: 0,
 			tablesMatched: 0,
 			matches: [],
+			remaining: 0,
 			truncated: false,
 		});
 		const unrelated = memoryFiles({ "src/app.ts": "export const x = 1;" });
@@ -292,6 +294,7 @@ describe("findSchemaUsage", () => {
 			filesMatched: 0,
 			tablesMatched: 0,
 			matches: [],
+			remaining: 0,
 			truncated: false,
 		});
 	});
@@ -470,7 +473,7 @@ describe("findSchemaUsage", () => {
 		assert.ok(clock <= 1100, `read until ${clock} ms`);
 	});
 
-	// The agent has a budget of about 20 notes: spend it where a note changes what search finds.
+	// The agent notes the listed tables in order: spend that round where a note changes what search finds.
 	test("orders by need: an uncommented cryptic much-referenced table first, a commented one later, a noted one last", async () => {
 		const pointsTo = (target: string, i: number) => ({ ...ordersTable().foreignKeys[0]!, name: `fk_${i}`, columns: ["x"], references: { database: "shop", schema: "shop", table: target, columns: ["id"] } });
 		const tables = snapshot([
@@ -507,6 +510,45 @@ describe("findSchemaUsage", () => {
 		const more = memoryFiles({ "src/a.sql": "SELECT * FROM warehouse;\n".repeat(4), "src/b.sql": "SELECT * FROM orders_history;" });
 		const plainOrder = await findSchemaUsage("/app", tables, { files: more.files });
 		assert.deepEqual(plainOrder.matches.map((match) => match.name), ["warehouse", "orders_history"]);
+	});
+
+	// Rounds: the agent notes the listed tables; the next scan lists the next ones.
+	test("counts the undescribed tables left out of the list, and a second round lists new tables", async () => {
+		const names = Array.from({ length: 35 }, (_, i) => `tabla_${String(i).padStart(2, "0")}`);
+		const tables = snapshot([
+			...names.map((name) => table(name)),
+			table("almacenes", { comment: "Almacenes: uno por almacén" }),
+			table("articulos", { comment: "Artículos" }),
+			table("pedidos"),
+		]);
+		const note = (name: string, id: string) => ({ id, target: `shop.shop.${name}`, text: `Notes on ${name}`, author: "Ana", createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-01T00:00:00.000Z" });
+		const { files } = memoryFiles({
+			"src/a.sql": [...names, "almacenes", "articulos", "pedidos"].map((name) => `SELECT * FROM ${name};`).join("\n"),
+		});
+		const first = await findSchemaUsage("/app", tables, {
+			files,
+			knowledge: { formatVersion: 1, annotations: [note("pedidos", "0")], relationships: [] },
+		});
+		assert.equal(first.tablesMatched, 38);
+		assert.equal(first.matches.length, 30);
+		// 35 undescribed matched tables, 30 listed: 5 left; commented and noted ones never count.
+		assert.equal(first.remaining, 5);
+
+		const noted = first.matches.map((match, i) => note(match.name, String(i + 1)));
+		const second = await findSchemaUsage("/app", tables, {
+			files,
+			knowledge: { formatVersion: 1, annotations: [note("pedidos", "0"), ...noted], relationships: [] },
+		});
+		const firstNames = new Set(first.matches.map((match) => match.name));
+		const fresh = second.matches.slice(0, 5);
+		assert.deepEqual(
+			fresh.map((match) => match.described),
+			Array(5).fill("nothing"),
+		);
+		assert.ok(fresh.every((match) => !firstNames.has(match.name)), JSON.stringify(fresh));
+		assert.deepEqual(second.matches.slice(5, 7).map((match) => match.described), ["comment", "comment"]);
+		assert.ok(second.matches.slice(7).every((match) => match.described === "note"));
+		assert.equal(second.remaining, 0);
 	});
 
 	test("a comment that only repeats the name is no description", async () => {

@@ -66,7 +66,7 @@ export async function previewLearnCode(projectDir: string, options: LearnCodeOpt
 export function renderPreview({ connection, usage, tokens: size }: LearnCodePreview): string {
 	const header =
 		`learn-code ${connection}: ${usage.filesScanned} code files and ${usage.docsScanned} docs read, ` +
-		`${usage.tablesMatched} tables used or defined, ${usage.matches.length} listed, message ≈${size} tokens` +
+		`${usage.tablesMatched} tables used or defined, ${usage.matches.length} listed, ${usage.remaining} more need a note, message ≈${size} tokens` +
 		(usage.truncated ? " (a scan limit stopped it: more code may use these tables)" : "");
 	const rows = usage.matches.map(
 		(match, index) =>
