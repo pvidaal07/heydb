@@ -524,6 +524,43 @@ describe("searchSchema: what a result says", () => {
 		assert.equal(database?.about, "Base principal de la tienda online");
 	});
 
+	// A table can have an old definition note and a newer process note: the
+	// line must show the one the question is about, or the agent never learns
+	// the other exists.
+	const ledger = snapshot([ordersTable({ name: "usage_events" }), ordersTable({ name: "payments", comment: "Cobro de pedidos" })]);
+	const ledgerNotes = knowledge([
+		annotation("n-1", "shop.shop.usage_events", { text: "Libro de consumo: cobro al cliente" }),
+		annotation("n-2", "shop.shop.usage_events", { text: "Proceso: cobro de una petición a facturas o chat" }),
+		annotation("n-3", "shop.shop.payments", { text: "Cobro de facturas y chat" }),
+		annotation("n-4", "shop.shop", { text: "Base de la tienda" }),
+		annotation("n-5", "shop.shop", { text: "Facturas y cobros de la tienda" }),
+	]);
+	const aboutOf = (query: string, target: string) =>
+		searchSchema(ledger, ledgerNotes, query, { limit: 50 }).results.find((result) => result.target === target)?.about;
+
+	test("shows the note that covers the most query words, not the first that matches", () => {
+		assert.equal(aboutOf("facturas chat cobro", "shop.shop.usage_events"), "Proceso: cobro de una petición a facturas o chat");
+	});
+
+	test("between notes covering as many query words, shows the earlier one", () => {
+		assert.equal(aboutOf("cobro", "shop.shop.usage_events"), "Libro de consumo: cobro al cliente");
+	});
+
+	test("a note covering more query words than the comment is shown; on a tie, the comment", () => {
+		assert.equal(aboutOf("facturas chat cobro", "shop.shop.payments"), "Cobro de facturas y chat");
+		assert.equal(aboutOf("cobro pedidos facturas", "shop.shop.payments"), "Cobro de pedidos");
+	});
+
+	test("when nothing matches, shows the comment, else the first note", () => {
+		assert.equal(aboutOf("usage", "shop.shop.usage_events"), "Libro de consumo: cobro al cliente");
+		assert.equal(aboutOf("payments", "shop.shop.payments"), "Cobro de pedidos");
+	});
+
+	test("a database shows the note that covers the most query words", () => {
+		assert.equal(aboutOf("tienda facturas", "shop.shop"), "Facturas y cobros de la tienda");
+		assert.equal(aboutOf("shop", "shop.shop"), "Base de la tienda");
+	});
+
 	test("marks a table found only by an abbreviation of its name", () => {
 		const [cab] = searchSchema(abbreviated, emptyKnowledge(), "albaran cabecera").results;
 		assert.equal(cab?.target, "shop.shop.alb_cab");

@@ -43,7 +43,7 @@ test("adds one short line about heydb inside a project with connections", async 
 		heydb:
 			"This project has a heydb schema snapshot (connections: local, prod). " +
 			"Before writing SQL, find tables with heydb_search and check them with heydb_table. " +
-			"When a heydb note cites docs or code and you can read files, read that source instead of listing every column.",
+			"If a heydb note answers the question, use it; read the source it cites only for what the note does not cover.",
 	});
 });
 

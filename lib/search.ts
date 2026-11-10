@@ -75,9 +75,12 @@ import type { Database, Snapshot, Table } from "./model/snapshot.ts";
 // project notes), never loose columns: a column that matches is listed
 // under its table, so 40 matching columns of one table cost one line, not
 // 40. Each result says what
-// it matched, strongest field first, and what it is (`about`: the table
-// comment, else a team note), so the agent can often answer from the results
-// alone.
+// it matched, strongest field first, and what it is (`about`: of the table
+// comment and its team notes, the one covering the most query words, the
+// comment first on a tie; with no match, the comment, else the first note).
+// A table often has an old definition note and a newer process note: showing
+// the one the question is about tells the agent it exists, so it can often
+// answer from the results alone.
 //
 // Without a limit, the 10 best are returned, and only those scoring at least
 // WEAK_SHARE of the best (the exact-name bonus left out on both sides; an
@@ -332,7 +335,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 				doc.exactName = names.some((name) => match.isExactName(name));
 				const own = notes.get(schemaName) ?? [];
 				for (const note of own) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
-				doc.about = bestNote(own, match);
+				doc.about = bestAbout("", own, match);
 				docs.push(doc);
 			}
 
@@ -645,7 +648,7 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 			if (value > 0) doc.noted[index] = true;
 		});
 	}
-	doc.about = collapse(table.comment) || bestNote(tableNotes, match);
+	doc.about = bestAbout(table.comment, tableNotes, match);
 	const definition = table.viewDefinition ?? "";
 	addText(doc, "definition", "definition", definition, match.text(definition), SNIPPET_LENGTH);
 
@@ -697,10 +700,22 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 	return doc;
 }
 
-/** The first note that matched, else the first one, on one line; "" without notes. */
-function bestNote(notes: readonly Annotation[], match: Matcher): string {
-	const note = notes.find((item) => match.text(item.text).tf !== null) ?? notes[0];
-	return note === undefined ? "" : collapse(note.text);
+/**
+ * Of the comment and the notes, the text covering the most distinct query
+ * words, on one line: the earlier wins a tie, the comment before any note.
+ * With no match, the comment, else the first note; "" without either.
+ */
+function bestAbout(comment: string, notes: readonly Annotation[], match: Matcher): string {
+	let best = "";
+	let covered = 0;
+	for (const text of [comment, ...notes.map((note) => note.text)]) {
+		const words = match.text(text).tf?.filter((value) => value > 0).length ?? 0;
+		if (words > covered) {
+			best = text;
+			covered = words;
+		}
+	}
+	return collapse(covered > 0 ? best : comment || (notes[0]?.text ?? ""));
 }
 
 function addName(doc: Doc, matched: readonly Matched[]): void {
