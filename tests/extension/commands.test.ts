@@ -13,6 +13,8 @@ import { initProject } from "../../lib/usecases/init.ts";
 import { annotate } from "../../lib/usecases/knowledge.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
+import { learnMessage } from "../../extensions/commands.ts";
+import type { SchemaUsage } from "../../lib/usecases/code-scan.ts";
 import { fakeContext, fakeIntrospect, loadHeydb, runCommand, tempDirs } from "./fake-pi.ts";
 
 const tempDir = tempDirs("heydb-commands-");
@@ -957,19 +959,23 @@ const LANGUAGE_RULE =
 	"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
 	"keep table and column names as they are.";
 const LEARN_FILES =
-	"Files that use its tables, most used first:\n" +
+	"Tables, the ones that most need a note first, with the code that uses them and the docs that define them:\n" +
 	"- shop.customers (2 uses): src/Models/Customer.php, src/Repo/orders.sql\n" +
 	"- shop.orders (1 use): src/Repo/orders.sql\n\n";
 const LEARN_RULES =
 	"Rules:\n" +
 	`${LANGUAGE_RULE}\n` +
-	"- Read these files: models, repositories, queries. Before noting a table, read it with heydb_table and skip what its notes already say.\n" +
-	"- Save with heydb_annotate only what the code makes explicit: what a table holds, valid values, enums and magic numbers with their meaning, units, soft-delete flags. " +
+	"- Go down the list. For each table read heydb_table and its files (models, repositories, queries, docs); skip what its comment and notes already say.\n" +
+	"- Save one heydb_annotate note per table: what it holds in business words, with the other words people use for it " +
+	"(synonyms, both languages when the team mixes them), like \"Customer master (clientes, customers): one row per customer\". " +
+	"heydb_search finds tables by those words.\n" +
+	"- Add valid values, enums and magic numbers with their meaning, units or soft-delete flags only when the code states them. " +
 	"Record joins the code makes without a foreign key with heydb_relate.\n" +
 	'- End every note with its source, like "(code: src/Models/Customer.php)".\n' +
-	"- Never invent or guess: what the code does not make clear is not saved.\n" +
-	"- A few valuable notes beat many; stop after about 20.\n" +
-	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.";
+	"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.\n" +
+	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n" +
+	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.\n" +
+	"- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described.";
 const LEARN_MESSAGE =
 	'heydb: the user agreed that you learn about the database of connection "local" from this project\'s code.\n\n' +
 	LEARN_FILES +
@@ -1000,6 +1006,36 @@ describe("learning from code", () => {
 				options: { triggerTurn: true, deliverAs: "followUp" },
 			},
 		]);
+	});
+
+	// Rounds: one note per listed table, then the next run lists the next tables (noted ones go last).
+	test("asks for one note per listed table and says how many tables still need one and how to cover them", () => {
+		const usage: SchemaUsage = {
+			hasCode: true,
+			filesScanned: 1,
+			docsScanned: 0,
+			filesMatched: 1,
+			tablesMatched: 42,
+			matches: [{ table: "shop.cst", name: "cst", files: ["src/a.sql"], hits: 1, docs: [], described: "nothing", cryptic: true, referenced: 0 }],
+			remaining: 12,
+			truncated: false,
+		};
+		const message = learnMessage("erp", usage);
+		assert.ok(!message.includes("about 20"), message);
+		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n"), message);
+		assert.ok(
+			message.endsWith(
+				"\n- Then tell the user, in one line, that 12 more tables in the code still need a note and that running /heydb:learn-code erp again covers the next ones.",
+			),
+			message,
+		);
+		const one = learnMessage("erp", { ...usage, remaining: 1 }, { root: "/srv/legacy", typed: "../legacy" });
+		assert.ok(one.endsWith("that 1 more table in the code still needs a note and that running /heydb:learn-code erp ../legacy again covers the next ones."), one);
+		const done = learnMessage("erp", { ...usage, remaining: 0 });
+		assert.ok(
+			done.endsWith("\n- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described."),
+			done,
+		);
 	});
 
 	test("comes after the message with the changes when the sync wrote the snapshot", async () => {
@@ -1114,6 +1150,34 @@ describe("learning from code", () => {
 		await runCommand(pi, "heydb:learn-code", "", fakeContext(root, { answers: ["yes"] }));
 		const content = String(pi.messages[0]?.message.content);
 		assert.ok(content.includes(`Rules:\n${LANGUAGE_RULE}\n`), content);
+	});
+
+	test("lists first the tables that most need a note, marks the described ones and cites the docs that define a table", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		writeCode(root, { ...CODE, "docs/tables.md": "- `orders`: one row per order\n", "docs/intro.md": "We keep orders and customers.\n" });
+		saveSnapshot(root, "local", live);
+		annotate(root, "local", { target: "shop.shop.customers", text: "Customer master (clientes)", author: "Ana" }, fixedClock());
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-code", "", ctx);
+		assert.deepEqual(ctx.dialogs, [
+			{
+				kind: "confirm",
+				title: LEARN_TITLE,
+				hint: "Found 3 files that use 2 tables (e.g. orders, customers). heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.",
+			},
+		]);
+		const content = String(pi.messages[0]?.message.content);
+		assert.ok(
+			content.includes(
+				"- shop.orders (1 use): src/Repo/orders.sql; docs: docs/tables.md\n" +
+					"- shop.customers (2 uses, has a note): src/Models/Customer.php, src/Repo/orders.sql\n",
+			),
+			content,
+		);
+		assert.ok(content.includes('- End every note with its source, like "(code: src/Repo/orders.sql)" or "(docs: docs/tables.md)".\n'), content);
+		assert.ok(content.includes("in business words, with the other words people use for it (synonyms,"), content);
+		assert.ok(content.includes("- Never invent or guess:"), content);
 	});
 
 	test("field case: ordinary-word tables named only in lockfiles, CI, comments and help text are no code", async () => {

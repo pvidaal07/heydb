@@ -1,6 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { Knowledge } from "../knowledge/types.ts";
 import { incomingCounts } from "../model/references.ts";
 import { displayName, formatName } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
@@ -18,6 +19,19 @@ import { HEYDB_DIR } from "../store/project.ts";
 // count: tables called "config" or "para" are ordinary words. It never
 // interprets the code; the agent does that, if the person agrees. The scan runs right after a sync, so it is bounded in files,
 // bytes and time: a huge repository gives a partial answer, never a stuck Pi.
+//
+// Documentation (markdown, text) counts too, but only where it defines a
+// table: "`cst` = maestro de clientes", "| tda | Almacenes |". A passing
+// mention in prose does not. It is read before the code, with at most a
+// quarter of each limit while code waits, so code early in the walk cannot
+// use up the limits before the docs are reached, and huge docs cannot either.
+//
+// The agent writes at most one note per listed table, so the tables come in
+// the order a note helps most: first those with no comment and no note, then
+// those with a comment, then those that already have a note; within each group
+// cryptic names (cst, fac_cab), many references and much code first. The work
+// comes in rounds: the tables noted in one run go last in the next, so running
+// it again lists the next tables, and `remaining` says how many still wait.
 
 export interface ScanLimits {
 	/** Source files read at most. */
@@ -41,9 +55,12 @@ export const DEFAULT_SCAN_LIMITS: ScanLimits = {
 	maxTables: 300,
 };
 
-/** Tables kept in the result, most used first, and files kept per table. */
+/** Tables kept in the result, the ones that most need a note first, and files kept per table. */
 const MAX_MATCHES = 30;
 const MAX_FILES_PER_TABLE = 5;
+const MAX_DOCS_PER_TABLE = 3;
+/** Documentation is read first, with at most this share of each limit while code waits to be read. */
+const DOCS_SHARE = 0.25;
 /** Two-letter names ("id", "ab") are everywhere in code: they would only add noise. */
 const MIN_NAME_LENGTH = 3;
 
@@ -106,6 +123,9 @@ const SOURCE_EXTENSIONS = new Set([
 	"rpgle",
 ]);
 
+/** Documentation: read only for definitions of a table, never as code. */
+const DOC_EXTENSIONS = new Set(["md", "markdown", "txt", "rst", "adoc"]);
+
 /** The project's files, with paths relative to its root and "/" separators. */
 export interface CodeFiles {
 	/** Entries of a folder ("" is the root). Symbolic links are "other": never followed. */
@@ -121,28 +141,45 @@ export interface ScanOptions {
 	/** Milliseconds; replaced in tests. */
 	readonly now?: () => number;
 	readonly limits?: Partial<ScanLimits>;
+	/** The connection's notes: a table that has one needs another less. */
+	readonly knowledge?: Knowledge;
 }
+
+/** What already says what a table is: nothing, its comment, or a team note. */
+export type Described = "nothing" | "comment" | "note";
 
 export interface TableUsage {
 	/** Display name, e.g. "erp.art"; tables with the same name in several databases are joined with " / ". */
 	readonly table: string;
 	/** The table name as the schema writes it, e.g. "art". */
 	readonly name: string;
-	/** Files that use it most, at most 5. */
+	/** Code files that use it most, at most 5. */
 	readonly files: readonly string[];
-	/** Occurrences in every scanned file. */
+	/** Occurrences in every scanned code file. */
 	readonly hits: number;
+	/** Documentation files that define it, at most 3. */
+	readonly docs: readonly string[];
+	/** The best description any of its copies has. */
+	readonly described: Described;
+	/** Whether the name is abbreviation-like (isCrypticName). */
+	readonly cryptic: boolean;
+	/** References from other tables (foreign keys, noted joins, name patterns), the most of any copy. */
+	readonly referenced: number;
 }
 
 export interface SchemaUsage {
 	/** Whether any source file was found at all. */
 	readonly hasCode: boolean;
 	readonly filesScanned: number;
-	/** Files that use at least one table. */
+	/** Documentation files read for definitions. */
+	readonly docsScanned: number;
+	/** Files that use or define at least one table. */
 	readonly filesMatched: number;
-	/** Tables used by at least one file; `matches` keeps the 30 most used. */
+	/** Tables used or defined by at least one file; `matches` keeps the 30 that most need a note. */
 	readonly tablesMatched: number;
 	readonly matches: readonly TableUsage[];
+	/** Matched tables with no description (no useful comment, no note) left out of `matches`: the next rounds. */
+	readonly remaining: number;
 	/** A limit stopped the scan: more code may use these tables. */
 	readonly truncated: boolean;
 }
@@ -152,67 +189,135 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	const files = options.files ?? realFiles(projectRoot);
 	const now = options.now ?? (() => performance.now());
 	const deadline = now() + limits.maxMillis;
-	const outOfTime = () => now() > deadline;
 
-	const names = tableNames(snapshot, limits.maxTables);
-	const listed = await listSources(files, limits.maxFiles, outOfTime);
-	let truncated = listed.truncated;
+	const names = tableNames(snapshot, options.knowledge ?? EMPTY_KNOWLEDGE, limits.maxTables);
+	const listed = await listSources(files, limits.maxFiles, () => now() > deadline);
 
-	// lowercased table name → file → hits
+	// lowercased table name → file → hits, in code and in documentation
 	const found = new Map<string, Map<string, number>>();
+	const defined = new Map<string, Map<string, number>>();
 	let filesScanned = 0;
+	let docsScanned = 0;
 	let filesMatched = 0;
-	let bytes = 0;
-	for (const path of listed.paths) {
-		if (outOfTime()) {
-			truncated = true;
-			break;
+
+	/** Reads `paths` in order until one of the budgets runs out; `stopped` when files remained unread. */
+	async function readPass(paths: readonly string[], budget: { files: number; bytes: number; deadline: number }, doc: boolean) {
+		let considered = 0;
+		let bytes = 0;
+		for (const path of paths) {
+			if (considered >= budget.files || now() > budget.deadline) return { considered, bytes, stopped: true };
+			considered += 1;
+			const size = await files.size(path);
+			if (size === null || size > limits.maxFileBytes) continue;
+			if (bytes + size > budget.bytes) return { considered, bytes, stopped: true };
+			bytes += size;
+			let text: string;
+			try {
+				text = await files.read(path);
+			} catch {
+				continue; // deleted or unreadable since it was listed: not this scan's business
+			}
+			if (doc) docsScanned += 1;
+			else filesScanned += 1;
+			let matched = false;
+			for (const token of doc ? tableDefinitions(text) : tableReferences(text)) {
+				const key = token.toLowerCase();
+				if (!names.has(key)) continue;
+				const into = doc ? defined : found;
+				const perFile = into.get(key) ?? new Map<string, number>();
+				into.set(key, perFile);
+				perFile.set(path, (perFile.get(path) ?? 0) + 1);
+				matched = true;
+			}
+			if (matched) filesMatched += 1;
 		}
-		const size = await files.size(path);
-		if (size === null || size > limits.maxFileBytes) continue;
-		if (bytes + size > limits.maxBytes) {
-			truncated = true;
-			break;
-		}
-		bytes += size;
-		let text: string;
-		try {
-			text = await files.read(path);
-		} catch {
-			continue; // deleted or unreadable since it was listed: not this scan's business
-		}
-		filesScanned += 1;
-		let matched = false;
-		for (const token of tableReferences(text)) {
-			const key = token.toLowerCase();
-			if (!names.has(key)) continue;
-			const perFile = found.get(key) ?? new Map<string, number>();
-			found.set(key, perFile);
-			perFile.set(path, (perFile.get(path) ?? 0) + 1);
-			matched = true;
-		}
-		if (matched) filesMatched += 1;
+		return { considered, bytes, stopped: false };
 	}
 
-	const matches = [...found].map(([key, perFile]): TableUsage => {
-		const ranked = [...perFile].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
+	// Documentation first: it is small, and the best evidence of what a table is.
+	// While code waits it gets at most a share of each limit; code gets the rest.
+	const share = listed.code.length > 0 ? DOCS_SHARE : 1;
+	const listedAt = now();
+	const docs = await readPass(
+		listed.docs,
+		{
+			files: Math.ceil(limits.maxFiles * share),
+			bytes: Math.floor(limits.maxBytes * share),
+			deadline: Math.min(deadline, listedAt + (deadline - listedAt) * share),
+		},
+		true,
+	);
+	const code = await readPass(listed.code, { files: limits.maxFiles - docs.considered, bytes: limits.maxBytes - docs.bytes, deadline }, false);
+	const truncated = listed.truncated || docs.stopped || code.stopped;
+
+	const mostFirst = (perFile: Map<string, number> | undefined) =>
+		[...(perFile ?? [])].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
+	const matches = [...new Set([...found.keys(), ...defined.keys()])].map((key): TableUsage => {
+		const ranked = mostFirst(found.get(key));
 		const table = names.get(key) as TableName;
 		return {
 			table: table.display,
 			name: table.name,
 			files: ranked.slice(0, MAX_FILES_PER_TABLE).map(([path]) => path),
 			hits: ranked.reduce((sum, [, hits]) => sum + hits, 0),
+			docs: mostFirst(defined.get(key))
+				.slice(0, MAX_DOCS_PER_TABLE)
+				.map(([path]) => path),
+			described: table.described,
+			cryptic: table.cryptic,
+			referenced: table.referenced,
 		};
 	});
-	matches.sort((a, b) => b.hits - a.hits || compareText(a.table, b.table));
+	matches.sort(
+		(a, b) =>
+			DESCRIBED_ORDER[a.described] - DESCRIBED_ORDER[b.described] ||
+			noteValue(b) - noteValue(a) ||
+			b.hits - a.hits ||
+			compareText(a.table, b.table),
+	);
 	return {
 		hasCode: filesScanned > 0,
 		filesScanned,
+		docsScanned,
 		filesMatched,
 		tablesMatched: matches.length,
 		matches: matches.slice(0, MAX_MATCHES),
+		remaining: matches.slice(MAX_MATCHES).filter((match) => match.described === "nothing").length,
 		truncated,
 	};
+}
+
+const EMPTY_KNOWLEDGE: Knowledge = { formatVersion: 1, annotations: [], relationships: [] };
+
+/** Tables nothing describes first, then commented ones, then those with a note. */
+const DESCRIBED_ORDER: Readonly<Record<Described, number>> = { nothing: 0, comment: 1, note: 2 };
+
+/**
+ * How much a note on this table is worth, among tables described alike: a
+ * cryptic name counts double, since search cannot match it to any word, and
+ * every doubling of references or of uses in code adds one.
+ */
+function noteValue(table: Pick<TableUsage, "cryptic" | "referenced" | "hits">): number {
+	return (table.cryptic ? 2 : 1) * (1 + Math.log2(1 + table.referenced) + Math.log2(1 + table.hits));
+}
+
+/**
+ * Whether a table name looks like an abbreviation that no search word will
+ * match: 4 letters or fewer in all, a part with no vowel (stk, cst), or most
+ * of its parts 3 letters or fewer (fac_cab). Parts are split at anything that
+ * is not a letter and at camelCase humps. Only Latin letters are checked for
+ * vowels; other scripts are never called cryptic for lacking them.
+ */
+export function isCrypticName(name: string): boolean {
+	const parts = name
+		.replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+		.split(/[^\p{L}]+/u)
+		.filter((part) => part !== "");
+	const letters = parts.reduce((sum, part) => sum + part.length, 0);
+	if (letters <= 4) return true;
+	const latin = (part: string) => part.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+	if (parts.some((part) => /^[a-z]+$/.test(latin(part)) && !/[aeiouy]/.test(latin(part)))) return true;
+	return parts.filter((part) => part.length <= 3).length * 2 > parts.length;
 }
 
 // The patterns of database context. Each captures the table name as `name`:
@@ -330,32 +435,100 @@ interface TableName {
 	readonly canonical: string;
 	readonly name: string;
 	readonly display: string;
+	readonly described: Described;
+	readonly cryptic: boolean;
+	readonly referenced: number;
 }
 
-/** Lowercased table name → how to show it, for the tables worth looking for. */
-function tableNames(snapshot: Snapshot, maxTables: number): Map<string, TableName> {
-	const all: { canonical: string; name: string; display: string }[] = [];
+/**
+ * Lowercased table name → how to show it and what it needs, for the tables
+ * worth looking for. In a huge schema those are the ones a note helps most
+ * before any code is read: described alike, the cryptic and referenced first.
+ */
+function tableNames(snapshot: Snapshot, knowledge: Knowledge, maxTables: number): Map<string, TableName> {
+	const counts = incomingCounts(snapshot, knowledge);
+	const noted = new Set(knowledge.annotations.map((annotation) => annotation.target));
+	const all: TableName[] = [];
 	for (const database of snapshot.databases) {
 		for (const schema of database.schemas) {
 			for (const table of schema.tables) {
 				if (table.name.length < MIN_NAME_LENGTH) continue;
 				const ref = { database: database.name, schema: schema.name, table: table.name };
-				all.push({ canonical: formatName(ref), name: table.name, display: displayName(ref) });
+				const canonical = formatName(ref);
+				all.push({
+					canonical,
+					name: table.name,
+					display: displayName(ref),
+					described: noted.has(canonical) ? "note" : describes(table.comment, table.name) ? "comment" : "nothing",
+					cryptic: isCrypticName(table.name),
+					referenced: counts.get(canonical) ?? 0,
+				});
 			}
 		}
 	}
 	let kept = all;
 	if (all.length > maxTables) {
-		// The tables others point to are the core of a legacy schema, and the ones code uses most.
-		const counts = incomingCounts(snapshot, { formatVersion: 1, annotations: [], relationships: [] });
-		const incoming = (item: (typeof all)[number]) => counts.get(item.canonical) ?? 0;
-		kept = [...all].sort((a, b) => incoming(b) - incoming(a) || compareText(a.canonical, b.canonical)).slice(0, maxTables);
+		const value = (item: TableName) => noteValue({ ...item, hits: 0 });
+		kept = [...all]
+			.sort(
+				(a, b) =>
+					DESCRIBED_ORDER[a.described] - DESCRIBED_ORDER[b.described] ||
+					value(b) - value(a) ||
+					compareText(a.canonical, b.canonical),
+			)
+			.slice(0, maxTables);
 	}
 	const names = new Map<string, TableName>();
 	for (const item of kept) {
 		const key = item.name.toLowerCase();
 		const previous = names.get(key);
-		names.set(key, previous === undefined ? item : { ...previous, display: `${previous.display} / ${item.display}` });
+		names.set(
+			key,
+			previous === undefined
+				? item
+				: {
+						...previous,
+						display: `${previous.display} / ${item.display}`,
+						described: DESCRIBED_ORDER[item.described] > DESCRIBED_ORDER[previous.described] ? item.described : previous.described,
+						referenced: Math.max(previous.referenced, item.referenced),
+					},
+		);
+	}
+	return names;
+}
+
+/** A comment says what the table is when it has a word of 3 letters or more besides the table's own name. */
+function describes(comment: string, name: string): boolean {
+	const lowerName = name.toLowerCase();
+	return (comment.match(/[\p{L}\p{N}_]+/gu) ?? []).some((word) => word.toLowerCase() !== lowerName && /\p{L}{3}/u.test(word));
+}
+
+// Documentation defines a table in three ways; each captures the name as `name`:
+// - in backticks: `cst`, `erp.cst`
+// - alone in a cell of a markdown table row that has a description: | tda | Almacenes |
+// - at the start of a line (a list item, a heading, bold allowed), followed by
+//   "=", ":", "–", "—" or " - " and words: "cst = maestro de clientes"
+
+const IN_BACKTICKS = new RegExp(`\`(?:${ID}\\.){0,2}(?<name>${ID})\``, "gu");
+const DEFINITION_LINE = new RegExp(
+	`^[ \\t]*(?:[-*+][ \\t]+|\\d+[.)][ \\t]+|#{1,6}[ \\t]+)?(?:\\*\\*)?(?:${ID}\\.){0,2}(?<name>${ID})(?:\\*\\*)?(?:[ \\t]*[=:–—]|[ \\t]+-)[ \\t]*\\p{L}{2}`,
+	"gmu",
+);
+const WHOLE_ID = new RegExp(`^${ID}$`, "u");
+
+/** Every table name the documentation defines; one per place. */
+function tableDefinitions(text: string): string[] {
+	const names: string[] = [];
+	for (const match of text.matchAll(IN_BACKTICKS)) names.push(match.groups?.name as string);
+	for (const match of text.matchAll(DEFINITION_LINE)) names.push(match.groups?.name as string);
+	for (const line of text.split("\n")) {
+		const row = line.trim();
+		if (!row.startsWith("|")) continue;
+		const cells = row.replace(/^\||\|$/g, "").split("|").map((cell) => cell.replace(/[`*]/g, "").trim());
+		cells.forEach((cell, index) => {
+			if (!WHOLE_ID.test(cell)) return;
+			if (cells.some((other, at) => at !== index && /\p{L}{2}/u.test(other))) names.push(cell);
+		});
 	}
 	return names;
 }
@@ -375,11 +548,13 @@ async function listSources(
 	files: CodeFiles,
 	maxFiles: number,
 	outOfTime: () => boolean,
-): Promise<{ paths: string[]; truncated: boolean }> {
-	const paths: string[] = [];
+): Promise<{ docs: string[]; code: string[]; truncated: boolean }> {
+	const docs: string[] = [];
+	const code: string[] = [];
+	let truncated = false;
 	const pending = [""];
 	while (pending.length > 0) {
-		if (outOfTime()) return { paths, truncated: true };
+		if (outOfTime()) return { docs, code, truncated: true };
 		const dir = pending.shift() as string;
 		let entries: Awaited<ReturnType<CodeFiles["list"]>>;
 		try {
@@ -390,21 +565,33 @@ async function listSources(
 		for (const entry of [...entries].sort((a, b) => compareText(a.name, b.name))) {
 			const path = dir === "" ? entry.name : `${dir}/${entry.name}`;
 			if (entry.kind === "dir" && !SKIPPED_FOLDERS.has(entry.name)) pending.push(path);
-			if (entry.kind !== "file" || !isSource(path)) continue;
-			if (paths.length === maxFiles) return { paths, truncated: true };
-			paths.push(path);
+			if (entry.kind !== "file") continue;
+			// Each kind is listed up to the file limit on its own, so code early in the walk never hides the docs.
+			const into = isDoc(path) ? docs : isSource(path) ? code : null;
+			if (into === null) continue;
+			if (into.length === maxFiles) truncated = true;
+			else into.push(path);
 		}
+		if (truncated && docs.length === maxFiles && code.length === maxFiles) return { docs, code, truncated: true };
 	}
-	return { paths, truncated: false };
+	return { docs, code, truncated };
 }
 
 function isSource(path: string): boolean {
+	return hasExtension(path, SOURCE_EXTENSIONS);
+}
+
+function isDoc(path: string): boolean {
+	return hasExtension(path, DOC_EXTENSIONS);
+}
+
+function hasExtension(path: string, extensions: ReadonlySet<string>): boolean {
 	const segments = path.split("/");
 	if (segments.slice(0, -1).some((segment) => SKIPPED_FOLDERS.has(segment))) return false;
 	const name = segments.at(-1) ?? "";
 	if (SKIPPED_FILES.has(name) || name.toLowerCase().endsWith(".min.js")) return false;
 	const dot = name.lastIndexOf(".");
-	return dot > 0 && SOURCE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+	return dot > 0 && extensions.has(name.slice(dot + 1).toLowerCase());
 }
 
 function realFiles(root: string): CodeFiles {

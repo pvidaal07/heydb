@@ -60,6 +60,24 @@ The `information_schema` side is what `mysql --batch` would print:
 
 Tokens are characters / 4: good enough to compare two runs, not a bill.
 
+## What /heydb:learn-code would send
+
+```bash
+node bench/learn-code.ts --project ../app [--connection erp] [--code ../legacy-app] [--message] [--json]
+```
+
+Runs the code scan of `/heydb:learn-code` with no model and prints the tables
+the agent would get, in order (what describes each one already, whether its
+name is cryptic, references, uses in code, code files, docs that define it)
+and the size of the message in tokens; `--message` prints the message too.
+The project's connection (config, snapshot, notes) and the code folder
+(`--code`, or the project's folder) are copied to a temporary folder without
+`.git`, `node_modules`, `.heydb` and `.env` files, and scanned there: the
+folders measured are only read. To measure the notes a real model writes,
+send that message to a model on a copy of the project, then run
+`bench/run.ts --project` on the copy. Output names real tables: keep it out of
+this repository.
+
 ## Strategies
 
 Each strategy is a module under `strategies/` with one interface,

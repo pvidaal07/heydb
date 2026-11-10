@@ -79,7 +79,7 @@ None of them connects to the database; they read and write files in `.heydb/`.
 | `heydb_relate` | Record a join that has no foreign key, also across connections |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
 
-Notes saved by the agent are signed `<your git user.name> (via agent)` and end with their source: `(code: src/Models/Order.php)` or `(told by the user)`.
+Notes saved by the agent are signed `<your git user.name> (via agent)` and end with their source: `(code: src/Models/Order.php)`, `(docs: docs/tables.md)` or `(told by the user)`.
 
 ## Learning from code
 
@@ -87,7 +87,9 @@ After a sync, heydb looks for code in the project that uses the synced tables. I
 
 A table only counts in database context: SQL with its statement verb (`SELECT … FROM art`, `UPDATE art … SET`, `INSERT INTO art`), including SQL whose database prefix is built by code (`"FROM " + cDb + ".art"`), or a table declaration (`protected $table = 'art'`, `cTabla := "art"`, `@Table(name = "art")`, `__tablename__`, `DB::table('art')`…). A table called `config` is not matched by every comment that says "config".
 
-If it finds such code it asks first, because reading it costs tokens. The agent then notes only what the code makes explicit (valid values, units, joins without a foreign key), stops after about 20 notes and leaves what remains unclear as questions. `/heydb:learn-code acme ../legacy-app` reads code that lives in another folder. The scan stops after 10 seconds or 50 MB on very large codebases.
+Documentation counts too, where it defines a table: a markdown or text file that writes the name in backticks (`` `cst` ``), alone in a table cell (`| tda | Almacenes |`) or at the start of a line followed by `=`, `:` or a dash and words (`cst = maestro de clientes`). A passing mention in prose does not.
+
+If it finds such code it asks first, because reading it costs tokens. The tables come in the order a note helps most: those with no comment and no note first, then commented ones, then those that already have a note; within each group, cryptic names (`cst`, `fac_cab`), tables many others point to and tables much code uses come first. The agent writes one note per table saying what it holds in business words, with the synonyms people use (both languages when the team mixes them), since that is what search finds tables by; valid values, units and joins without a foreign key only when the code makes them explicit. Every note cites its source, nothing is guessed, and what remains unclear is left as questions. It works in rounds: the message lists the 30 tables that most need a note, the agent writes at most one note per listed table, and it ends by telling you how many tables used in the code still have no description and that running `/heydb:learn-code` again covers the next ones (tables noted in one round go last in the next), or that the code has been fully covered. `/heydb:learn-code acme ../legacy-app` reads code that lives in another folder. The scan stops after 10 seconds or 50 MB on very large codebases; documentation is read first, with at most a quarter of that budget while code waits, so a large codebase never leaves the docs unread.
 
 Without such code, notes come from your conversations: tell the agent what a table means and it saves it.
 
