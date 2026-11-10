@@ -1,7 +1,7 @@
 import { type Annotation, type Knowledge, PROJECT_TARGET, type RelationshipSide } from "./knowledge/types.ts";
 import { displayName, formatName, parseName } from "./model/names.ts";
 import { type CommentCount, incomingReferences, namePatternTargets } from "./model/references.ts";
-import type { Snapshot, Table } from "./model/snapshot.ts";
+import type { Database, Snapshot, Table } from "./model/snapshot.ts";
 
 // Search over the stored snapshot and knowledge; it never touches the server.
 //
@@ -109,6 +109,16 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // abbreviation ("rectificación de asistencia" finds asistencia_rec), its own
 // comment or notes, columns the original lacks, or references to it. Query words that match nothing anywhere are in `unmatched`, so the
 // agent can try another word instead of the same search again.
+//
+// A process question ("which tables take part in entering expense
+// invoices?") needs more than the table found: the first RELATED_RESULTS
+// tables and views carry `related`, the tables they join and the tables
+// named after them (exh: cre and pmt it points to; dnx, exhl, mvl and pdue
+// pointing to it; exh_doc and exhl named like it), so the process can be
+// followed from one table. Joins are declared foreign keys and the team's
+// relationships within this connection, never name-pattern guesses: on a
+// legacy schema those are costly and noisy. Referencing keys are found in
+// one pass over the result's database, once per search.
 
 export type SearchObject = "database" | "table" | "view" | "relationship" | "project";
 
@@ -153,6 +163,23 @@ export interface SearchResult {
 	readonly copies?: readonly string[];
 	/** The id of a project note result, so it can be edited or forgotten. */
 	readonly noteId?: string;
+	/** For the first RELATED_RESULTS tables and views, their neighbourhood; absent when it is empty. */
+	readonly related?: RelatedTables;
+}
+
+/**
+ * The tables around a result, each list unique, sorted, at most RELATED_SHOWN:
+ * the bare table name in the result's database and schema, else "db.table".
+ */
+export interface RelatedTables {
+	/** Tables it points to: its foreign keys and the team's relationships from it. */
+	readonly references: readonly string[];
+	/** Tables pointing to it: foreign keys in its database and the team's relationships to it. */
+	readonly referencedBy: readonly string[];
+	/** Tables of its database and schema whose name starts with its name (exhl, exh_doc for exh), copies folded into it aside. */
+	readonly named: readonly string[];
+	/** Per list, the tables beyond those listed. */
+	readonly more: { readonly references: number; readonly referencedBy: number; readonly named: number };
 }
 
 export interface SearchResults {
@@ -184,6 +211,10 @@ const MAX_COLUMNS = 5;
 /** Tables whose referencing columns are summarized per search; each costs one scan of its database. */
 const MAX_INFERRED_TABLES = 10;
 const MAX_DATABASES_LISTED = 10;
+/** The first this many table and view results list their related tables. */
+const RELATED_RESULTS = 3;
+/** Related tables named per list; the rest are counted. */
+const RELATED_SHOWN = 6;
 
 type Field = "name" | "stated" | "note" | "inferred" | "columnText" | "columnName" | "definition" | "relationship";
 
@@ -388,7 +419,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	const unmatched = q.shown.filter((_, index) => !docs.some((doc) => doc.matched[index]));
 	const best = Math.max(0, ...ranked.map((item) => item.base));
 	const kept = options.limit !== undefined ? ranked : ranked.filter((item) => item.exactName || item.base >= WEAK_SHARE * best);
-	const results = kept.slice(0, Math.max(0, limit)).map((item) => item.result);
+	const results = withRelated(snapshot, knowledge, kept.slice(0, Math.max(0, limit)).map((item) => item.result));
 	return { results, total: ranked.length, weaker: ranked.length - kept.length, unmatched };
 }
 
@@ -930,6 +961,90 @@ function structuralCopies(tables: readonly Table[]): ReadonlyMap<string, Table> 
 	}
 	copiesCache.set(tables, copies);
 	return copies;
+}
+
+/** The first RELATED_RESULTS tables and views, with the tables around them. */
+function withRelated(snapshot: Snapshot, knowledge: Knowledge, results: readonly SearchResult[]): SearchResult[] {
+	// Per database, table → tables with a foreign key to it: one pass over each database needed.
+	const referrers = new Map<string, ReadonlyMap<string, readonly string[]>>();
+	const referrersIn = (database: Database) => {
+		let found = referrers.get(database.name);
+		if (found === undefined) {
+			found = foreignKeyReferrers(database);
+			referrers.set(database.name, found);
+		}
+		return found;
+	};
+	let listed = 0;
+	return results.map((result) => {
+		if ((result.object !== "table" && result.object !== "view") || listed >= RELATED_RESULTS) return result;
+		listed += 1;
+		const related = relatedTables(snapshot, knowledge, result, referrersIn);
+		return related === undefined ? result : { ...result, related };
+	});
+}
+
+function foreignKeyReferrers(database: Database): Map<string, string[]> {
+	const found = new Map<string, string[]>();
+	for (const schema of database.schemas) {
+		for (const table of schema.tables) {
+			const from = formatName({ database: database.name, schema: schema.name, table: table.name });
+			for (const key of table.foreignKeys) {
+				const to = formatName(key.references);
+				found.set(to, [...(found.get(to) ?? []), from]);
+			}
+		}
+	}
+	return found;
+}
+
+function relatedTables(
+	snapshot: Snapshot,
+	knowledge: Knowledge,
+	result: SearchResult,
+	referrersIn: (database: Database) => ReadonlyMap<string, readonly string[]>,
+): RelatedTables | undefined {
+	const ref = parseName(result.target);
+	const database = snapshot.databases.find((item) => item.name === ref.database);
+	const schema = database?.schemas.find((item) => item.name === ref.schema);
+	const table = schema?.tables.find((item) => item.name === ref.table);
+	if (database === undefined || schema === undefined || table === undefined) return undefined;
+
+	const references = table.foreignKeys.map((key) => formatName(key.references));
+	const referencedBy = [...(referrersIn(database).get(result.target) ?? [])];
+	for (const { from, to } of knowledge.relationships) {
+		// A side in another connection is another table, whatever its name.
+		if (from.connection !== undefined || to.connection !== undefined) continue;
+		if (from.table === result.target) references.push(to.table);
+		if (to.table === result.target) referencedBy.push(from.table);
+	}
+	const own = normalizeText(table.name);
+	const copies = new Set(result.copies ?? []);
+	const named = schema.tables
+		.filter((item) => {
+			const name = normalizeText(item.name);
+			return name.length > own.length && name.startsWith(own) && !copies.has(item.name);
+		})
+		.map((item) => formatName({ database: database.name, schema: schema.name, table: item.name }));
+
+	const list = (names: readonly string[]) => {
+		const shown = [...new Set(names)]
+			.filter((name) => name !== result.target)
+			.map((name) => {
+				const other = parseName(name);
+				return other.database === ref.database && other.schema === ref.schema ? (other.table as string) : displayName(other);
+			})
+			.sort(compareText);
+		return { shown: shown.slice(0, RELATED_SHOWN), more: Math.max(0, shown.length - RELATED_SHOWN) };
+	};
+	const groups = { references: list(references), referencedBy: list(referencedBy), named: list(named) };
+	if (Object.values(groups).every((group) => group.shown.length === 0)) return undefined;
+	return {
+		references: groups.references.shown,
+		referencedBy: groups.referencedBy.shown,
+		named: groups.named.shown,
+		more: { references: groups.references.more, referencedBy: groups.referencedBy.more, named: groups.named.more },
+	};
 }
 
 /** The tables a column may point to: its foreign key, a documented relationship, or else its name pattern. */

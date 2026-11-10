@@ -5,7 +5,7 @@ import { displayName, displayNameOf, formatName, parseName } from "../model/name
 import type { IncomingReferences } from "../model/references.ts";
 import type { Column, Snapshot, Table } from "../model/snapshot.ts";
 import { type SchemaStats, schemaStats } from "../model/stats.ts";
-import { normalizeText, type SearchResult, type SearchResults } from "../search.ts";
+import { normalizeText, type RelatedTables, type SearchResult, type SearchResults } from "../search.ts";
 import type { StatusResult } from "../usecases/status.ts";
 
 // Markdown written for agents. Every character returned here is read by a
@@ -440,7 +440,21 @@ function searchLine(result: SearchResult, named: Set<string>): string {
 		const rest = result.columns.length - SEARCH_COLUMNS + result.moreColumns;
 		line += ` · columns: ${shown.join(", ")}${rest > 0 ? ` (+${rest})` : ""}`;
 	}
-	return line;
+	return result.related === undefined ? line : `${line}\n${relatedLine(result.related)}`;
+}
+
+// On its own line, so a process can be followed from one table without
+// opening it, and the line above stays what it was.
+function relatedLine(related: RelatedTables): string {
+	const groups = [
+		["references", related.references, related.more.references],
+		["referenced by", related.referencedBy, related.more.referencedBy],
+		["named like it", related.named, related.more.named],
+	] as const;
+	const parts = groups
+		.filter(([, names]) => names.length > 0)
+		.map(([label, names, more]) => `${label} ${names.join(", ")}${more > 0 ? ` (+${more})` : ""}`);
+	return `  related: ${parts.join(" · ")}`;
 }
 
 /**

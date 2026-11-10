@@ -637,6 +637,37 @@ describe("renderSearch", () => {
 		);
 	});
 
+	test("adds one line with the related tables of a result, only the groups it has, counting what was cut", () => {
+		const none = { references: 0, referencedBy: 0, named: 0 };
+		const exh: SearchResult = {
+			...base,
+			target: "shop.shop.exh",
+			object: "table",
+			about: "Facturas de gasto",
+			related: { references: ["cre", "pmt"], referencedBy: ["dnx", "mvl", "pdue"], named: ["exh_doc", "exhl"], more: none },
+		};
+		const exhl: SearchResult = { ...base, target: "shop.shop.exhl", object: "table", related: { references: ["exh"], referencedBy: [], named: [], more: none } };
+		const art: SearchResult = {
+			...base,
+			target: "shop.shop.art",
+			object: "table",
+			related: { references: [], referencedBy: ["a", "b", "c", "d", "e", "f"], named: ["art_1"], more: { references: 0, referencedBy: 3, named: 0 } },
+		};
+		assert.equal(
+			renderSearch({ results: [exh, exhl, art, database], total: 4 }),
+			[
+				"4 matches.",
+				"- table shop.exh — Facturas de gasto",
+				"  related: references cre, pmt · referenced by dnx, mvl, pdue · named like it exh_doc, exhl",
+				"- table shop.exhl",
+				"  related: references exh",
+				"- table shop.art",
+				"  related: referenced by a, b, c, d, e, f (+3) · named like it art_1",
+				"- database shop — The web store.",
+			].join("\n"),
+		);
+	});
+
 	test("folds copies of a table in its database onto its line, the first two named", () => {
 		const copies = ["fac_cab_2019", "fac_cab_2020", "fac_cab_2021"];
 		assert.equal(
