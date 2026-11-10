@@ -72,7 +72,7 @@ None of them connects to the database; they read and write files in `.heydb/`.
 
 | Tool | What it does |
 |---|---|
-| `heydb_overview` | Size, comment coverage, name prefixes, most referenced tables, warnings and project notes |
+| `heydb_overview` | Size, comment coverage, name prefixes, most referenced tables, warnings and project notes; databases with the same structure shown once |
 | `heydb_table` | One table: evidence of meaning first (comment, notes, who references it), then keys, relationships and up to 60 columns, with a column filter |
 | `heydb_search` | Search by words, not exact phrases: names (abbreviations too), comments, notes and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
 | `heydb_annotate` | Save a note on the project, a database, table or column |

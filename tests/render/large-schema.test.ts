@@ -68,8 +68,10 @@ describe("a huge legacy schema", () => {
 		const { value: text, ms } = timed(() => renderOverview(large, knowledge, { connection: "erp" }));
 		assert.ok(ms < BUDGET_MS, `overview took ${ms.toFixed(0)} ms`);
 		assert.ok(text.length < 12_000, `overview has ${text.length} characters`);
-		assert.match(text, /\n {2}- db0\.art · 500 references · ~120k rows · no comment\n/);
-		assert.match(text, /\n… 1954 more tables — use heydb_search$/);
+		assert.match(text, /\n- db0 \(\+3 with the same structure: db1, db2, db3\): 501 tables\n/);
+		assert.match(text, /\n {2}Most referenced tables: art ×500\n/);
+		assert.match(text, /\n\| db0\.art \| table \| ~120k \|  \|\n/);
+		assert.match(text, /\n… 451 more tables — use heydb_search$/);
 	});
 
 	test("the 600-column table renders fast and stays small by default", () => {

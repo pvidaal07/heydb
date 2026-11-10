@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { Knowledge } from "../knowledge/types.ts";
 import { formatName } from "./names.ts";
 import { incomingCounts } from "./references.ts";
@@ -36,6 +38,12 @@ export interface SchemaStats {
 	readonly prefixes: readonly PrefixCount[];
 	/** The most referenced tables, most first; only tables with references. */
 	readonly mainTables: readonly MainTable[];
+	/**
+	 * Equal for schemas with the same tables and views, by name, each with the
+	 * same columns (name and type): one database per company. Comments, rows,
+	 * keys and indexes are left out, as search does for identical copies.
+	 */
+	readonly structure: string;
 }
 
 /** One entry per schema, in snapshot order (one per database in MySQL and MariaDB). */
@@ -74,9 +82,21 @@ export function schemaStats(snapshot: Snapshot, knowledge: Knowledge, counts = i
 					.sort((a, b) => b.count - a.count || compareText(a.prefix, b.prefix))
 					.slice(0, TOP_PREFIXES),
 				mainTables,
+				structure: structureKey(schema.tables, database.name, schema.name),
 			};
 		}),
 	);
+}
+
+// The schema name counts only where it is not the database (PostgreSQL), so
+// app1.public and app2.public can match while app.public and app.sales cannot.
+function structureKey(tables: readonly Table[], database: string, schema: string): string {
+	const hash = createHash("sha256").update(schema === database ? "" : schema);
+	for (const table of [...tables].sort((a, b) => compareText(a.name, b.name))) {
+		hash.update(`\u0000${table.kind}\u0001${table.name}`);
+		for (const column of table.columns) hash.update(`\u0002${column.name}\u0001${column.type}`);
+	}
+	return hash.digest("hex");
 }
 
 /**

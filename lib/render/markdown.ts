@@ -63,9 +63,17 @@ export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options
 	];
 
 	// What holds for every database ("one database per client") frames the rest.
-	if (projectNotes.length > 0) blocks.push(["## Project notes", ...projectNotes.map((note) => `- ${indented(note.text)} ${noteTag(note)}`)]);
+	if (projectNotes.length > 0) blocks.push(["## Project notes", ...projectNoteLines(projectNotes)]);
 
-	if (stats.length > 0) blocks.push(["## Databases", ...stats.flatMap((schema) => databaseLines(schema, firstNote))]);
+	const groups = databaseGroups(snapshot, stats, firstNote);
+	if (groups.length > 0) {
+		const left = groups.slice(MAX_DATABASE_BLOCKS).reduce((sum, group) => sum + 1 + group.copies.length, 0);
+		blocks.push([
+			"## Databases",
+			...groups.slice(0, MAX_DATABASE_BLOCKS).flatMap((group) => databaseLines(group)),
+			...more(left, "database").map((line) => `${line} — use heydb_search with database`),
+		]);
+	}
 
 	if (snapshot.warnings.length > 0) {
 		const shown = snapshot.warnings
@@ -76,13 +84,20 @@ export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options
 
 	// Notes first (the team already explained them), then the core of each
 	// database, then the rest by name: when the list is cut, what is cut is
-	// what says least.
+	// what says least. A database with the same structure as one listed
+	// adds only its noted tables.
+	const copies = new Set(groups.flatMap((group) => group.copies.map((copy) => formatName({ database: copy.database, schema: copy.schema }))));
 	const tables = snapshot.databases
 		.flatMap((database) =>
 			database.schemas.flatMap((schema) =>
-				schema.tables.map((table) => ({ name: formatName({ database: database.name, schema: schema.name, table: table.name }), table })),
+				schema.tables.map((table) => ({
+					name: formatName({ database: database.name, schema: schema.name, table: table.name }),
+					copy: copies.has(formatName({ database: database.name, schema: schema.name })),
+					table,
+				})),
 			),
 		)
+		.filter(({ name, copy }) => !copy || firstNote.has(name))
 		.sort((a, b) => compareText(a.name, b.name));
 	const main = new Map(stats.flatMap((schema) => schema.mainTables).map((item, index) => [item.name, index]));
 	const group = (name: string) => (firstNote.has(name) ? 0 : main.has(name) ? 1 : 2);
@@ -93,9 +108,10 @@ export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options
 			return row([displayNameOf(name), table.kind, tableRows(table), note]);
 		});
 		const rest = more(tables.length - maxTables, "table").map((line) => `${line} — use heydb_search`);
+		const once = copies.size > 0 ? " Databases with the same structure are listed once." : "";
 		blocks.push([
 			"## Tables",
-			"Tables with notes first, then the most referenced, then by name; rows are engine estimates.",
+			`Tables with notes first, then the most referenced, then by name; rows are engine estimates.${once}`,
 			row(["table", "kind", "rows", "note"]),
 			"|---|---|---|---|",
 			...rows,
@@ -105,13 +121,78 @@ export function renderOverview(snapshot: Snapshot, knowledge: Knowledge, options
 	return render(blocks);
 }
 
-// One list item per database, its details indented below it. Comment coverage
-// says how far comments can be trusted as a map; the most referenced tables
-// are the core of the database, whatever their names.
-function databaseLines(stats: SchemaStats, firstNote: ReadonlyMap<string, string>): string[] {
-	const ref = { database: stats.database, schema: stats.schema };
+/** One database per company makes 50 identical blocks: the first 20 kinds say as much. */
+const MAX_DATABASE_BLOCKS = 20;
+const MAX_PROJECT_NOTES = 20;
+const PROJECT_NOTE_LENGTH = 300;
+/** Where project notes are stored: the agent can read the ones the overview cuts. */
+const PROJECT_NOTES_FILE = ".heydb/knowledge/_project.json";
+
+// Project notes are not searchable, so what is cut says where to read it whole.
+function projectNoteLines(notes: readonly Annotation[]): string[] {
+	let cut = false;
+	const lines = notes.slice(0, MAX_PROJECT_NOTES).map((note) => {
+		const characters = [...note.text];
+		const text = characters.length <= PROJECT_NOTE_LENGTH ? note.text : `${characters.slice(0, PROJECT_NOTE_LENGTH - 1).join("").trimEnd()}…`;
+		cut ||= text !== note.text;
+		return `- ${indented(text)} ${noteTag(note)}`;
+	});
+	const hidden = notes.length - MAX_PROJECT_NOTES;
+	if (hidden > 0) lines.push(`… ${hidden} more ${plural(hidden, "project note")}; every note, whole, is in ${PROJECT_NOTES_FILE}`);
+	else if (cut) lines.push(`Long notes are cut; every note, whole, is in ${PROJECT_NOTES_FILE}`);
+	return lines;
+}
+
+interface DatabaseGroup {
+	readonly stats: SchemaStats;
+	/** First line of the database's own note, if any. */
+	readonly note: string | undefined;
+	/** The lines below the database, the same for every copy. */
+	readonly details: readonly string[];
+	/** Later databases with the same structure, comments, notes and details. */
+	readonly copies: SchemaStats[];
+}
+
+// Databases that would print the same block, and whose tables would print
+// the same rows but for their row counts, are one block: the first, then
+// how many more and the first few names.
+function databaseGroups(snapshot: Snapshot, stats: readonly SchemaStats[], firstNote: ReadonlyMap<string, string>): DatabaseGroup[] {
+	const comments = new Map(
+		snapshot.databases.flatMap((database) =>
+			database.schemas.map((schema) => [
+				formatName({ database: database.name, schema: schema.name }),
+				schema.tables.map((table) => `${table.name}\u0001${preview(table.comment)}`).join("\u0000"),
+			]),
+		),
+	);
+	const groups = new Map<string, DatabaseGroup>();
+	for (const item of stats) {
+		const name = formatName({ database: item.database, schema: item.schema });
+		const note = firstNote.get(name);
+		const details = databaseDetails(item);
+		const key = [item.structure, comments.get(name) ?? "", note ?? "", ...details].join("\u0002");
+		const group = groups.get(key);
+		if (group === undefined) groups.set(key, { stats: item, note, details, copies: [] });
+		else group.copies.push(item);
+	}
+	return [...groups.values()];
+}
+
+// One list item per database (or per group of identical ones), its details
+// indented below it.
+function databaseLines({ stats, note, details, copies }: DatabaseGroup): string[] {
 	const counts = [count(stats.tables, "table"), ...(stats.views > 0 ? [count(stats.views, "view")] : [])].join(", ");
-	const note = firstNote.get(formatName(ref));
+	const names = copies.slice(0, IDENTICAL_NAMED).map((copy) => displayName({ database: copy.database, schema: copy.schema }));
+	const same = copies.length === 0 ? "" : ` (+${copies.length} with the same structure: ${names.join(", ")}${copies.length > IDENTICAL_NAMED ? ", …" : ""})`;
+	const name = displayName({ database: stats.database, schema: stats.schema });
+	return [`- ${name}${same}: ${counts}${note === undefined ? "" : ` · ${note}`}`, ...details.map((line) => `  ${line}`)];
+}
+
+// Comment coverage says how far comments can be trusted as a map; the most
+// referenced tables are the core of the database, whatever their names. They
+// are named here by table name only: their rows and comments are in the
+// table list, so no table is described twice.
+function databaseDetails(stats: SchemaStats): string[] {
 	const lines: string[] = [];
 	if (stats.tables > 0) {
 		lines.push(
@@ -122,19 +203,12 @@ function databaseLines(stats: SchemaStats, firstNote: ReadonlyMap<string, string
 		lines.push(`Name prefixes: ${stats.prefixes.map(({ prefix, count: n }) => `${prefix} ×${n}`).join(", ")}`);
 	}
 	if (stats.mainTables.length > 0) {
-		lines.push(
-			"Most referenced tables:",
-			...stats.mainTables.map(({ name, table, incoming }) => {
-				const rows = table.rowEstimate === null ? "rows unknown" : `${approximateRows(table.rowEstimate)} rows`;
-				const about = firstNote.get(name) ?? (preview(table.comment) || "no comment");
-				return `- ${displayNameOf(name)} · ${count(incoming, "reference")} · ${rows} · ${about}`;
-			}),
-		);
+		lines.push(`Most referenced tables: ${stats.mainTables.map(({ table, incoming }) => `${table.name} ×${incoming}`).join(", ")}`);
 	}
 	if (stats.tables > 0 && stats.tablesWithComment / stats.tables < LOW_COMMENT_COVERAGE) {
 		lines.push("Most tables have no comment: do not infer meaning from table names alone.");
 	}
-	return [`- ${displayName(ref)}: ${counts}${note === undefined ? "" : ` · ${note}`}`, ...lines.map((line) => `  ${line}`)];
+	return lines;
 }
 
 export interface TableOptions {

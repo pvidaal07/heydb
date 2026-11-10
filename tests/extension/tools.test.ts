@@ -13,11 +13,15 @@ import { loadKnowledge } from "../../lib/store/knowledge.ts";
 import { saveSnapshot } from "../../lib/store/snapshots.ts";
 import { initProject } from "../../lib/usecases/init.ts";
 import { annotate, relate } from "../../lib/usecases/knowledge.ts";
+import { fixedToolChars } from "../../bench/measure.ts";
 import { fixedClock } from "../knowledge/fixtures.ts";
 import { column, customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 import { loadHeydb, runTool, tempDirs } from "./fake-pi.ts";
 
 const tempDir = tempDirs("heydb-tools-");
+
+/** Characters of description, snippet, guidelines and JSON parameters of every tool: ≈1.1k tokens. */
+const FIXED_TOOL_BUDGET = 4_400;
 
 const noGit = spawnSync("git", ["--version"]).error !== undefined && "git is not installed";
 
@@ -83,11 +87,35 @@ describe("tool registration", () => {
 		assert.match(all, /heydb_relate/);
 	});
 
+	test("search comes first: the overview is for a map, not the first call of every question", () => {
+		const tools = loadHeydb().tools;
+		const overview = (tools.get("heydb_overview")?.promptGuidelines ?? []).join("\n");
+		const search = (tools.get("heydb_search")?.promptGuidelines ?? []).join("\n");
+		assert.doesNotMatch(overview, /\bfirst\b/);
+		assert.match(overview, /heydb_overview .*map/);
+		assert.match(search, /heydb_search first/);
+	});
+
 	test("heydb_annotate says where a note comes from: the code file, or the user", () => {
 		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
 		assert.match(guidelines, /\(code: [^)]+\)/);
 		assert.match(guidelines, /\(told by the user\)/);
 		assert.match(guidelines, /inference.*confirm/i);
+	});
+
+	test("the tool text sent every turn stays within its budget", () => {
+		// What Pi puts in the prompt for every tool, used or not: about 1.1k tokens at most.
+		assert.ok(fixedToolChars(loadHeydb().tools as never) <= FIXED_TOOL_BUDGET, `fixed tool text is ${fixedToolChars(loadHeydb().tools as never)} characters`);
+	});
+
+	test("the skill keeps the explanations the guidelines leave out", () => {
+		const skill = readFileSync(join(import.meta.dirname, "../../skills/heydb/SKILL.md"), "utf8");
+		assert.match(skill, /`scope: "project"` and no `target`/);
+		assert.match(skill, /`to_connection`/);
+		assert.match(skill, /\(code: src\/Models\/Order\.php\)`.*`\(told by the user\)`/);
+		assert.match(skill, /in code, queries or data/);
+		assert.match(skill, /pass `connection` to read another/);
+		assert.match(skill, /same structure/);
 	});
 
 	test("heydb_annotate asks to save what the user confirms in the words people search with", () => {

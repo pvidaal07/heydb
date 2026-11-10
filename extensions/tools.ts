@@ -30,10 +30,8 @@ interface ToolDetails {
 
 type Result = AgentToolResult<ToolDetails>;
 
-const CONNECTION = {
-	type: "string",
-	description: "Connection name from .heydb/config.json; omit to use the default.",
-} as const;
+// Sent with every tool on every turn, so it says nothing the name and the skill do not: omitted, the default connection is used.
+const CONNECTION = { type: "string" } as const;
 
 /** The suffix that tells readers a note was written by an agent, not typed by a person. */
 export const AGENT_AUTHOR_SUFFIX = " (via agent)";
@@ -58,10 +56,9 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 	return {
 		name: "heydb_overview",
 		label: "heydb overview",
-		description:
-			"Project notes, then a summary of the schema snapshot: per database comment coverage, name prefixes, most referenced tables; warnings; noted tables.",
-		promptSnippet: "Summarize the database schema of this project (stored snapshot)",
-		promptGuidelines: ["Use heydb_overview first when you do not know the database schema of a heydb project."],
+		description: "Project notes; per database: comment coverage, name prefixes, core tables; warnings; tables.",
+		promptSnippet: "Map of the schema and project notes",
+		promptGuidelines: ["Use heydb_overview for a map of an unknown schema or the project notes, not to look up one concept."],
 		parameters: OVERVIEW_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -77,12 +74,12 @@ export function createOverviewTool(): ToolDefinition<typeof OVERVIEW_PARAMETERS,
 const TABLE_PARAMETERS = {
 	type: "object",
 	properties: {
-		table: { type: "string", description: 'Table or view: "orders", "shop.orders" or "shop.shop.orders".' },
+		table: { type: "string", description: '"orders" or "shop.orders".' },
 		columns: {
 			anyOf: [{ type: "string", const: "all" }, { type: "integer", minimum: 1 }],
-			description: 'How many columns to list (default 60, most telling first), or "all".',
+			description: 'Columns to list (default 60, most telling first) or "all".',
 		},
-		column_filter: { type: "string", description: "Only columns whose name or comment contains this text; ignores case and accents." },
+		column_filter: { type: "string", description: "Only columns whose name or comment contains this text." },
 		connection: CONNECTION,
 	},
 	required: ["table"],
@@ -93,12 +90,11 @@ export function createTableTool(): ToolDefinition<typeof TABLE_PARAMETERS, ToolD
 	return {
 		name: "heydb_table",
 		label: "heydb table",
-		description:
-			"One table or view: comment, team notes (with ids), keys, relationships both ways (who references it), then its most relevant columns.",
-		promptSnippet: "Show what one database table means and its columns, keys, relationships and notes",
+		description: "One table or view: comment, notes, keys, relationships both ways, most telling columns.",
+		promptSnippet: "One table: meaning, columns, keys, joins, notes",
 		promptGuidelines: [
-			"Before writing or changing SQL in a heydb project, check heydb_table (or heydb_search) for the tables involved instead of guessing names, columns or joins.",
-			"Read the heydb_table header (comment, notes, referenced by) before concluding what a table is; when its meaning comes from inference (columns, references, name), say it is an inference and ask the user before saving it with heydb_annotate.",
+			"Before writing SQL, check its tables with heydb_table; never guess names, columns or joins.",
+			"Read the heydb_table header (comment, notes, referenced by) before concluding what a table is; meaning from columns or names is an inference: say so, ask the user.",
 		],
 		parameters: TABLE_PARAMETERS,
 		executionMode: "sequential",
@@ -132,9 +128,9 @@ const MAX_SEARCH_LIMIT = 50;
 const SEARCH_PARAMETERS = {
 	type: "object",
 	properties: {
-		query: { type: "string", description: "Text to find; case and accents are ignored." },
+		query: { type: "string", description: "Words to find." },
 		limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Maximum results (default 10; set it to list weaker matches too)." },
-		database: { type: "string", description: 'Only this database, e.g. "shop" (PostgreSQL: "app.public").' },
+		database: { type: "string", description: 'Only this database, e.g. "shop".' },
 		connection: CONNECTION,
 	},
 	required: ["query"],
@@ -146,11 +142,11 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 		name: "heydb_search",
 		label: "heydb search",
 		description:
-			"Search tables by name, comment, notes, columns and meaning inferred from the columns that reference them. Words match in any order, abbreviations too (fac_cab); ignores case, accents, plurals.",
-		promptSnippet: "Search the database schema and its notes by keyword",
+			"Find tables by name, comment, notes, columns and meaning inferred from the columns that reference them.",
+		promptSnippet: "Search the schema and its notes by keyword",
 		promptGuidelines: [
-			"Use heydb_search to find which tables or columns hold a concept before writing SQL.",
-			"A heydb_search result marked (inferred) matched only through the comments of columns that reference it: present it as an inference and confirm with the user before relying on it or saving it.",
+			"Use heydb_search first to find which tables or columns hold a concept, before writing SQL.",
+			"A heydb_search result marked (inferred) is an inference: confirm with the user before relying on it or saving it.",
 		],
 		parameters: SEARCH_PARAMETERS,
 		executionMode: "sequential",
@@ -173,11 +169,8 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 const ANNOTATE_PARAMETERS = {
 	type: "object",
 	properties: {
-		target: {
-			type: "string",
-			description: 'Database ("shop"), table ("orders", "shop.orders") or column ("orders.status"). Omit with scope "project".',
-		},
-		scope: { type: "string", const: "project", description: 'Set to "project", without target, for a note about the whole project.' },
+		target: { type: "string", description: 'Database, table ("shop.orders") or column ("orders.status").' },
+		scope: { type: "string", const: "project", description: "Without target: a note about the whole project." },
 		text: { type: "string", description: "Short, factual note." },
 		connection: CONNECTION,
 	},
@@ -189,14 +182,12 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 	return {
 		name: "heydb_annotate",
 		label: "heydb annotate",
-		description:
-			"Save a note on the project, a database, table or column in .heydb/knowledge; the team gets it when the project commits .heydb/.",
-		promptSnippet: "Record what a database, table or column means, for the whole team",
+		description: "Save a note on the project, a database, table or column in .heydb/knowledge; shared if the project commits .heydb/.",
+		promptSnippet: "Record what a database, table or column means",
 		promptGuidelines: [
-			"When you learn what a table or column means (valid values, units, legacy quirks), or the user confirms what a table or column means or which table holds a concept, save it with heydb_annotate in the words people search with: one or two factual sentences, never invent or guess.",
-			"Before heydb_annotate, read the existing notes with heydb_table; fix a wrong note with heydb_edit_note instead of adding a contradicting one.",
-			'End a heydb_annotate note with its source: "(code: src/Models/Order.php)" when code shows it, "(told by the user)" when the user said it. Save an inference only after the user confirms it.',
-			'For a fact about the whole project rather than one database (one database per client, which connection is central), use heydb_annotate with scope: "project" and no target.',
+			"When you learn what a table or column means, or the user confirms what a table or column means or which table holds a concept, save it with heydb_annotate in the words people search with; never invent.",
+			'End a heydb_annotate note with its source, "(code: path)" or "(told by the user)"; save an inference only after the user confirms it.',
+			"Before heydb_annotate, read the notes with heydb_table; fix a wrong one with heydb_edit_note.",
 		],
 		parameters: ANNOTATE_PARAMETERS,
 		executionMode: "sequential",
@@ -226,12 +217,12 @@ const COLUMNS = { type: "array", items: { type: "string" }, minItems: 1 } as con
 const RELATE_PARAMETERS = {
 	type: "object",
 	properties: {
-		from_table: { type: "string", description: "Table holding the reference, e.g. orders." },
-		from_columns: { ...COLUMNS, description: "Referencing columns, in order." },
-		to_table: { type: "string", description: "Referenced table, e.g. customers." },
-		to_columns: { ...COLUMNS, description: "Referenced columns, same order and count." },
-		to_connection: { type: "string", description: "Connection of to_table when it is not the from connection." },
-		note: { type: "string", description: "How you know, briefly." },
+		from_table: { type: "string", description: "Table holding the reference." },
+		from_columns: COLUMNS,
+		to_table: { type: "string", description: "Referenced table." },
+		to_columns: COLUMNS,
+		to_connection: { type: "string", description: "Connection of to_table, if another." },
+		note: { type: "string", description: "How you know." },
 		connection: CONNECTION,
 	},
 	required: ["from_table", "from_columns", "to_table", "to_columns"],
@@ -242,12 +233,9 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 	return {
 		name: "heydb_relate",
 		label: "heydb relate",
-		description: "Document an implicit relationship: columns that join two tables without a foreign key.",
-		promptSnippet: "Record a join between tables that has no foreign key",
-		promptGuidelines: [
-			"When you find tables joined without a foreign key (in code, queries or data), record it with heydb_relate and say how you know in the note.",
-			"When the referenced table is in another connection of the project (crm.clientes.cod_erp → erp's cus.cod), call heydb_relate from the referencing connection with to_connection.",
-		],
+		description: "Document columns that join two tables without a foreign key.",
+		promptSnippet: "Record a join that has no foreign key",
+		promptGuidelines: ["When tables join without a foreign key, record it with heydb_relate, saying how you know in note."],
 		parameters: RELATE_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -273,8 +261,8 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 const EDIT_PARAMETERS = {
 	type: "object",
 	properties: {
-		id: { type: "string", description: "Note id, as shown by heydb_table or heydb_overview." },
-		text: { type: "string", description: "The new text, replacing the old one." },
+		id: { type: "string", description: "Note id." },
+		text: { type: "string", description: "New text." },
 		connection: CONNECTION,
 	},
 	required: ["id", "text"],
@@ -285,8 +273,8 @@ export function createEditNoteTool(deps: HeydbDeps): ToolDefinition<typeof EDIT_
 	return {
 		name: "heydb_edit_note",
 		label: "heydb edit note",
-		description: "Replace the text of a heydb note by id; author and creation date are kept.",
-		promptSnippet: "Correct the text of an existing heydb note",
+		description: "Replace the text of a note by id; author and date are kept.",
+		promptSnippet: "Correct an existing heydb note",
 		parameters: EDIT_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -302,7 +290,7 @@ export function createEditNoteTool(deps: HeydbDeps): ToolDefinition<typeof EDIT_
 const FORGET_PARAMETERS = {
 	type: "object",
 	properties: {
-		id: { type: "string", description: "Id of a note or relationship, as shown by heydb_table or heydb_overview." },
+		id: { type: "string", description: "Note or relationship id." },
 		connection: CONNECTION,
 	},
 	required: ["id"],
@@ -313,9 +301,9 @@ export function createForgetTool(): ToolDefinition<typeof FORGET_PARAMETERS, Too
 	return {
 		name: "heydb_forget",
 		label: "heydb forget",
-		description: "Delete a heydb note or implicit relationship by id.",
-		promptSnippet: "Delete a wrong or obsolete heydb note or relationship",
-		promptGuidelines: ["Use heydb_forget only for notes that are wrong or obsolete, and say which one you removed."],
+		description: "Delete a note or implicit relationship by id.",
+		promptSnippet: "Delete a wrong note or relationship",
+		promptGuidelines: ["Use heydb_forget only for wrong or obsolete notes, and say which one you removed."],
 		parameters: FORGET_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
