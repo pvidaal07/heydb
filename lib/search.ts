@@ -89,7 +89,7 @@ import type { Database, Snapshot, Table } from "./model/snapshot.ts";
 // line. An explicit limit returns that many, weak or not.
 //
 // Inferred meaning is how "cliente" finds cus, a table without comment that
-// fifty columns called cod_cus describe as "Cliente Habitual". It is evidence,
+// fifty columns called cod_cus describe as "Cliente final". It is evidence,
 // not a fact: such results carry `inferred` so the agent says so. The
 // evidence is the summary heydb_table shows ("Referencing columns are
 // commented as", from incomingReferences), read for the MAX_INFERRED_TABLES
@@ -137,7 +137,7 @@ export interface SearchResult {
 	readonly object: SearchObject;
 	/**
 	 * Why it matched, strongest first: "name", "name (abbreviation)", "name (prefix)",
-	 * "table comment: …", "note: …", 'referenced as "Cliente Habitual" ×7 (inferred)', "columns: …".
+	 * "table comment: …", "note: …", 'referenced as "Cliente final" ×7 (inferred)', "columns: …".
 	 */
 	readonly matchedIn: readonly string[];
 	/** At most SNIPPET_LENGTH characters of the strongest matched text, around the match; "" when only names matched. */
