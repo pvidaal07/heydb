@@ -86,6 +86,18 @@ export interface ForeignKeyColumnRow {
 	readonly deleteRule: string;
 }
 
+/** A KEY_COLUMN_USAGE row of a foreign key, before its rules are attached. */
+export type ForeignKeyKeyColumnRow = Omit<ForeignKeyColumnRow, "updateRule" | "deleteRule">;
+
+/** A REFERENTIAL_CONSTRAINTS row: the ON UPDATE / ON DELETE rules of one foreign key. */
+export interface ForeignKeyRuleRow {
+	readonly databaseName: string;
+	readonly tableName: string;
+	readonly constraintName: string;
+	readonly updateRule: string;
+	readonly deleteRule: string;
+}
+
 export interface TriggerRow {
 	readonly databaseName: string;
 	readonly tableName: string;
@@ -172,6 +184,26 @@ export function buildSnapshot(catalog: MysqlCatalog): Snapshot {
 			...hiddenObjectWarnings([...captured], catalog.privileges),
 			...hiddenViewDefinitionWarnings(databases),
 		],
+	});
+}
+
+/**
+ * Attaches to each foreign key column the rules of its constraint, matched by
+ * database, table and constraint name. The engine reads KEY_COLUMN_USAGE and
+ * REFERENTIAL_CONSTRAINTS with two queries because joining them in SQL makes
+ * MariaDB open every table on the server. A column whose constraint has no
+ * rules row is dropped, exactly as the former inner join did.
+ */
+export function attachForeignKeyRules(
+	columns: readonly ForeignKeyKeyColumnRow[],
+	rules: readonly ForeignKeyRuleRow[],
+): ForeignKeyColumnRow[] {
+	const constraintKey = (row: { databaseName: string; tableName: string; constraintName: string }) =>
+		`${tableKey(row)}\u0000${row.constraintName}`;
+	const rulesByConstraint = new Map(rules.map((row) => [constraintKey(row), row]));
+	return columns.flatMap((column) => {
+		const rule = rulesByConstraint.get(constraintKey(column));
+		return rule === undefined ? [] : [{ ...column, updateRule: rule.updateRule, deleteRule: rule.deleteRule }];
 	});
 }
 

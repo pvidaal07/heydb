@@ -203,7 +203,7 @@ test("closes the connection when the session cannot be made read-only", async (t
 	const end = t.mock.method(prototype, "end");
 	const destroy = t.mock.method(prototype, "destroy");
 	t.mock.method(prototype, "query", function (this: unknown, sql: unknown, ...rest: unknown[]) {
-		if (typeof sql === "string" && sql.startsWith("SET SESSION TRANSACTION")) return Promise.reject(new Error("syntax error"));
+		if (sqlText(sql).startsWith("SET SESSION TRANSACTION")) return Promise.reject(new Error("syntax error"));
 		return realQuery.call(this, sql, ...rest);
 	});
 	await assert.rejects(
@@ -212,6 +212,37 @@ test("closes the connection when the session cannot be made read-only", async (t
 	);
 	assert.equal(end.mock.callCount() + destroy.mock.callCount(), 1, "the connection is closed exactly once");
 });
+
+// The engine passes each query as an options object ({ sql, timeout, values }).
+function sqlText(query: unknown): string {
+	if (typeof query === "string") return query;
+	return String((query as { sql?: unknown } | null)?.sql ?? "");
+}
+
+for (const target of targets) {
+	test(`a query over the time limit on ${target.name} fails naming the step and closes the connection`, async (t) => {
+		// Simulates a server that takes too long to list foreign keys.
+		const prototype = (mysql as unknown as { PromiseConnection: { prototype: Record<string, (...args: unknown[]) => unknown> } })
+			.PromiseConnection.prototype;
+		const realQuery = prototype.query!;
+		const end = t.mock.method(prototype, "end");
+		const destroy = t.mock.method(prototype, "destroy");
+		t.mock.method(prototype, "query", function (this: unknown, sql: unknown, ...rest: unknown[]) {
+			if (sqlText(sql).includes("INFORMATION_SCHEMA.KEY_COLUMN_USAGE")) {
+				return realQuery.call(this, { ...(sql as object), sql: "SELECT SLEEP(5)", values: [] }, ...rest);
+			}
+			return realQuery.call(this, sql, ...rest);
+		});
+		const started = Date.now();
+		await assert.rejects(
+			introspectMysql(options(target.port, { statementTimeoutMs: 500 })),
+			new RegExp(`^Error: mysql: reading foreign keys on 127\\.0\\.0\\.1:${target.port} took longer than 0\\.5 s; `),
+		);
+		assert.ok(Date.now() - started < 4000, "fails at the limit, not when the query ends");
+		assert.equal(destroy.mock.callCount(), 1, "the connection is destroyed");
+		assert.equal(end.mock.callCount(), 0, "and not ended again");
+	});
+}
 
 test("reports an unreachable server clearly", async () => {
 	await assert.rejects(
