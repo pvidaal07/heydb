@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [2.0.0-beta.3]
+
+- The npm package is now `pi-heydb` (was `@pvidaal07/heydb`): install with `pi install npm:pi-heydb`. To move over, run `pi remove npm:@pvidaal07/heydb`, then install `pi-heydb`; the `.heydb/` folder of each project is unchanged. `@pvidaal07/heydb` gets no new versions.
 - `heydb_table` says what it leaves out: "… 230 more columns (~18 KB) — narrow with a column_filter (text in the name or comment); columns: "all" lists them all", and listing more than 150 columns without a filter says what they weigh in the heading. The `columns` parameter and the skill steer agents to `column_filter` on wide tables instead of `columns: "all"`.
 - `heydb_search` finds project notes, one result per note with its id, unless a `database` is given; `heydb_overview` is described as the map of an unknown schema only, and the prompt line no longer offers it in the recipe. The prompt line and the skill ask agents to use a note when it answers the question, and to read the docs or code it cites only for what the note does not cover, instead of listing every column.
 - `heydb_search` with a 3-letter word that is the whole name of a table ("exh") also finds the tables named after it (`exhl`, `exhcab`), marked "(name starts with the query)" and ranked below real matches; other 3-letter words and column names still need the whole word.

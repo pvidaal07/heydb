@@ -22,10 +22,10 @@ The agent is told to present inferences as inferences and ask before saving them
 ## Install
 
 ```sh
-pi install npm:@pvidaal07/heydb
+pi install npm:pi-heydb
 ```
 
-npm only accepts the name under its owner's scope (plain `heydb` is too close to an existing package); the package, its commands and tools are still called heydb.
+On npm the package is `pi-heydb` (plain `heydb` is too close to an existing package); its commands and tools are still called heydb. Coming from `@pvidaal07/heydb` (2.0.0-beta.2 or earlier): `pi remove npm:@pvidaal07/heydb`, then install `pi-heydb`; the `.heydb/` folder of each project is unchanged.
 
 From the repository instead (latest commit): `pi install git:github.com/pvidaal07/heydb`.
 

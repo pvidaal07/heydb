@@ -1,6 +1,6 @@
 {
-	"name": "@pvidaal07/heydb",
-	"version": "2.0.0-beta.2",
+	"name": "pi-heydb",
+	"version": "2.0.0-beta.3",
 	"description": "Database schema context for AI agents: introspect MySQL, MariaDB and PostgreSQL, keep a local snapshot, and share annotated knowledge through git.",
 	"license": "MIT",
 	"author": "pvidaal07",
