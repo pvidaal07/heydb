@@ -5,5 +5,7 @@ allowBuilds:
 
 # Supply chain: install no version published less than 3 days ago (minutes).
 # Set explicitly, so it is strict: install fails instead of falling back to a
-# younger version. The lockfile is checked against it too.
+# younger version. It applies when pnpm picks a version (add, update); a
+# version already in pnpm-lock.yaml is installed as is, so review lockfile
+# changes in pull requests.
 minimumReleaseAge: 4320
