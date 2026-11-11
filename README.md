@@ -61,7 +61,7 @@ Every session is read-only, even for a user with write privileges.
 | `/heydb:connect` | Add a connection; the password goes to `.heydb/.env` |
 | `/heydb:password [connection]` | Change a connection's password |
 | `/heydb:connections [use <name> \| remove <name>]` | List connections, set the default, remove one (its snapshot and notes stay) |
-| `/heydb:sync [connection]` | Capture the schema; the snapshot is rewritten only when the structure changed |
+| `/heydb:sync [connection]` | Capture the schema; the snapshot is rewritten only when the structure changed. Asks whether to remove a configured database that does not exist, and skips it if kept |
 | `/heydb:status [connection]` | Show whether the live database drifted from the snapshot, and what changed |
 | `/heydb:learn-code [connection] [path]` | Let the agent read the code that queries the tables and note what it shows |
 | `/heydb:about` | Show the version |

@@ -169,6 +169,8 @@ export function loadHeydb(overrides: Partial<HeydbDeps> = {}) {
 		introspect: async () => {
 			throw new Error("tests must not connect: pass an introspect override");
 		},
+		// Every configured database exists unless a test says otherwise.
+		missingDatabases: async () => [],
 		author: async () => "Ana",
 		knowledge: fixedClock(),
 		cwd: () => {

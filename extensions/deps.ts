@@ -1,7 +1,8 @@
-import { introspect } from "../lib/engines/index.ts";
+import { introspect, missingDatabases } from "../lib/engines/index.ts";
 import type { KnowledgeOptions } from "../lib/knowledge/operations.ts";
 import type { CaptureOptions } from "../lib/usecases/project.ts";
 import { resolveAuthor } from "../lib/usecases/author.ts";
+import type { DatabaseCheckOptions } from "../lib/usecases/sync.ts";
 
 // Everything the extension needs from the outside world, in one place. Pi
 // gets the real ones; tests pass fakes, so commands and tools run without a
@@ -12,6 +13,8 @@ export interface HeydbDeps {
 	readonly env: Readonly<Record<string, string | undefined>>;
 	/** Captures a live schema. Only /heydb:sync and /heydb:status call it; tools never do. */
 	readonly introspect: NonNullable<CaptureOptions["introspect"]>;
+	/** Which configured databases the server does not show; /heydb:sync asks before it reads. */
+	readonly missingDatabases: NonNullable<DatabaseCheckOptions["missingDatabases"]>;
 	/** The person behind the session, for the author of new notes. */
 	readonly author: (cwd: string) => Promise<string>;
 	/** Clock and id generator for new notes. */
@@ -25,6 +28,7 @@ export function defaultDeps(): HeydbDeps {
 		env: process.env,
 		// The engine module loads its driver on first use (ADR-0006), so this costs nothing until a sync.
 		introspect,
+		missingDatabases,
 		author: (cwd) => resolveAuthor({ cwd }),
 		knowledge: {},
 		cwd: () => process.cwd(),
