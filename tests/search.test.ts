@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { describe, test } from "node:test";
 
 import { emptyKnowledge } from "../lib/knowledge/operations.ts";
-import type { Column, Snapshot, Table } from "../lib/model/snapshot.ts";
+import type { Column, ForeignKey, Snapshot, Table } from "../lib/model/snapshot.ts";
 import { foldWord, normalizeText, type SearchResult, searchSchema } from "../lib/search.ts";
 import { column, customersTable, ordersTable, snapshot } from "./fixtures/snapshot.ts";
 import { annotation, knowledge, relationship } from "./knowledge/fixtures.ts";
@@ -409,6 +409,78 @@ describe("searchSchema: words", () => {
 	});
 });
 
+// Legacy ERPs name tables with three cryptic letters and extend them for the
+// related ones: exh holds expense invoices, exhl their VAT breakdown. A
+// three-letter word does not find the longer words it starts ("fac" would
+// find half the schema), but when it is the name of a table, the tables whose
+// name starts with it are its family.
+describe("searchSchema: name prefixes", () => {
+	const family: Snapshot = snapshot([
+		table("exh", [column("id", 1)], { comment: "Facturas de gasto" }),
+		table("exhl", [column("id", 1)], { comment: "" }),
+		table("exh_doc", [column("id", 1)], { comment: "" }),
+		table("pmt", [column("id", 1)], { comment: "" }),
+		table("gcl", [column("id", 1)], { comment: "" }),
+	]);
+
+	test('"exh", a table name, also finds exhl, below the tables that have the word', () => {
+		const found = searchSchema(family, emptyKnowledge(), "exh");
+		assert.deepEqual(lines(found.results), ["table shop.shop.exh · name", "table shop.shop.exh_doc · name", "table shop.shop.exhl · name (prefix)"]);
+		assert.deepEqual(
+			found.results.map((result) => result.abbreviated),
+			[false, false, true],
+		);
+		assert.deepEqual([found.total, found.weaker, found.unmatched], [3, 0, []]);
+	});
+
+	test("ignores case and accents, and splits digits from letters", () => {
+		const upper: Snapshot = snapshot([
+			table("EXH", [column("id", 1)]),
+			table("EXHCAB", [column("id", 1)]),
+			table("exh2", [column("id", 1)]),
+		]);
+		assert.deepEqual(lines(searchSchema(upper, emptyKnowledge(), "exh").results), [
+			"table shop.shop.EXH · name",
+			"table shop.shop.exh2 · name",
+			"table shop.shop.EXHCAB · name (prefix)",
+		]);
+	});
+
+	test("column names and comments never match by prefix", () => {
+		const columns: Snapshot = snapshot([
+			table("exh", [column("id", 1)]),
+			table("pay", [column("exhl_id", 1), column("exhcab", 2, { comment: "exhl" })], { comment: "Ver exhl" }),
+		]);
+		const found = searchSchema(columns, emptyKnowledge(), "exh", { limit: 50 });
+		assert.deepEqual(lines(found.results), ["table shop.shop.exh · name"]);
+	});
+
+	test("a word that names no table searched gains no prefix matches", () => {
+		const found = searchSchema(snapshot([table("facl", [column("id", 1)])]), emptyKnowledge(), "fac", { limit: 50 });
+		assert.deepEqual([found.results, found.total, found.unmatched], [[], 0, ["fac"]]);
+		const split: Snapshot = snapshot([], {
+			databases: [
+				{ name: "one", schemas: [{ name: "one", routines: [], tables: [table("exh", [column("id", 1)])] }] },
+				{ name: "two", schemas: [{ name: "two", routines: [], tables: [table("exhl", [column("id", 1)])] }] },
+			],
+		});
+		assert.deepEqual(searchSchema(split, emptyKnowledge(), "exh", { database: "two", limit: 50 }).results, []);
+		assert.deepEqual(lines(searchSchema(split, emptyKnowledge(), "exh", { limit: 50 }).results), [
+			"table one.one.exh · name",
+			"table two.two.exhl · name (prefix)",
+		]);
+	});
+
+	test("a word of 4 letters or more keeps finding the longer words it starts, as before", () => {
+		const found = searchSchema(snapshot([table("fact", [column("id", 1)]), table("factl", [column("id", 1)])]), emptyKnowledge(), "fact");
+		assert.deepEqual(lines(found.results), ["table shop.shop.fact · name", "table shop.shop.factl · name"]);
+		assert.deepEqual(
+			found.results.map((result) => result.abbreviated),
+			[false, false],
+		);
+	});
+});
+
 describe("searchSchema: identical databases", () => {
 	const facCab = (extra: Column[] = []) =>
 		table("fac_cab", [column("num_fac", 1, { type: "int(11)" }), column("cod_cli", 2, { comment: "Cliente" }), ...extra], { comment: "Facturas" });
@@ -450,6 +522,43 @@ describe("searchSchema: what a result says", () => {
 		assert.equal(about("ped_cab"), "");
 		const [database] = searchSchema(legacy, notes, "principal").results;
 		assert.equal(database?.about, "Base principal de la tienda online");
+	});
+
+	// A table can have an old definition note and a newer process note: the
+	// line must show the one the question is about, or the agent never learns
+	// the other exists.
+	const ledger = snapshot([ordersTable({ name: "usage_events" }), ordersTable({ name: "payments", comment: "Cobro de pedidos" })]);
+	const ledgerNotes = knowledge([
+		annotation("n-1", "shop.shop.usage_events", { text: "Libro de consumo: cobro al cliente" }),
+		annotation("n-2", "shop.shop.usage_events", { text: "Proceso: cobro de una petición a facturas o chat" }),
+		annotation("n-3", "shop.shop.payments", { text: "Cobro de facturas y chat" }),
+		annotation("n-4", "shop.shop", { text: "Base de la tienda" }),
+		annotation("n-5", "shop.shop", { text: "Facturas y cobros de la tienda" }),
+	]);
+	const aboutOf = (query: string, target: string) =>
+		searchSchema(ledger, ledgerNotes, query, { limit: 50 }).results.find((result) => result.target === target)?.about;
+
+	test("shows the note that covers the most query words, not the first that matches", () => {
+		assert.equal(aboutOf("facturas chat cobro", "shop.shop.usage_events"), "Proceso: cobro de una petición a facturas o chat");
+	});
+
+	test("between notes covering as many query words, shows the earlier one", () => {
+		assert.equal(aboutOf("cobro", "shop.shop.usage_events"), "Libro de consumo: cobro al cliente");
+	});
+
+	test("a note covering more query words than the comment is shown; on a tie, the comment", () => {
+		assert.equal(aboutOf("facturas chat cobro", "shop.shop.payments"), "Cobro de facturas y chat");
+		assert.equal(aboutOf("cobro pedidos facturas", "shop.shop.payments"), "Cobro de pedidos");
+	});
+
+	test("when nothing matches, shows the comment, else the first note", () => {
+		assert.equal(aboutOf("usage", "shop.shop.usage_events"), "Libro de consumo: cobro al cliente");
+		assert.equal(aboutOf("payments", "shop.shop.payments"), "Cobro de pedidos");
+	});
+
+	test("a database shows the note that covers the most query words", () => {
+		assert.equal(aboutOf("tienda facturas", "shop.shop"), "Facturas y cobros de la tienda");
+		assert.equal(aboutOf("shop", "shop.shop"), "Base de la tienda");
 	});
 
 	test("marks a table found only by an abbreviation of its name", () => {
@@ -691,5 +800,114 @@ describe("searchSchema: project notes", () => {
 
 	test("without project notes, results are the same as before", () => {
 		assert.deepEqual(searchSchema(legacy, notes, "pedidos", { projectNotes: [] }), searchSchema(legacy, notes, "pedidos"));
+	});
+});
+
+// A process question ("which tables take part in entering expense invoices?")
+// needs the neighbourhood of the table found: what it joins, what joins it,
+// and the tables named after it. Legacy ERPs declare few foreign keys; the
+// team's relationships fill the gaps.
+describe("searchSchema: related tables", () => {
+	const fk = (name: string, columns: string[], target: { database?: string; table: string }): ForeignKey => ({
+		name,
+		columns,
+		references: { database: target.database ?? "shop", schema: target.database ?? "shop", table: target.table, columns: ["id"] },
+		onDelete: "RESTRICT",
+		onUpdate: "RESTRICT",
+	});
+	const expenses: Snapshot = snapshot([], {
+		databases: [
+			{
+				name: "shop",
+				schemas: [
+					{
+						name: "shop",
+						routines: [],
+						tables: [
+							table("exh", [column("num", 1), column("cod_cre", 2), column("cta", 3), column("cod_pro", 4)], {
+								comment: "Facturas de gasto",
+								foreignKeys: [fk("fk_exh_cre", ["cod_cre"], { table: "cre" }), fk("fk_exh_cta", ["cta"], { database: "conta", table: "cta" })],
+							}),
+							table("exhl", [column("num", 1), column("iva", 2)], { foreignKeys: [fk("fk_exhl_exh", ["num"], { table: "exh" })] }),
+							table("exh_doc", [column("id", 1)]),
+							table("mvl", [column("num", 1)]),
+							table("dnx", [column("nfac", 1)]),
+							table("pdue", [column("fra", 1)]),
+							table("pmt", [column("id", 1)]),
+							table("cre", [column("id", 1)]),
+						],
+					},
+				],
+			},
+			{ name: "conta", schemas: [{ name: "conta", routines: [], tables: [table("cta", [column("id", 1)])] }] },
+		],
+	});
+	const team = knowledge(
+		[],
+		[
+			relationship("r-1", "shop.shop.mvl", ["num"], "shop.shop.exh", ["num"]),
+			relationship("r-2", "shop.shop.dnx", ["nfac"], "shop.shop.exh", ["num"]),
+			relationship("r-3", "shop.shop.pdue", ["fra"], "shop.shop.exh", ["num"]),
+			relationship("r-4", "shop.shop.exh", ["cod_pro"], "shop.shop.pmt", ["id"]),
+			// The same table name in another connection is another table.
+			{ ...relationship("r-5", "shop.shop.pay", ["num"], "shop.shop.exh", ["num"]), from: { connection: "erp", table: "shop.shop.pay", columns: ["num"] } },
+			{ ...relationship("r-6", "shop.shop.exh", ["num"], "shop.shop.out", ["num"]), to: { connection: "erp", table: "shop.shop.out", columns: ["num"] } },
+		],
+	);
+
+	test("a top table lists what it references, what references it and the tables named after it", () => {
+		const found = searchSchema(expenses, team, "exh").results;
+		assert.deepEqual(
+			found.map((result) => [result.target, result.related]),
+			[
+				[
+					"shop.shop.exh",
+					{
+						references: ["conta.cta", "cre", "pmt"],
+						referencedBy: ["dnx", "exhl", "mvl", "pdue"],
+						named: ["exh_doc", "exhl"],
+						more: { references: 0, referencedBy: 0, named: 0 },
+					},
+				],
+				["shop.shop.exh_doc", undefined],
+				["shop.shop.exhl", { references: ["exh"], referencedBy: [], named: [], more: { references: 0, referencedBy: 0, named: 0 } }],
+			],
+		);
+		assert.ok(!("related" in (found[1] as SearchResult)));
+	});
+
+	test("databases, relationships and project notes never list related tables", () => {
+		const noted = knowledge([], [{ ...relationship("r-1", "shop.shop.mvl", ["num"], "shop.shop.exh", ["num"]), note: "Pagos de la factura exh" }]);
+		const found = [
+			...searchSchema(expenses, noted, "exh", { projectNotes: [annotation("p-1", "project", { text: "exh es el libro de facturas de gasto" })] }).results,
+			...searchSchema(expenses, noted, "shop").results,
+		];
+		assert.deepEqual([...new Set(found.map((result) => result.object))].sort(), ["database", "project", "relationship", "table"]);
+		assert.ok(found.filter((result) => result.object !== "table").every((result) => !("related" in result)));
+	});
+
+	test("only the first 3 tables, each list cut at 6 with the rest counted", () => {
+		const arts: Snapshot = snapshot([
+			table("art", [column("id", 1)]),
+			...Array.from({ length: 8 }, (_, index) =>
+				table(`art_${index + 1}`, [column("id", 1), column("art", 2)], { foreignKeys: [fk(`fk_${index + 1}`, ["art"], { table: "art" })] }),
+			),
+		]);
+		const found = searchSchema(arts, emptyKnowledge(), "art").results;
+		const art = ["art_1", "art_2", "art_3", "art_4", "art_5", "art_6"];
+		assert.deepEqual(found[0]?.related, { references: [], referencedBy: art, named: art, more: { references: 0, referencedBy: 2, named: 2 } });
+		assert.equal(found.length, 9);
+		assert.deepEqual(
+			found.map((result) => result.related !== undefined),
+			[true, true, true, false, false, false, false, false, false],
+		);
+		assert.deepEqual(found[1]?.related, { references: ["art"], referencedBy: [], named: [], more: { references: 0, referencedBy: 0, named: 0 } });
+	});
+
+	test("structural copies folded into a result are not listed as named after it", () => {
+		const cols = () => [column("id", 1), column("num", 2), column("fec", 3, { type: "date" })];
+		const yearly: Snapshot = snapshot([table("exh", cols(), { rowEstimate: 900 }), table("exh2019", cols()), table("exhl", [column("id", 1)])]);
+		const [first] = searchSchema(yearly, emptyKnowledge(), "exh").results;
+		assert.deepEqual([first?.copies, first?.related?.named], [["exh2019"], ["exhl"]]);
 	});
 });

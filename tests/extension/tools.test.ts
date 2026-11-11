@@ -83,7 +83,7 @@ describe("tool registration", () => {
 		assert.match(all, /before writing/i);
 		assert.match(all, /heydb_table header .* before concluding what a table is/);
 		assert.match(all, /inference/);
-		assert.match(all, /never invent/i);
+		assert.match(all, /never a guess/i);
 		assert.match(all, /heydb_relate/);
 	});
 
@@ -103,11 +103,17 @@ describe("tool registration", () => {
 		assert.deepEqual(overview?.promptGuidelines, ["Use heydb_overview only to map an unknown schema, never for a question that names a table or concept."]);
 	});
 
-	test("heydb_annotate says where a note comes from: the code file, or the user", () => {
-		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
-		assert.match(guidelines, /\(code: [^)]+\)/);
-		assert.match(guidelines, /\(told by the user\)/);
-		assert.match(guidelines, /inference.*confirm/i);
+	test("heydb_annotate says when to save, what, where it comes from, and to extend a similar note", () => {
+		assert.deepEqual(loadHeydb().tools.get("heydb_annotate")?.promptGuidelines, [
+			"After reading code or docs for what heydb lacked, or when the user confirms something, save it with heydb_annotate in the words people search with: a process on its main table (entry file:function, tables read and written, their columns) or a meaning; never a guess.",
+			'End a heydb_annotate note with "(code: path)" or "(told by the user)"; check notes with heydb_table first and extend a similar one with heydb_edit_note instead of adding another.',
+		]);
+	});
+
+	test("heydb_relate asks for the join condition and how you know it", () => {
+		assert.deepEqual(loadHeydb().tools.get("heydb_relate")?.promptGuidelines, [
+			"Record a join without a foreign key with heydb_relate: its condition, and how you know in note.",
+		]);
 	});
 
 	test("the tool text sent every turn stays within its budget", () => {
@@ -125,11 +131,6 @@ describe("tool registration", () => {
 		assert.match(skill, /same structure/);
 	});
 
-	test("heydb_annotate asks to save what the user confirms in the words people search with", () => {
-		const guidelines = (loadHeydb().tools.get("heydb_annotate")?.promptGuidelines ?? []).join("\n");
-		assert.match(guidelines, /user confirms what a table or column means or which table holds a concept/);
-		assert.match(guidelines, /words people search with/);
-	});
 });
 
 describe("tools outside a usable project", () => {

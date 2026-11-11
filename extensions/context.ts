@@ -24,8 +24,10 @@ export function heydbPromptLine(cwd: string): string | null {
 	if (names.length === 0) return null;
 	return (
 		`This project has a heydb schema snapshot (connections: ${names.join(", ")}). ` +
-		"Before writing SQL, find tables with heydb_search and check them with heydb_table. " +
-		"When a heydb note cites docs or code and you can read files, read that source instead of listing every column."
+		"Before writing SQL or reading code about the database, find tables with heydb_search and check them with heydb_table. " +
+		"If a heydb note answers the question, use it; read the source it cites only for what the note does not cover. " +
+		// Agents took "Billing cycles, one row per cycle" as the answer to "what does the renewal do": they neither read the code nor learned the process.
+		"A note that only says what a table holds does not answer what a process does: for a process question without a process note, read the code, then save the process as its own note."
 	);
 }
 

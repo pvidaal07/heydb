@@ -74,7 +74,7 @@ None of them connects to the database; they read and write files in `.heydb/`.
 |---|---|
 | `heydb_overview` | Map of an unknown schema: size, comment coverage, name prefixes, most referenced tables, warnings and project notes; databases with the same structure shown once |
 | `heydb_table` | One table: evidence of meaning first (comment, notes, who references it), then keys, relationships and up to 60 columns, with a column filter |
-| `heydb_search` | Search by words, not exact phrases: names (abbreviations too), comments, notes (project notes too) and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
+| `heydb_search` | Search by words, not exact phrases: names (abbreviations too, and `exhl` for `exh` when `exh` is a table), comments, notes (project notes too) and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, tables found only through what references them are marked as inferred, and the top results list the tables they join and the tables named after them, so a process can be followed from one table |
 | `heydb_annotate` | Save a note on the project, a database, table or column |
 | `heydb_relate` | Record a join that has no foreign key, also across connections |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
@@ -97,7 +97,7 @@ Without such code, notes come from your conversations: tell the agent what a tab
 
 heydb does not guess. It finds a table through its name, its comments, the columns that reference it and, above all, the notes your team and your agent saved. On a schema where names say nothing (`cst`, `t_aux2`), comments are empty and nobody has written a note yet, a search for "customers" has nothing to match: the agent gets weak results and falls back to slower ways, such as reading the overview, opening tables one by one or searching the code.
 
-It gets better as you work. Each time you confirm what a table or column means, or decide which table holds a concept, the agent saves a note in the words people will search with, and the next search on that concept returns that table first. Measured on a real legacy ERP of about 1,500 tables, one note per table that answered a question raised the right table into the first five results from 16 to 33 of 36 cases (see [bench/](bench/README.md)).
+It gets better as you work. Each time you confirm what a table or column means, or decide which table holds a concept, the agent saves a note in the words people will search with, and the next search on that concept returns that table first. When it has to read code or docs to answer a database question, it saves what it found (a process with the tables it reads and writes, a join without a foreign key, a meaning or a trap) and searches heydb before reading code the next time. Measured on a real legacy ERP of about 1,500 tables, one note per table that answered a question raised the right table into the first five results from 16 to 33 of 36 cases (see [bench/](bench/README.md)).
 
 To get there sooner:
 

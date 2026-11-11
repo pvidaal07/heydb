@@ -189,9 +189,8 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 		description: "Save a note on the project, a database, table or column in .heydb/knowledge; shared if the project commits .heydb/.",
 		promptSnippet: "Record what a database, table or column means",
 		promptGuidelines: [
-			"When you learn what a table or column means, or the user confirms what a table or column means or which table holds a concept, save it with heydb_annotate in the words people search with; never invent.",
-			'End a heydb_annotate note with its source, "(code: path)" or "(told by the user)"; save an inference only after the user confirms it.',
-			"Before heydb_annotate, read the notes with heydb_table; fix a wrong one with heydb_edit_note.",
+			"After reading code or docs for what heydb lacked, or when the user confirms something, save it with heydb_annotate in the words people search with: a process on its main table (entry file:function, tables read and written, their columns) or a meaning; never a guess.",
+			'End a heydb_annotate note with "(code: path)" or "(told by the user)"; check notes with heydb_table first and extend a similar one with heydb_edit_note instead of adding another.',
 		],
 		parameters: ANNOTATE_PARAMETERS,
 		executionMode: "sequential",
@@ -239,7 +238,7 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 		label: "heydb relate",
 		description: "Document columns that join two tables without a foreign key.",
 		promptSnippet: "Record a join that has no foreign key",
-		promptGuidelines: ["When tables join without a foreign key, record it with heydb_relate, saying how you know in note."],
+		promptGuidelines: ["Record a join without a foreign key with heydb_relate: its condition, and how you know in note."],
 		parameters: RELATE_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

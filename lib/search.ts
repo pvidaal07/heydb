@@ -1,7 +1,7 @@
 import { type Annotation, type Knowledge, PROJECT_TARGET, type RelationshipSide } from "./knowledge/types.ts";
 import { displayName, formatName, parseName } from "./model/names.ts";
 import { type CommentCount, incomingReferences, namePatternTargets } from "./model/references.ts";
-import type { Snapshot, Table } from "./model/snapshot.ts";
+import type { Database, Snapshot, Table } from "./model/snapshot.ts";
 
 // Search over the stored snapshot and knowledge; it never touches the server.
 //
@@ -44,6 +44,11 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // abbreviations, so "albaran" finds alb_lin and "factura" fac_cab (0.5, shown
 // as "name (abbreviation)"). A column name part that only repeats an
 // abbreviation of its own table (num_fac in fac_cab) does not count again.
+// A word of 3 letters finds no longer words ("fac" would find half the
+// schema), except one that is the whole name of a table searched: legacy
+// ERPs extend a cryptic name for its related tables (exh, exhl, exh_doc), so
+// "exh" also finds the table names with a part that starts with it (0.4,
+// shown as "name (prefix)"; never column names or text).
 //
 // The score is BM25F: per query word, the weighted matches of all fields
 // (each field normalized by its length against the average, so a short
@@ -70,9 +75,12 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // project notes), never loose columns: a column that matches is listed
 // under its table, so 40 matching columns of one table cost one line, not
 // 40. Each result says what
-// it matched, strongest field first, and what it is (`about`: the table
-// comment, else a team note), so the agent can often answer from the results
-// alone.
+// it matched, strongest field first, and what it is (`about`: of the table
+// comment and its team notes, the one covering the most query words, the
+// comment first on a tie; with no match, the comment, else the first note).
+// A table often has an old definition note and a newer process note: showing
+// the one the question is about tells the agent it exists, so it can often
+// answer from the results alone.
 //
 // Without a limit, the 10 best are returned, and only those scoring at least
 // WEAK_SHARE of the best (the exact-name bonus left out on both sides; an
@@ -104,6 +112,16 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // abbreviation ("rectificación de asistencia" finds asistencia_rec), its own
 // comment or notes, columns the original lacks, or references to it. Query words that match nothing anywhere are in `unmatched`, so the
 // agent can try another word instead of the same search again.
+//
+// A process question ("which tables take part in entering expense
+// invoices?") needs more than the table found: the first RELATED_RESULTS
+// tables and views carry `related`, the tables they join and the tables
+// named after them (exh: cre and pmt it points to; dnx, exhl, mvl and pdue
+// pointing to it; exh_doc and exhl named like it), so the process can be
+// followed from one table. Joins are declared foreign keys and the team's
+// relationships within this connection, never name-pattern guesses: on a
+// legacy schema those are costly and noisy. Referencing keys are found in
+// one pass over the result's database, once per search.
 
 export type SearchObject = "database" | "table" | "view" | "relationship" | "project";
 
@@ -118,7 +136,7 @@ export interface SearchResult {
 	readonly target: string;
 	readonly object: SearchObject;
 	/**
-	 * Why it matched, strongest first: "name", "name (abbreviation)",
+	 * Why it matched, strongest first: "name", "name (abbreviation)", "name (prefix)",
 	 * "table comment: …", "note: …", 'referenced as "Cliente Habitual" ×7 (inferred)', "columns: …".
 	 */
 	readonly matchedIn: readonly string[];
@@ -134,7 +152,7 @@ export interface SearchResult {
 	readonly inferred: boolean;
 	/** The comments of the referencing columns that matched, when inferred. */
 	readonly inferredFrom?: readonly CommentCount[];
-	/** True when the only thing that matched is an abbreviation in its name (alb_cab for "albarán"). */
+	/** True when the only thing that matched is an abbreviation in its name (alb_cab for "albarán") or a prefix (exhl for "exh"). */
 	readonly abbreviated: boolean;
 	/** Matching columns of a table or view, best first, at most MAX_COLUMNS. */
 	readonly columns: readonly ColumnMatch[];
@@ -148,6 +166,23 @@ export interface SearchResult {
 	readonly copies?: readonly string[];
 	/** The id of a project note result, so it can be edited or forgotten. */
 	readonly noteId?: string;
+	/** For the first RELATED_RESULTS tables and views, their neighbourhood; absent when it is empty. */
+	readonly related?: RelatedTables;
+}
+
+/**
+ * The tables around a result, each list unique, sorted, at most RELATED_SHOWN:
+ * the bare table name in the result's database and schema, else "db.table".
+ */
+export interface RelatedTables {
+	/** Tables it points to: its foreign keys and the team's relationships from it. */
+	readonly references: readonly string[];
+	/** Tables pointing to it: foreign keys in its database and the team's relationships to it. */
+	readonly referencedBy: readonly string[];
+	/** Tables of its database and schema whose name starts with its name (exhl, exh_doc for exh), copies folded into it aside. */
+	readonly named: readonly string[];
+	/** Per list, the tables beyond those listed. */
+	readonly more: { readonly references: number; readonly referencedBy: number; readonly named: number };
 }
 
 export interface SearchResults {
@@ -179,6 +214,10 @@ const MAX_COLUMNS = 5;
 /** Tables whose referencing columns are summarized per search; each costs one scan of its database. */
 const MAX_INFERRED_TABLES = 10;
 const MAX_DATABASES_LISTED = 10;
+/** The first this many table and view results list their related tables. */
+const RELATED_RESULTS = 3;
+/** Related tables named per list; the rest are counted. */
+const RELATED_SHOWN = 6;
 
 type Field = "name" | "stated" | "note" | "inferred" | "columnText" | "columnName" | "definition" | "relationship";
 
@@ -195,7 +234,7 @@ const FIELDS: Readonly<Record<Field, { readonly weight: number; readonly b: numb
 };
 const FIELD_NAMES = Object.keys(FIELDS) as Field[];
 
-const MATCH = { exact: 1, extension: 0.7, abbreviation: 0.5 } as const;
+const MATCH = { exact: 1, extension: 0.7, abbreviation: 0.5, prefix: 0.4 } as const;
 /** Shortest query word that finds the longer words it starts; shortest name part read as an abbreviation. */
 const MIN_EXTENSION = 4;
 const MIN_ABBREVIATION = 3;
@@ -250,7 +289,6 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	const wanted = databaseFilter(snapshot, options.database);
 	if (q.words.length === 0) return { results: [], total: 0, weaker: 0, unmatched: [q.needle] };
 
-	const match = matcher(q);
 	const notes = notesByTarget(knowledge.annotations);
 	const docs: Doc[] = [];
 	const byTarget = new Map<string, Doc>();
@@ -258,17 +296,22 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	// Per database, lowercased table name → canonical names: where a column
 	// named cod_cus may point. Two entries when names differ only by case.
 	const byName = new Map<string, Map<string, string[]>>();
+	// Normalized names of the tables searched: a query word that is one finds the names it starts.
+	const searched = new Set<string>();
 	for (const database of snapshot.databases) {
 		const names = new Map<string, string[]>();
 		byName.set(database.name, names);
 		for (const schema of database.schemas) {
+			const included = wanted === null || wanted.has(schemaKey(database.name, schema.name));
 			for (const table of schema.tables) {
 				const name = formatName({ database: database.name, schema: schema.name, table: table.name });
 				const lower = table.name.toLowerCase();
 				names.set(lower, [...(names.get(lower) ?? []), name]);
+				if (included) searched.add(normalizeText(table.name));
 			}
 		}
 	}
+	const match = matcher(q, searched);
 	const documented = new Map<string, string>(); // table + column → table it points to, from the team's relationships
 	for (const { from, to } of knowledge.relationships) {
 		// A column pointing into another connection infers nothing about the tables of this one.
@@ -292,7 +335,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 				doc.exactName = names.some((name) => match.isExactName(name));
 				const own = notes.get(schemaName) ?? [];
 				for (const note of own) addText(doc, "stated", "note", note.text, match.text(note.text), SNIPPET_LENGTH);
-				doc.about = bestNote(own, match);
+				doc.about = bestAbout("", own, match);
 				docs.push(doc);
 			}
 
@@ -379,7 +422,7 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 	const unmatched = q.shown.filter((_, index) => !docs.some((doc) => doc.matched[index]));
 	const best = Math.max(0, ...ranked.map((item) => item.base));
 	const kept = options.limit !== undefined ? ranked : ranked.filter((item) => item.exactName || item.base >= WEAK_SHARE * best);
-	const results = kept.slice(0, Math.max(0, limit)).map((item) => item.result);
+	const results = withRelated(snapshot, knowledge, kept.slice(0, Math.max(0, limit)).map((item) => item.result));
 	return { results, total: ranked.length, weaker: ranked.length - kept.length, unmatched };
 }
 
@@ -420,8 +463,10 @@ interface Matched {
 	readonly length: number;
 	/** Per query word, the sum of its matches' weights; null when no word matched. */
 	readonly tf: readonly number[] | null;
-	/** True when the only matches were abbreviations. */
+	/** True when the only matches were abbreviations or prefixes. */
 	readonly abbreviated: boolean;
+	/** True when the only matches were prefixes. */
+	readonly prefixed: boolean;
 	/** The first word that matched, as folded: where the snippet is cut. */
 	readonly first: string;
 	/** Every word that matched, as folded. */
@@ -433,6 +478,8 @@ interface Matched {
 interface Matcher {
 	/** A table or column name: split on "_", digits and camelCase; abbreviations count. */
 	name(name: string): Matched;
+	/** A table name: like a column name, and also the parts that start a query word naming a table searched. */
+	table(name: string): Matched;
 	/** Comments, notes, definitions and database names: words only. */
 	text(text: string): Matched;
 	/** True when `name` is the query, plurals and separators aside. */
@@ -441,8 +488,9 @@ interface Matcher {
 
 // Legacy schemas repeat the same column names and comments thousands of
 // times ("cod_cli", "Cliente"): each distinct text and word is matched once.
-function matcher(q: Query): Matcher {
-	const tokens = (abbreviations: boolean, split: (text: string) => string[]) => {
+function matcher(q: Query, tables: ReadonlySet<string>): Matcher {
+	const prefixes = q.words.map((word) => word.length >= MIN_ABBREVIATION && tables.has(word));
+	const tokens = (abbreviations: boolean, prefix: boolean, split: (text: string) => string[]) => {
 		const byWord = new Map<string, Float64Array | null>();
 		const quality = (token: string): Float64Array | null => {
 			let found = byWord.get(token);
@@ -456,7 +504,9 @@ function matcher(q: Query): Matcher {
 							? MATCH.extension
 							: abbreviations && token.length >= MIN_ABBREVIATION && word.startsWith(token)
 								? MATCH.abbreviation
-								: 0;
+								: prefix && prefixes[index] === true && token.startsWith(word)
+									? MATCH.prefix
+									: 0;
 				if (value === 0) continue;
 				found ??= new Float64Array(q.words.length);
 				found[index] = value;
@@ -488,6 +538,7 @@ function matcher(q: Query): Matcher {
 				length: content.length,
 				tf,
 				abbreviated: tf !== null && best <= MATCH.abbreviation,
+				prefixed: tf !== null && best <= MATCH.prefix,
 				first: hits[0] ?? "",
 				hits,
 				phrase: tf !== null && q.words.length > 1 && containsWords(folded, q.words),
@@ -496,10 +547,12 @@ function matcher(q: Query): Matcher {
 			return matched;
 		};
 	};
-	const name = tokens(true, nameWords);
-	const text = tokens(false, (raw) => normalizeText(raw).split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ""));
+	const name = tokens(true, false, nameWords);
+	const table = tokens(true, true, nameWords);
+	const text = tokens(false, false, (raw) => normalizeText(raw).split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ""));
 	return {
 		name,
+		table,
 		text,
 		isExactName: (raw) => {
 			const words = nameWords(raw);
@@ -583,7 +636,7 @@ function newDoc(target: string, object: SearchObject, order: number): Doc {
 
 function collectTable(table: Table, tableName: string, notes: Notes, match: Matcher, order: number, original?: Table): Doc {
 	const doc = newDoc(tableName, table.kind, order);
-	const own = match.name(table.name);
+	const own = match.table(table.name);
 	addName(doc, [own]);
 	doc.exactName = match.isExactName(table.name);
 	addText(doc, "stated", "table comment", table.comment, match.text(table.comment), SNIPPET_LENGTH);
@@ -595,7 +648,7 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 			if (value > 0) doc.noted[index] = true;
 		});
 	}
-	doc.about = collapse(table.comment) || bestNote(tableNotes, match);
+	doc.about = bestAbout(table.comment, tableNotes, match);
 	const definition = table.viewDefinition ?? "";
 	addText(doc, "definition", "definition", definition, match.text(definition), SNIPPET_LENGTH);
 
@@ -647,10 +700,22 @@ function collectTable(table: Table, tableName: string, notes: Notes, match: Matc
 	return doc;
 }
 
-/** The first note that matched, else the first one, on one line; "" without notes. */
-function bestNote(notes: readonly Annotation[], match: Matcher): string {
-	const note = notes.find((item) => match.text(item.text).tf !== null) ?? notes[0];
-	return note === undefined ? "" : collapse(note.text);
+/**
+ * Of the comment and the notes, the text covering the most distinct query
+ * words, on one line: the earlier wins a tie, the comment before any note.
+ * With no match, the comment, else the first note; "" without either.
+ */
+function bestAbout(comment: string, notes: readonly Annotation[], match: Matcher): string {
+	let best = "";
+	let covered = 0;
+	for (const text of [comment, ...notes.map((note) => note.text)]) {
+		const words = match.text(text).tf?.filter((value) => value > 0).length ?? 0;
+		if (words > covered) {
+			best = text;
+			covered = words;
+		}
+	}
+	return collapse(covered > 0 ? best : comment || (notes[0]?.text ?? ""));
 }
 
 function addName(doc: Doc, matched: readonly Matched[]): void {
@@ -658,18 +723,21 @@ function addName(doc: Doc, matched: readonly Matched[]): void {
 	let length = 0;
 	let any = false;
 	let abbreviated = true;
+	let prefixed = true;
 	for (const item of matched) {
 		length = Math.max(length, item.length);
 		if (item.tf === null) continue;
 		any = true;
 		abbreviated &&= item.abbreviated;
+		prefixed &&= item.prefixed;
 		// A database named like its schema matches once: the best of the two.
 		item.tf.forEach((value, index) => {
 			tf[index] = Math.max(tf[index] ?? 0, value);
 		});
 	}
 	doc.lengths.name += length;
-	if (any) addEvidence(doc, { field: "name", label: abbreviated ? "name (abbreviation)" : "name", snippet: "", tf, length: 0 });
+	const label = prefixed ? "name (prefix)" : abbreviated ? "name (abbreviation)" : "name";
+	if (any) addEvidence(doc, { field: "name", label, snippet: "", tf, length: 0 });
 }
 
 function addText(doc: Doc, field: Field, label: string, raw: string, matched: Matched, length: number): void {
@@ -811,7 +879,7 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 	lines.sort((a, b) => b.weight - a.weight);
 	const abbreviated =
 		doc.evidence.length > 0 &&
-		doc.evidence.every((evidence) => evidence.label === "name (abbreviation)") &&
+		doc.evidence.every((evidence) => evidence.label === "name (abbreviation)" || evidence.label === "name (prefix)") &&
 		doc.columns.every((column) => column.abbreviated);
 	return {
 		target: doc.target,
@@ -908,6 +976,90 @@ function structuralCopies(tables: readonly Table[]): ReadonlyMap<string, Table> 
 	}
 	copiesCache.set(tables, copies);
 	return copies;
+}
+
+/** The first RELATED_RESULTS tables and views, with the tables around them. */
+function withRelated(snapshot: Snapshot, knowledge: Knowledge, results: readonly SearchResult[]): SearchResult[] {
+	// Per database, table → tables with a foreign key to it: one pass over each database needed.
+	const referrers = new Map<string, ReadonlyMap<string, readonly string[]>>();
+	const referrersIn = (database: Database) => {
+		let found = referrers.get(database.name);
+		if (found === undefined) {
+			found = foreignKeyReferrers(database);
+			referrers.set(database.name, found);
+		}
+		return found;
+	};
+	let listed = 0;
+	return results.map((result) => {
+		if ((result.object !== "table" && result.object !== "view") || listed >= RELATED_RESULTS) return result;
+		listed += 1;
+		const related = relatedTables(snapshot, knowledge, result, referrersIn);
+		return related === undefined ? result : { ...result, related };
+	});
+}
+
+function foreignKeyReferrers(database: Database): Map<string, string[]> {
+	const found = new Map<string, string[]>();
+	for (const schema of database.schemas) {
+		for (const table of schema.tables) {
+			const from = formatName({ database: database.name, schema: schema.name, table: table.name });
+			for (const key of table.foreignKeys) {
+				const to = formatName(key.references);
+				found.set(to, [...(found.get(to) ?? []), from]);
+			}
+		}
+	}
+	return found;
+}
+
+function relatedTables(
+	snapshot: Snapshot,
+	knowledge: Knowledge,
+	result: SearchResult,
+	referrersIn: (database: Database) => ReadonlyMap<string, readonly string[]>,
+): RelatedTables | undefined {
+	const ref = parseName(result.target);
+	const database = snapshot.databases.find((item) => item.name === ref.database);
+	const schema = database?.schemas.find((item) => item.name === ref.schema);
+	const table = schema?.tables.find((item) => item.name === ref.table);
+	if (database === undefined || schema === undefined || table === undefined) return undefined;
+
+	const references = table.foreignKeys.map((key) => formatName(key.references));
+	const referencedBy = [...(referrersIn(database).get(result.target) ?? [])];
+	for (const { from, to } of knowledge.relationships) {
+		// A side in another connection is another table, whatever its name.
+		if (from.connection !== undefined || to.connection !== undefined) continue;
+		if (from.table === result.target) references.push(to.table);
+		if (to.table === result.target) referencedBy.push(from.table);
+	}
+	const own = normalizeText(table.name);
+	const copies = new Set(result.copies ?? []);
+	const named = schema.tables
+		.filter((item) => {
+			const name = normalizeText(item.name);
+			return name.length > own.length && name.startsWith(own) && !copies.has(item.name);
+		})
+		.map((item) => formatName({ database: database.name, schema: schema.name, table: item.name }));
+
+	const list = (names: readonly string[]) => {
+		const shown = [...new Set(names)]
+			.filter((name) => name !== result.target)
+			.map((name) => {
+				const other = parseName(name);
+				return other.database === ref.database && other.schema === ref.schema ? (other.table as string) : displayName(other);
+			})
+			.sort(compareText);
+		return { shown: shown.slice(0, RELATED_SHOWN), more: Math.max(0, shown.length - RELATED_SHOWN) };
+	};
+	const groups = { references: list(references), referencedBy: list(referencedBy), named: list(named) };
+	if (Object.values(groups).every((group) => group.shown.length === 0)) return undefined;
+	return {
+		references: groups.references.shown,
+		referencedBy: groups.referencedBy.shown,
+		named: groups.named.shown,
+		more: { references: groups.references.more, referencedBy: groups.referencedBy.more, named: groups.named.more },
+	};
 }
 
 /** The tables a column may point to: its foreign key, a documented relationship, or else its name pattern. */
