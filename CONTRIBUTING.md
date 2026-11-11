@@ -46,6 +46,7 @@ Rules that reviews check:
 - Tests come with the behavior: write the failing test first, then the code. Engine changes need an integration test case in the legacy fixtures.
 - Database sessions stay read-only, and agent tools never connect to a database.
 - No new runtime dependency without discussing it in the issue first; no native modules.
+- pnpm installs no version published less than 3 days ago (`minimumReleaseAge` in `pnpm-workspace.yaml`). If you need a newer one, wait, or explain in the issue why it cannot wait.
 - TypeScript strict, ESM, tabs, double quotes. Comments explain why, not what.
 
 ## Adding a database engine
