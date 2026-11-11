@@ -57,7 +57,7 @@ const erp: Snapshot = snapshot([], {
 						table("cus", [column("id", 1), column("nom", 2, { comment: "Nombre" })]),
 						table("art", [column("id", 1), column("des", 2, { comment: "Descripción" })], { comment: "Productos" }),
 						...["dln", "mov", "sup", "exp", "cart"].map((name) =>
-							table(name, [column("id", 1), column("cod_cus", 2, { comment: "Cliente Habitual" })]),
+							table(name, [column("id", 1), column("cod_cus", 2, { comment: "Cliente final" })]),
 						),
 						table("dnl", [column("id", 1), column("cod_cus", 2, { comment: "Cliente" }), column("ref_art", 3, { comment: "Artículo" })]),
 						table("ord", [column("id", 1), column("cod_cus", 2, { comment: "Cliente" }), column("ref_art", 3, { comment: "artículo." })]),
@@ -110,7 +110,7 @@ describe("searchSchema: the field report", () => {
 		assert.ok(cus, lines(results).join("\n"));
 		assert.equal(cus.object, "table");
 		assert.equal(cus.inferred, true);
-		assert.deepEqual(cus.matchedIn, ['referenced as "Cliente Habitual" ×5, "Cliente" ×2 (inferred)']);
+		assert.deepEqual(cus.matchedIn, ['referenced as "Cliente final" ×5, "Cliente" ×2 (inferred)']);
 		// The plural finds it too.
 		assert.ok(searchSchema(erp, emptyKnowledge(), "clientes").results.slice(0, 3).some((result) => result.target === "gestion.gestion.cus"));
 	});
@@ -135,9 +135,9 @@ describe("searchSchema: the field report", () => {
 	});
 
 	test("a referencing table is listed by its columns, after the table they point to", () => {
-		const { results } = searchSchema(erp, emptyKnowledge(), "cliente habitual");
+		const { results } = searchSchema(erp, emptyKnowledge(), "cliente final");
 		assert.equal(results[0]?.target, "gestion.gestion.cus");
-		assert.deepEqual(results[1]?.matchedIn, ['columns: cod_cus ("Cliente Habitual")']);
+		assert.deepEqual(results[1]?.matchedIn, ['columns: cod_cus ("Cliente final")']);
 		assert.equal(results[1]?.inferred, false);
 	});
 });
@@ -307,7 +307,7 @@ describe("searchSchema: performance", () => {
 					`t${t}`,
 					Array.from({ length: 30 }, (_, c) =>
 						column(c === 0 ? "id" : c === 1 ? "cod_cus" : c === 2 ? `ref_t${(t + 1) % 500}` : `campo_${c}`, c + 1, {
-							comment: c === 1 ? "Cliente Habitual" : c === 2 ? "Artículo relacionado" : c % 5 === 0 ? `Comentario ${c}` : "",
+							comment: c === 1 ? "Cliente final" : c === 2 ? "Artículo relacionado" : c % 5 === 0 ? `Comentario ${c}` : "",
 						}),
 					),
 				),
@@ -321,7 +321,7 @@ describe("searchSchema: performance", () => {
 		searchSchema(large, emptyKnowledge(), "cliente");
 		const first = performance.now() - firstStarted;
 		assert.ok(first < 2_000, `first search: ${first.toFixed(0)} ms`);
-		for (const query of ["cliente", "articulo", "campo", "articulo relacionado del cliente habitual", "tabla de comentarios"]) {
+		for (const query of ["cliente", "articulo", "campo", "articulo relacionado del cliente final", "tabla de comentarios"]) {
 			const started = performance.now();
 			const found = searchSchema(large, emptyKnowledge(), query);
 			const elapsed = performance.now() - started;
@@ -420,7 +420,7 @@ describe("searchSchema: name prefixes", () => {
 		table("exhl", [column("id", 1)], { comment: "" }),
 		table("exh_doc", [column("id", 1)], { comment: "" }),
 		table("pmt", [column("id", 1)], { comment: "" }),
-		table("gcl", [column("id", 1)], { comment: "" }),
+		table("vnd", [column("id", 1)], { comment: "" }),
 	]);
 
 	test('"exh", a table name, also finds exhl, below the tables that have the word', () => {
@@ -573,7 +573,7 @@ describe("searchSchema: what a result says", () => {
 	test("an inferred result carries the comments it was inferred from", () => {
 		const cus = searchSchema(erp, emptyKnowledge(), "cliente").results.find((result) => result.target === "gestion.gestion.cus");
 		assert.deepEqual(cus?.inferredFrom, [
-			{ comment: "Cliente Habitual", count: 5 },
+			{ comment: "Cliente final", count: 5 },
 			{ comment: "Cliente", count: 2 },
 		]);
 		assert.equal(searchSchema(erp, emptyKnowledge(), "cliente").results[0]?.inferredFrom, undefined);
@@ -599,11 +599,11 @@ describe("searchSchema: how many results", () => {
 // "clientes" finds it first, ahead of tables that only mention customers in
 // a column comment or a name.
 describe("searchSchema: the learning loop", () => {
-	const gclColumns = () => [column("id", 1), column("nom", 2), column("nif", 3, { type: "varchar(15)" }), column("pob", 4, { type: "varchar(60)" })];
+	const customerColumns = () => [column("id", 1), column("nom", 2), column("nif", 3, { type: "varchar(15)" }), column("pob", 4, { type: "varchar(60)" })];
 	const learned: Snapshot = snapshot([
-		table("cst", gclColumns(), { rowEstimate: 48_000 }),
+		table("cst", customerColumns(), { rowEstimate: 48_000 }),
 		// A temporary copy of cst that happens to carry the word in its name.
-		table("clientes_tmp", gclColumns(), { rowEstimate: 12 }),
+		table("clientes_tmp", customerColumns(), { rowEstimate: 12 }),
 		...Array.from({ length: 30 }, (_, index) =>
 			table(`doc_${String(index).padStart(2, "0")}`, [column("id", 1), column("cod_cst", 2, { comment: "Cliente" }), column("fec", 3, { type: "date" })]),
 		),

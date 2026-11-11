@@ -41,7 +41,7 @@ const erp: Snapshot = snapshot([], {
 					tables: [
 						table("art", [["id"], ["nombre"], ["parent_id"], ["art_old"]], { foreignKeys: [fk("fk_art_parent", ["parent_id"], "art")] }),
 						table("cus", [["id"]]),
-						table("pedidos", [["id"], ["ref_art", "Artículo"], ["cod_cus", "Cliente Habitual"], ["art_x"]]),
+						table("pedidos", [["id"], ["ref_art", "Artículo"], ["cod_cus", "Cliente final"], ["art_x"]]),
 						table("albaranes", [["id"], ["id_art", " artículo. "], ["art_precio", "Precio"]]),
 						table("stock", [["id"], ["articulo", "Artículo"]], { foreignKeys: [fk("fk_stock_art", ["articulo"], "art")] }),
 						table("notas", [["id"], ["art_ref", "Referencia"], ["ref_art", "Cliente"]], {
