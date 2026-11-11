@@ -1,4 +1,4 @@
-import type { Annotation, Knowledge, RelationshipSide } from "./knowledge/types.ts";
+import { type Annotation, type Knowledge, PROJECT_TARGET, type RelationshipSide } from "./knowledge/types.ts";
 import { displayName, formatName, parseName } from "./model/names.ts";
 import { type CommentCount, incomingReferences, namePatternTargets } from "./model/references.ts";
 import type { Snapshot, Table } from "./model/snapshot.ts";
@@ -32,7 +32,10 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 //   view definition                                        0.4
 //
 // Databases are documents with their name and notes; a documented
-// relationship, with its note (1.5).
+// relationship, with its note (1.5); each project note (the notes about the
+// whole project, from .heydb/knowledge/_project.json) is one document, a team
+// note like any other, so a question finds them without the overview.
+// Project notes belong to no database: a search kept to one leaves them out.
 //
 // A query word matches a word of a field when it is the same word (full
 // weight); when it starts the longer word and has 4 letters or more ("factur"
@@ -63,9 +66,10 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // note matches adds its IDF on top of BM25, outside saturation: a noted
 // table outranks the same word in another table's name or columns.
 //
-// Results are tables (and views, databases, documented relationships), never
-// loose columns: a column that matches is listed under its table, so 40
-// matching columns of one table cost one line, not 40. Each result says what
+// Results are tables (and views, databases, documented relationships,
+// project notes), never loose columns: a column that matches is listed
+// under its table, so 40 matching columns of one table cost one line, not
+// 40. Each result says what
 // it matched, strongest field first, and what it is (`about`: the table
 // comment, else a team note), so the agent can often answer from the results
 // alone.
@@ -101,7 +105,7 @@ import type { Snapshot, Table } from "./model/snapshot.ts";
 // comment or notes, columns the original lacks, or references to it. Query words that match nothing anywhere are in `unmatched`, so the
 // agent can try another word instead of the same search again.
 
-export type SearchObject = "database" | "table" | "view" | "relationship";
+export type SearchObject = "database" | "table" | "view" | "relationship" | "project";
 
 export interface ColumnMatch {
 	readonly name: string;
@@ -142,6 +146,8 @@ export interface SearchResult {
 	readonly alsoIn?: readonly string[];
 	/** Copies of this table in its own database (same columns) that matched only what they share with it, by table name; absent when none. */
 	readonly copies?: readonly string[];
+	/** The id of a project note result, so it can be edited or forgotten. */
+	readonly noteId?: string;
 }
 
 export interface SearchResults {
@@ -160,6 +166,8 @@ export interface SearchOptions {
 	readonly limit?: number;
 	/** Only this database: "acme", "acme.acme", or in PostgreSQL "app" or "app.public". */
 	readonly database?: string;
+	/** Notes about the whole project, searched too when no database is given. */
+	readonly projectNotes?: readonly Annotation[];
 }
 
 export const SNIPPET_LENGTH = 120;
@@ -212,7 +220,7 @@ const STOPWORDS: ReadonlySet<string> = new Set([
 	"what", "how", "table", "tables", "field", "fields", "column", "columns", "store", "stores", "stored", "save", "saved", "kept",
 ]);
 
-const OBJECT_ORDER: readonly SearchObject[] = ["database", "table", "view", "relationship"];
+const OBJECT_ORDER: readonly SearchObject[] = ["database", "table", "view", "relationship", "project"];
 
 /** Lowercase and without accents: "Facturación" becomes "facturacion". */
 export function normalizeText(text: string): string {
@@ -351,6 +359,20 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 		doc.about = collapse(relationship.note);
 		addText(doc, "relationship", "relationship note", relationship.note, match.text(relationship.note), SNIPPET_LENGTH);
 		docs.push(doc);
+	}
+
+	if (wanted === null) {
+		for (const note of options.projectNotes ?? []) {
+			const doc = newDoc(PROJECT_TARGET, "project", docs.length);
+			const matched = match.text(note.text);
+			addText(doc, "note", "project note", note.text, matched, SNIPPET_LENGTH);
+			matched.tf?.forEach((value, index) => {
+				if (value > 0) doc.noted[index] = true;
+			});
+			doc.about = collapse(note.text);
+			doc.noteId = note.id;
+			docs.push(doc);
+		}
 	}
 
 	const ranked = rank(docs, q);
@@ -533,6 +555,7 @@ interface Doc {
 	inferredFrom?: readonly CommentCount[];
 	about: string;
 	relationship?: SearchResult["relationship"];
+	noteId?: string;
 	/** Tables only: what makes copies identical, and the database to show for this one. */
 	copy?: { readonly key: string; readonly shown: string };
 	/** The table this one is a structural copy of, in the same database. */
@@ -802,6 +825,7 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 		columns: columns.slice(0, MAX_COLUMNS).map(({ column }) => ({ name: column.name, snippet: column.snippet })),
 		moreColumns: Math.max(0, columns.length - MAX_COLUMNS),
 		...(doc.relationship !== undefined && { relationship: doc.relationship }),
+		...(doc.noteId !== undefined && { noteId: doc.noteId }),
 	};
 }
 

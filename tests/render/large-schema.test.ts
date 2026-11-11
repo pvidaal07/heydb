@@ -83,7 +83,7 @@ describe("a huge legacy schema", () => {
 		assert.ok(text.length < 4_500, `table has ${text.length} characters`);
 		assert.match(text, /\nReferencing columns are commented as: "Artículo" ×500\n/);
 		assert.match(text, /\n… 485 more name-pattern guesses\n/);
-		assert.match(text, /\n… 540 more columns — call heydb_table/);
+		assert.match(text, /\n… 540 more columns \(~\d+ KB\) — narrow with a column_filter/);
 	});
 
 	test("a search renders fast and answers in about 250 tokens", () => {

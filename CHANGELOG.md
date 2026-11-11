@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `heydb_table` says what it leaves out: "… 230 more columns (~18 KB) — narrow with a column_filter (text in the name or comment); columns: "all" lists them all", and listing more than 150 columns without a filter says what they weigh in the heading. The `columns` parameter and the skill steer agents to `column_filter` on wide tables instead of `columns: "all"`.
+- `heydb_search` finds project notes, one result per note with its id, unless a `database` is given; `heydb_overview` is described as the map of an unknown schema only, and the prompt line no longer offers it in the recipe. The prompt line and the skill ask agents that can read files to read the docs or code a note cites instead of listing every column.
+
 ## [2.0.0-beta.2]
 
 - `/heydb:learn-code` (and the offer after a sync) spends the agent's notes where they help search most: tables with no comment and no note come first, then commented ones, then those already noted, and within each group cryptic names (short, vowel-less or mostly 3-letter parts), tables many others point to and tables much code uses first. Documentation that defines a table (`` `cst` = … ``, `| tda | Almacenes |`, `cst: …` at the start of a line) is evidence too; passing mentions are not. The agent is asked for one note per table in business words with the synonyms people use, citing `(code: …)` or `(docs: …)`, and to ask instead of guessing.

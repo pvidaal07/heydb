@@ -72,9 +72,9 @@ None of them connects to the database; they read and write files in `.heydb/`.
 
 | Tool | What it does |
 |---|---|
-| `heydb_overview` | Size, comment coverage, name prefixes, most referenced tables, warnings and project notes; databases with the same structure shown once |
+| `heydb_overview` | Map of an unknown schema: size, comment coverage, name prefixes, most referenced tables, warnings and project notes; databases with the same structure shown once |
 | `heydb_table` | One table: evidence of meaning first (comment, notes, who references it), then keys, relationships and up to 60 columns, with a column filter |
-| `heydb_search` | Search by words, not exact phrases: names (abbreviations too), comments, notes and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
+| `heydb_search` | Search by words, not exact phrases: names (abbreviations too), comments, notes (project notes too) and view definitions, ignoring case, accents and plurals; noted tables rank first, copies of a table fold under it, and tables found only through what references them are marked as inferred |
 | `heydb_annotate` | Save a note on the project, a database, table or column |
 | `heydb_relate` | Record a join that has no foreign key, also across connections |
 | `heydb_edit_note`, `heydb_forget` | Fix or remove a note or relationship by id |
@@ -110,7 +110,7 @@ To get there sooner:
 A project can have as many connections as it needs: `dev` and `prod`, or one per service. Commands and tools use the default unless you name one (`/heydb:sync prod`). Each connection has its own snapshot and notes.
 
 - **Across connections:** when `crm.clientes.cod_erp` holds codes of `erp`'s `cus.cod`, the agent records it with `heydb_relate` and `to_connection: "erp"`, and `heydb_table cus` on `erp` shows it.
-- **Project notes:** facts about the whole system ("one database per client; the central one is acme") are saved with `scope: "project"` and shown first by `heydb_overview`.
+- **Project notes:** facts about the whole system ("one database per client; the central one is acme") are saved with `scope: "project"` and shown first by `heydb_overview` and found by `heydb_search`.
 - **Microservices:** give each service its own `.heydb/`; heydb uses the nearest one above the folder Pi runs in.
 
 ## Passwords

@@ -128,7 +128,7 @@ const PROJECT_NOTE_LENGTH = 300;
 /** Where project notes are stored: the agent can read the ones the overview cuts. */
 const PROJECT_NOTES_FILE = ".heydb/knowledge/_project.json";
 
-// Project notes are not searchable, so what is cut says where to read it whole.
+// What is cut says where to read it whole: search shows a note cut too.
 function projectNoteLines(notes: readonly Annotation[]): string[] {
 	let cut = false;
 	const lines = notes.slice(0, MAX_PROJECT_NOTES).map((note) => {
@@ -420,6 +420,7 @@ const SEARCH_COLUMNS = 3;
 // How it matched is left out, except what the agent must treat with care:
 // meaning inferred from other tables, and a name that only looks like the word.
 function searchLine(result: SearchResult, named: Set<string>): string {
+	if (result.object === "project") return `- project note — ${shorten(result.about, ABOUT_LENGTH)} [id ${result.noteId}]`;
 	const { relationship } = result;
 	const target = relationship === undefined ? displayText(result.target) : `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
 	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${structuralCopies(result.copies ?? [])}${result.abbreviated ? " (abbreviated name)" : ""}`;
@@ -494,13 +495,8 @@ function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: R
 			.sort((a, b) => a.position - b.position);
 	}
 
-	const heading =
-		filter !== ""
-			? `## Columns matching "${filter}" (${matching.length} of ${total})`
-			: shown.length < total
-				? `## Columns (${shown.length} of ${total}; keys, relationships and commented first)`
-				: "## Columns";
 	if (shown.length === 0) {
+		const heading = filter !== "" ? `## Columns matching "${filter}" (${matching.length} of ${total})` : "## Columns";
 		return [heading, filter === "" ? "none" : 'No column matches; try another column_filter or columns: "all".'];
 	}
 
@@ -514,7 +510,7 @@ function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: R
 		cut ||= short !== line;
 		return short;
 	};
-	const lines = shown.map((column) => {
+	const lineOf = (column: Column) => {
 		const parts = [`- ${numbered ? `#${column.position} ` : ""}${column.name}`, column.type];
 		if (keys.has(column.name)) parts.push("PK");
 		if (column.autoIncrement) parts.push("auto");
@@ -525,11 +521,40 @@ function columnsBlock(table: Table, notes: TableKnowledge["columns"], related: R
 		const comment = column.comment.trim() === "" ? "" : ` — "${text(column.comment)}"`;
 		const notes = notesOf(column).map((note) => ` · note: ${text(note.text)} ${noteTag(note)}`);
 		return `${parts.join(" ")}${comment}${notes.join("")}`;
-	});
-	const hidden = matching.length - shown.length;
-	const footer = hidden > 0 ? [`… ${count(hidden, "more column")} — call heydb_table with columns: "all" or a column_filter`] : [];
+	};
+	const lines = shown.map(lineOf);
+	// Agents asked for "all" on 290-column tables because nothing told them
+	// what it costs; the size makes column_filter the obvious cheaper choice.
+	const wide = filter === "" && shown.length > WIDE_COLUMNS;
+	const heading =
+		filter !== ""
+			? `## Columns matching "${filter}" (${matching.length} of ${total})`
+			: wide
+				? `## Columns (${shown.length < total ? `${shown.length} of ${total}` : `all ${total}`}, ~${kilobytes(lines)} KB; a column_filter is cheaper)`
+				: shown.length < total
+					? `## Columns (${shown.length} of ${total}; keys, relationships and commented first)`
+					: "## Columns";
+	// Decided before the hidden lines are rendered: they are only weighed, never shown.
 	const cutNote = cut ? ["Long comments and notes are cut; a column_filter shows them whole."] : [];
+	const listed = new Set(shown);
+	const hidden = matching.filter((column) => !listed.has(column));
+	const footer =
+		hidden.length > 0
+			? [
+					`… ${count(hidden.length, "more column")} (~${kilobytes(hidden.map(lineOf))} KB) — narrow with a column_filter (text in the name or comment); columns: "all" lists them all`,
+				]
+			: [];
 	return [heading, ...lines, ...footer, ...cutNote];
+}
+
+// Past this many columns listed without a filter, the heading says what the list weighs.
+const WIDE_COLUMNS = 150;
+const UTF8 = new TextEncoder();
+
+/** UTF-8 size of the lines with their newlines, in KB rounded up, at least 1. */
+function kilobytes(lines: readonly string[]): number {
+	const bytes = lines.reduce((sum, line) => sum + UTF8.encode(line).length + 1, 0);
+	return Math.max(1, Math.ceil(bytes / 1024));
 }
 
 /**
