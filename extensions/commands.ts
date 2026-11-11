@@ -32,7 +32,7 @@ import {
 } from "../lib/usecases/project.ts";
 import { SHARE_NOTES_HINT, knowledgeSharing } from "../lib/usecases/sharing.ts";
 import { checkStatus } from "../lib/usecases/status.ts";
-import { syncSnapshot } from "../lib/usecases/sync.ts";
+import { SKIPPED_DATABASE, checkDatabases, removeDatabases, skippedDatabases, syncSnapshot } from "../lib/usecases/sync.ts";
 import type { HeydbDeps } from "./deps.ts";
 import { askSecret } from "./secret-input.ts";
 
@@ -398,10 +398,18 @@ function variableOf(entry: ConnectionConfig): string {
 }
 
 async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const removed: string[] = [];
+	const check = (opened: OpenedConnection) => checkBeforeSync(deps, opened, ctx, removed);
 	await withLive(deps, args, ctx, "sync", async (opened, live) => {
 		const result = syncSnapshot(opened.root, opened.name, live);
-		const facts = [result.written ? "snapshot written" : "unchanged", ...summary(live)];
+		const facts = [
+			...(removed.length > 0 ? [`removed ${removed.join(", ")} from .heydb/config.json`] : []),
+			result.written ? "snapshot written" : "unchanged",
+			...summary(live),
+		];
 		if (result.written) facts.push(count(result.changes.length, "change"));
+		const skipped = skippedDatabases(live);
+		if (skipped.length > 0) facts.push(`skipped ${skipped.join(", ")} (${notThere(skipped.length, opened.connection)})`);
 		// A failing scan must not turn a good sync into an error: it only loses the offer.
 		const usage = await scanCode(ctx, opened.name, opened.root, opened.root, live).catch(() => null);
 		const noCode = usage !== null && usage.matches.length === 0 ? `\n${NO_CODE}` : "";
@@ -415,7 +423,69 @@ async function sync(deps: HeydbDeps, sendMessage: SendMessage, args: string, ctx
 			});
 		}
 		if (usage !== null && usage.matches.length > 0 && ctx.hasUI) await offerCode(sendMessage, opened.name, usage, ctx);
-	});
+	}, check);
+}
+
+/**
+ * Before reading the structure: which configured databases the server does not
+ * show (issue #144). With a UI, one question per database: remove it from
+ * .heydb/config.json, or keep it and let this sync skip it. Without one,
+ * nothing is asked and the result names what was skipped. When none of them
+ * exist there is nothing to read: a snapshot with no databases would only hide
+ * the mistake, so the sync stops and says so. Returns the connection to read,
+ * or null when the sync stops; the databases removed go into `removed`.
+ */
+async function checkBeforeSync(
+	deps: HeydbDeps,
+	opened: OpenedConnection,
+	ctx: ExtensionCommandContext,
+	removed: string[],
+): Promise<OpenedConnection | null> {
+	const entry = opened.connection;
+	const missingDatabases: HeydbDeps["missingDatabases"] = async (connection, password) => {
+		const stop = showProgress(ctx, `heydb: syncing ${opened.name} · checking its databases on ${server(entry)}…`);
+		try {
+			return await deps.missingDatabases(connection, password);
+		} catch (error) {
+			throw new Error(`heydb sync ${opened.name} failed: ${message(error)}`, { cause: error });
+		} finally {
+			stop();
+		}
+	};
+	const missing = await checkDatabases(opened, { env: deps.env, missingDatabases });
+	if (missing.length === 0) return opened;
+	if ((entry.databases ?? []).every((name) => missing.includes(name))) {
+		ctx.ui.notify(
+			`heydb sync ${opened.name}: none of its databases (${missing.join(", ")}) exist on ${server(entry)} or are visible to ${entry.user}, ` +
+				`so nothing was synced. Fix its databases in .heydb/config.json, or remove the connection with /heydb:connections remove ${opened.name}.`,
+			"error",
+		);
+		return null;
+	}
+	if (!ctx.hasUI) return opened;
+	const remove: string[] = [];
+	for (const database of missing) {
+		const confirmed = await ctx.ui.confirm(
+			`Database "${database}" does not exist on ${server(entry)} or is not visible to ${entry.user}. Remove it from connection "${opened.name}"?`,
+			"Yes removes it from .heydb/config.json. No keeps it there, and the sync skips it.",
+		);
+		if (confirmed) remove.push(database);
+	}
+	if (remove.length === 0) return opened;
+	const updated = removeDatabases(opened, remove);
+	removed.push(...remove);
+	return updated;
+}
+
+/** Why a sync skipped `n` databases, as the engine's database_not_visible warning means it. */
+function notThere(n: number, entry: ConnectionConfig): string {
+	return n === 1
+		? `does not exist on ${server(entry)} or is not visible to ${entry.user}`
+		: `do not exist on ${server(entry)} or are not visible to ${entry.user}`;
+}
+
+function server(entry: ConnectionConfig): string {
+	return `${entry.host}:${entry.port}`;
 }
 
 // Many heydb projects have no code at all (one made only to explore a
@@ -640,12 +710,16 @@ async function withLive(
 	ctx: ExtensionCommandContext,
 	action: string,
 	work: (opened: OpenedConnection, live: Snapshot) => Promise<void>,
+	/** Runs before the structure is read; returns the connection to read, or null to stop (it has said why). */
+	before?: (opened: OpenedConnection) => Promise<OpenedConnection | null>,
 ): Promise<void> {
 	// A second word is a mistake (two connections, a typo): better said than silently dropped.
 	const words = argumentWords(args);
 	if (words.length > 1) return ctx.ui.notify(`Usage: /heydb:${action} [connection]`, "error");
 	try {
-		const opened = openConnection(ctx.cwd, words[0]);
+		const found = openConnection(ctx.cwd, words[0]);
+		const opened = before === undefined ? found : await before(found);
+		if (opened === null) return;
 		// Config and password errors explain themselves; a driver error such as
 		// "connect ECONNREFUSED" also needs to say what was being attempted.
 		// Reading a large server takes seconds, so the footer says what heydb is
@@ -760,7 +834,9 @@ function summary(snapshot: Snapshot): string[] {
 		0,
 	);
 	const facts = [`${count(snapshot.databases.length, "database")}, ${count(tables, "table")}`];
-	if (snapshot.warnings.length > 0) facts.push(count(snapshot.warnings.length, "warning"));
+	// A skipped database is named on its own, not counted here.
+	const warnings = snapshot.warnings.filter((warning) => warning.code !== SKIPPED_DATABASE).length;
+	if (warnings > 0) facts.push(count(warnings, "warning"));
 	return facts;
 }
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- `/heydb:sync` no longer hangs on a MySQL or MariaDB server shared by many databases: foreign keys and privileges are read without joining two `INFORMATION_SCHEMA` views, which made MariaDB open every table on the server (20,000 tables opened to read 3 databases). Snapshots are the same as before.
+- Every MySQL and MariaDB query that reads the structure has a 60 s limit; a slower one fails the sync with what it was reading, "mysql: reading foreign keys on host:port took longer than 60 s; …", instead of waiting forever.
+- `/heydb:sync` checks a connection's databases before reading them (MySQL and MariaDB). For each one that does not exist or the user cannot see, it asks whether to remove it from `.heydb/config.json`; one that stays is skipped and named in the result, "skipped sales_2019 (does not exist on host:port or is not visible to root)", instead of counting as "1 warning". Without a UI nothing is asked. When none of the databases exists, the sync stops with an error and writes nothing.
+
 ## [2.0.0-beta.3]
 
 - The npm package is now `pi-heydb` (was `@pvidaal07/heydb`): install with `pi install npm:pi-heydb`. To move over, run `pi remove npm:@pvidaal07/heydb`, then install `pi-heydb`; the `.heydb/` folder of each project is unchanged. `@pvidaal07/heydb` gets no new versions.

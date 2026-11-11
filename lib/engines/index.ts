@@ -35,6 +35,39 @@ function loadPostgresEngine(): Promise<typeof import("./postgres/introspect.ts")
 	return postgresEngine;
 }
 
+let mysqlDatabases: Promise<typeof import("./mysql/databases.ts")> | undefined;
+
+function loadMysqlDatabases(): Promise<typeof import("./mysql/databases.ts")> {
+	// After the engine module: it is what loads mysql2, and its one shared promise
+	// keeps two first-time loads of the driver from running at once.
+	mysqlDatabases ??= loadMysqlEngine()
+		.then(() => import("./mysql/databases.ts"))
+		.catch((error: unknown) => {
+		mysqlDatabases = undefined; // a failed load can be retried
+		throw error;
+	});
+	return mysqlDatabases;
+}
+
+/**
+ * The databases `entry` lists that the server does not have or does not show
+ * to its user, in config order; none when it captures every visible database.
+ * PostgreSQL is not checked: a connection reaches exactly one database, and
+ * connecting to one that does not exist already fails at once with a clear error.
+ */
+export async function missingDatabases(entry: ConnectionConfig, password: string): Promise<string[]> {
+	if (entry.databases === null) return [];
+	switch (entry.engine) {
+		case "mysql":
+		case "mariadb": {
+			const { missingMysqlDatabases } = await loadMysqlDatabases();
+			return missingMysqlDatabases(mysqlOptions(entry, password));
+		}
+		case "postgresql":
+			return [];
+	}
+}
+
 /** Captures the structure of the server described by `entry`. */
 export async function introspect(entry: ConnectionConfig, password: string): Promise<Snapshot> {
 	switch (entry.engine) {
