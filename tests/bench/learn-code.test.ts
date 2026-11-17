@@ -90,6 +90,9 @@ describe("bench/learn-code.ts", () => {
 		const report = renderPreview(preview);
 		assert.match(report, /^learn-code erp: 2 code files and 1 docs read, 3 tables used or defined, 3 listed, 0 more need a note, message ≈\d+ tokens\n/);
 		assert.ok(report.includes("| 1 | shop.cst | nothing | yes | 1 | 1 | src/Cst.php | docs/tablas.md |"), report);
+		// What the agent would be pointed to read: Cst.php, ventas.sql and tablas.md; Cst.php maps cst.
+		assert.deepEqual(preview.usage.estimate, { tables: 3, files: 3, bytes: 155, largestFile: 69, anchored: 1 });
+		assert.ok(report.includes("\nestimate: 3 tables, 3 files, 155 bytes (largest 69), 1 anchored by a mapping\n"), report);
 	});
 
 	test("never writes into the project or the code folder, and removes its temporary copy", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { Knowledge } from "../../lib/knowledge/types.ts";
-import { type CodeFiles, type ScanLimits, findSchemaUsage, isCrypticName } from "../../lib/usecases/code-scan.ts";
+import { type CodeFiles, QUESTION_PREFIX, type ScanLimits, findSchemaUsage, isCrypticName, isQuestionNote } from "../../lib/usecases/code-scan.ts";
 import type { Table } from "../../lib/model/snapshot.ts";
 import { customersTable, ordersTable, snapshot } from "../fixtures/snapshot.ts";
 
@@ -73,11 +73,18 @@ describe("findSchemaUsage", () => {
 			filesMatched: 3,
 			tablesMatched: 2,
 			matches: [
-				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
-				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], hits: 2, cryptic: true, ...plain },
+				{ table: "shop.art", name: "art", files: ["src/Models/Articulo.php", "src/Repo/Ventas.php"], anchor: "src/Models/Articulo.php", hits: 2, cryptic: true, ...plain },
+				{ table: "shop.cus", name: "cus", files: ["src/Models/Cliente.php", "src/Repo/Ventas.php"], anchor: "src/Models/Cliente.php", hits: 2, cryptic: true, ...plain },
 			],
 			remaining: 0,
 			truncated: false,
+			estimate: {
+				tables: 2,
+				files: 3,
+				bytes: ["src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php"].reduce((sum, path) => sum + Buffer.byteLength(project[path as keyof typeof project]), 0),
+				largestFile: Buffer.byteLength(project["src/Models/Articulo.php"]),
+				anchored: 2,
+			},
 		});
 		// README.md is read as documentation; "art cus dln" only names the tables, so it is no evidence.
 		assert.deepEqual(reads.sort(), ["README.md", "src/Models/Articulo.php", "src/Models/Cliente.php", "src/Repo/Ventas.php", "src/article.php"]);
@@ -122,6 +129,7 @@ describe("findSchemaUsage", () => {
 			matches: [],
 			remaining: 0,
 			truncated: false,
+			estimate: { tables: 0, files: 0, bytes: 0, largestFile: 0, anchored: 0 },
 		});
 		const unrelated = memoryFiles({ "src/app.ts": "export const x = 1;" });
 		const usage = await findSchemaUsage("/app", erp, { files: unrelated.files });
@@ -296,6 +304,7 @@ describe("findSchemaUsage", () => {
 			matches: [],
 			remaining: 0,
 			truncated: false,
+			estimate: { tables: 0, files: 0, bytes: 0, largestFile: 0, anchored: 0 },
 		});
 	});
 
@@ -555,6 +564,201 @@ describe("findSchemaUsage", () => {
 		const { files } = memoryFiles({ "src/a.sql": "SELECT * FROM cst JOIN tda" });
 		const usage = await findSchemaUsage("/app", snapshot([table("cst", { comment: "cst" }), table("tda", { comment: "Almacenes" })]), { files });
 		assert.deepEqual(usage.matches.map((match) => [match.name, match.described]), [["cst", "nothing"], ["tda", "comment"]]);
+	});
+
+	// L5: the Drizzle schema explained most tables but was never listed; half of what the agent read were migrations.
+	describe("anchoring and file order", () => {
+		const shop = snapshot([table("orders"), table("invoices"), table("customers")]);
+		/** The repository names orders three times, more than the mapping file does. */
+		const repo = { "src/repo.ts": "SELECT * FROM orders;\nUPDATE orders SET paid = 1;\nDELETE FROM orders WHERE id = 1;\n" };
+
+		const mappings: [string, string, string][] = [
+			["Drizzle pgTable", "src/db/schema.ts", 'export const orders = pgTable("orders", { id: serial("id") });'],
+			["Drizzle mysqlTable", "src/db/schema.ts", "export const orders = mysqlTable('orders', {});"],
+			["Drizzle sqliteTable", "src/db/schema.ts", 'export const orders = sqliteTable("orders", {});'],
+			["TypeORM @Entity with a name", "src/entities/Order.ts", '@Entity("orders")\nexport class Order {}'],
+			["TypeORM @Entity with options", "src/entities/Order.ts", '@Entity({ name: "orders", schema: "shop" })\nexport class Order {}'],
+			["Prisma @@map", "prisma/schema.prisma", 'model Order {\n  id Int @id\n  @@map("orders")\n}\n'],
+			["Prisma model named like the table", "prisma/schema.prisma", "model orders {\n  id Int @id\n}\n"],
+			["SQLAlchemy __tablename__", "src/models.py", 'class Order(Base):\n    __tablename__ = "orders"'],
+			["Eloquent $table property", "src/Order.php", "class Order extends Model { protected $table = 'orders'; }"],
+			["JPA @Table", "src/Order.java", '@Entity\n@Table(name = "orders")\npublic class Order {}'],
+		];
+		for (const [form, path, code] of mappings) {
+			test(`ORM mapping: ${form} is the anchor, listed first though it names the table once`, async () => {
+				const { files } = memoryFiles({ ...repo, [path]: code });
+				const usage = await findSchemaUsage("/app", shop, { files });
+				assert.deepEqual(
+					usage.matches.map((match) => [match.name, match.files, match.anchor]),
+					[["orders", [path, "src/repo.ts"], path]],
+					code,
+				);
+			});
+		}
+
+		test("Prisma: a model with @@map maps only to that table, never to its model name", async () => {
+			const { files } = memoryFiles({ "prisma/schema.prisma": 'model customers {\n  id Int @id\n  @@map("orders")\n}\n' });
+			const usage = await findSchemaUsage("/app", shop, { files });
+			assert.deepEqual(usage.matches.map((match) => match.name), ["orders"]);
+		});
+
+		test("query code and table variables are uses, not anchors", async () => {
+			const { files } = memoryFiles({
+				"src/a.php": "DB::table('orders')->get(); $tableName = 'orders';",
+				"src/b.prg": 'qUpd:cTabla := "orders"',
+			});
+			const usage = await findSchemaUsage("/app", shop, { files });
+			assert.deepEqual(usage.matches.map((match) => [match.name, match.anchor]), [["orders", undefined]]);
+			assert.ok(!("anchor" in (usage.matches[0] ?? {})));
+		});
+
+		const lastKinds: [string, string][] = [
+			["migration folder", "db/migrations/0001_orders.ts"],
+			["Rails db/migrate", "db/migrate/20240101_create_orders.rb"],
+			["numbered SQL migration", "drizzle/0000_init.sql"],
+			["Flyway migration", "sql/V1__init.sql"],
+			["SQL schema dump", "sql/schema.sql"],
+			["*.test.* file", "src/orders.test.ts"],
+			["*.spec.* file", "src/orders.spec.js"],
+			["tests folder", "tests/orders.py"],
+			["__tests__ folder", "src/__tests__/orders.ts"],
+			["seed file", "db/seed.ts"],
+			["seeder", "database/OrdersSeeder.php"],
+			["fixtures folder", "src/fixtures/orders.ts"],
+			["old copy", "src/orders_old.php"],
+			["backup", "src/ordersBak.php"],
+			["copy", "src/orders copy.php"],
+			["does not compile", "src/no se compila/orders.prg"],
+			["nocompila", "src/orders_nocompila.prg"],
+			["digit-suffixed variant", "src/billing_00123.php"],
+		];
+		for (const [kind, path] of lastKinds) {
+			test(`files go last for their table: ${kind}`, async () => {
+				const { files } = memoryFiles({
+					"src/billing.php": "SELECT * FROM invoices;",
+					[path]: "SELECT * FROM orders;\n".repeat(4),
+					"src/OrderService.ts": "SELECT * FROM orders;",
+				});
+				const usage = await findSchemaUsage("/app", shop, { files });
+				assert.deepEqual(usage.matches.find((match) => match.name === "orders")?.files, ["src/OrderService.ts", path], path);
+			});
+		}
+
+		test("application code that only shares a word with a migration or a test is not demoted", async () => {
+			const { files } = memoryFiles({
+				"src/a.ts": "SELECT * FROM orders;",
+				"src/latest.ts": "SELECT * FROM orders;\n".repeat(2),
+				"src/bold.ts": "SELECT * FROM orders;\n".repeat(3),
+				"src/order.ts": "SELECT * FROM invoices;",
+				"src/order_service.ts": "import { db } from './db';\nexport function list() {\n  return db.query('SELECT * FROM orders');\n}\n" + "SELECT * FROM orders;\n".repeat(3),
+			});
+			const usage = await findSchemaUsage("/app", shop, { files });
+			assert.deepEqual(usage.matches.find((match) => match.name === "orders")?.files, ["src/order_service.ts", "src/bold.ts", "src/latest.ts", "src/a.ts"]);
+		});
+
+		// L12: on a legacy project the scan listed customer variants of a program instead of the program.
+		test("a program with many customer variants: the base file comes first, near-copies with a tag or digits go last", async () => {
+			const body = (extra: string) =>
+				["FUNCTION Invoice()", "  LOCAL cSql", "  cSql := 'SELECT * FROM invoices'", "  oQry := Run(cSql)", "  Total(oQry)", "RETURN NIL", extra].join("\n");
+			const { files } = memoryFiles({
+				"prg/invoice.prg": body(""),
+				"prg/invoice_00123.prg": body("cSql := 'SELECT * FROM invoices WHERE x'\ncSql := 'SELECT * FROM invoices WHERE y'"),
+				"prg/invoice_00456.prg": body("cSql := 'SELECT * FROM invoices WHERE x'\ncSql := 'SELECT * FROM invoices WHERE y'"),
+				"prg/invoice-acme.prg": body("cSql := 'SELECT * FROM invoices WHERE a'\ncSql := 'SELECT * FROM invoices WHERE b'"),
+				"prg/invoice-north.prg": body("cSql := 'SELECT * FROM invoices WHERE a'\ncSql := 'SELECT * FROM invoices WHERE b'"),
+				"prg/invoice2.prg": body("cSql := 'SELECT * FROM invoices WHERE z'\ncSql := 'SELECT * FROM invoices WHERE w'"),
+			});
+			const usage = await findSchemaUsage("/app", shop, { files });
+			const invoices = usage.matches.find((match) => match.name === "invoices");
+			assert.equal(invoices?.files[0], "prg/invoice.prg");
+			assert.equal(invoices?.hits, 16);
+		});
+
+		test("the mapping file and the application code come before migrations, tests and seeds", async () => {
+			const { files } = memoryFiles({
+				"db/migrations/0001.sql": "CREATE TABLE orders (id int);\nALTER TABLE orders ADD x int;\n".repeat(3),
+				"tests/orders.test.ts": "SELECT * FROM orders;\n".repeat(5),
+				"db/seeds/orders.ts": "INSERT INTO orders VALUES (1);\n".repeat(5),
+				"src/db/schema.ts": 'export const orders = pgTable("orders", {});',
+				"src/checkout.ts": "UPDATE orders SET paid = 1;",
+			});
+			const usage = await findSchemaUsage("/app", shop, { files });
+			const [orders] = usage.matches;
+			assert.deepEqual(orders?.files.slice(0, 2), ["src/db/schema.ts", "src/checkout.ts"]);
+			assert.deepEqual(new Set(orders?.files.slice(2)), new Set(["db/migrations/0001.sql", "tests/orders.test.ts", "db/seeds/orders.ts"]));
+		});
+	});
+
+	// A table the agent could not explain was left as a question: the next round must not list it first again.
+	test("a table left as a question goes after the tables nothing describes and the commented ones, and is not counted as remaining", async () => {
+		const at = "2026-11-01T00:00:00.000Z";
+		const note = (name: string, text: string, id: string) => ({ id, target: `shop.shop.${name}`, text, author: "agent (via agent)", createdAt: at, updatedAt: at });
+		const pointsTo = (target: string, i: number) => ({ ...ordersTable().foreignKeys[0]!, name: `fk_${i}`, references: { database: "shop", schema: "shop", table: target, columns: ["id"] } });
+		const tables = snapshot([
+			table("cst"),
+			table("warehouse"),
+			table("payments", { comment: "Payments received" }),
+			table("orders"),
+			table("answered"),
+			table("lines", { foreignKeys: [pointsTo("cst", 1), pointsTo("answered", 2)] }),
+		]);
+		const knowledge: Knowledge = {
+			formatVersion: 1,
+			annotations: [
+				note("cst", `${QUESTION_PREFIX}what does cst hold? The code only reads it in src/a.sql.`, "1"),
+				note("orders", "Customer orders (pedidos)", "2"),
+				note("answered", `${QUESTION_PREFIX}what is answered?`, "3"),
+				note("answered", "Answers to surveys (respuestas)", "4"),
+			],
+			relationships: [],
+		};
+		const once = ["cst", "warehouse", "payments", "orders", "answered", "lines"].map((name) => `SELECT * FROM ${name};\n`).join("");
+		const { files } = memoryFiles({ "src/a.sql": once + "SELECT * FROM cst;\n".repeat(9) });
+		const usage = await findSchemaUsage("/app", tables, { files, knowledge });
+		assert.deepEqual(
+			usage.matches.map((match) => [match.name, match.described]),
+			[
+				["lines", "nothing"],
+				["warehouse", "nothing"],
+				["payments", "comment"],
+				["cst", "question"],
+				["answered", "note"],
+				["orders", "note"],
+			],
+		);
+		assert.ok(isQuestionNote(`  ${QUESTION_PREFIX}¿qué guarda cst?`));
+		assert.ok(!isQuestionNote("Customer master (clientes). Question: who writes it?"));
+
+		// With more undescribed tables than fit, the questioned one is never counted as waiting for a note.
+		const many = Array.from({ length: 31 }, (_, i) => table(`tabla_${String(i).padStart(2, "0")}`));
+		const big = memoryFiles({ "src/a.sql": [...many.map((item) => item.name), "cst"].map((name) => `SELECT * FROM ${name};`).join("\n") });
+		const round = await findSchemaUsage("/app", snapshot([...many, table("cst")]), { files: big.files, knowledge });
+		assert.equal(round.tablesMatched, 32);
+		assert.equal(round.remaining, 1);
+		assert.ok(!round.matches.some((match) => match.name === "cst"));
+	});
+
+	// What a caller shows before the agent starts: how much it would be pointed to read.
+	test("estimates the listed tables and the files and bytes the agent is pointed to", async () => {
+		const contents = {
+			"src/db/schema.ts": 'export const orders = pgTable("orders", {});\nexport const invoices = pgTable("invoices", {});\n',
+			"src/checkout.ts": "UPDATE orders SET paid = 1;\nINSERT INTO invoices (id) VALUES (1);\n",
+			"src/report.sql": "SELECT * FROM customers;",
+			"src/unused.ts": "export const x = 1;",
+			"docs/tables.md": "- `customers`: people who buy\n",
+		};
+		const { files } = memoryFiles(contents);
+		const usage = await findSchemaUsage("/app", snapshot([table("orders"), table("invoices"), table("customers")]), { files });
+		const size = (path: keyof typeof contents) => Buffer.byteLength(contents[path]);
+		assert.deepEqual(usage.estimate, {
+			tables: 3,
+			files: 4,
+			bytes: size("src/db/schema.ts") + size("src/checkout.ts") + size("src/report.sql") + size("docs/tables.md"),
+			largestFile: size("src/db/schema.ts"),
+			anchored: 2,
+		});
+		const none = await findSchemaUsage("/app", erp, { files: memoryFiles({ "src/app.ts": "export const x = 1;" }).files });
+		assert.deepEqual(none.estimate, { tables: 0, files: 0, bytes: 0, largestFile: 0, anchored: 0 });
 	});
 
 	test("a cryptic name: 4 letters or fewer, a part without vowels, or mostly parts of 3 letters or fewer", () => {
