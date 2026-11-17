@@ -1,6 +1,8 @@
 // What /heydb:learn-code would send the agent, without any model: the tables
-// it lists, in order, the code and docs given as evidence for each, and the
-// size of the message in tokens.
+// it lists, in order, the code and docs given as evidence for each (the file
+// that maps a table first, migrations, tests and variants last), what the scan
+// estimates the agent would be pointed to read, and the size of the message
+// in tokens.
 //
 //   node bench/learn-code.ts --project ../app [--connection erp] [--code ../legacy-app] [--message] [--json]
 //
@@ -73,8 +75,17 @@ export function renderPreview({ connection, usage, tokens: size }: LearnCodePrev
 			`| ${index + 1} | ${match.table} | ${match.described} | ${match.cryptic ? "yes" : "no"} | ${match.referenced} | ${match.hits} | ` +
 			`${match.files.join(", ")} | ${match.docs.join(", ")} |`,
 	);
+	const estimate = usage.estimate;
+	const cost =
+		estimate === undefined
+			? []
+			: [
+					`estimate: ${estimate.tables} tables, ${estimate.files} files, ${estimate.bytes} bytes (largest ${estimate.largestFile}), ` +
+						`${estimate.anchored} anchored by a mapping`,
+				];
 	return [
 		header,
+		...cost,
 		"",
 		"| # | table | described by | cryptic | referenced | uses | code | docs |",
 		"|---|---|---|---|---|---|---|---|",

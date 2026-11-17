@@ -32,6 +32,22 @@ import { HEYDB_DIR } from "../store/project.ts";
 // cryptic names (cst, fac_cab), many references and much code first. The work
 // comes in rounds: the tables noted in one run go last in the next, so running
 // it again lists the next tables, and `remaining` says how many still wait.
+// A table the agent could not explain is left as a question: a note that
+// starts with QUESTION_PREFIX. It goes after the commented tables, so the next
+// round does not spend its top spot on what the code already failed to say,
+// and it never counts as waiting.
+//
+// Within a table, files come in the order the agent should follow them: the
+// file that maps the table (an ORM declaration such as pgTable("orders"),
+// @Entity("orders"), Prisma @@map, __tablename__) is the anchor and comes
+// first, even when it names the table once; then the application code that
+// uses it most. Migrations, schema dumps, tests, seeds and fixtures, copies
+// set aside (old, bak, copy, "no se compila") and customer variants of a
+// program (invoice_00123.prg or invoice-acme.prg next to invoice.prg) come
+// last: they repeat a table's name without explaining it.
+//
+// `estimate` says how much the agent would be pointed to read, so a caller can
+// show the cost before anything starts.
 
 export interface ScanLimits {
 	/** Source files read at most. */
@@ -121,6 +137,8 @@ const SOURCE_EXTENSIONS = new Set([
 	"p",
 	"w",
 	"rpgle",
+	// Prisma schema: `model Order { … @@map("orders") }`.
+	"prisma",
 ]);
 
 /** Documentation: read only for definitions of a table, never as code. */
@@ -145,16 +163,38 @@ export interface ScanOptions {
 	readonly knowledge?: Knowledge;
 }
 
-/** What already says what a table is: nothing, its comment, or a team note. */
-export type Described = "nothing" | "comment" | "note";
+/**
+ * What already says what a table is: nothing, its comment, a question a
+ * previous round left (a note starting with QUESTION_PREFIX), or a team note.
+ */
+export type Described = "nothing" | "comment" | "question" | "note";
+
+/**
+ * How a note marks a table as a question for the user rather than knowledge:
+ * the agent could not explain the table from the code. The learn message asks
+ * the agent to save such notes with this prefix; the next scan lists those
+ * tables after the commented ones instead of first again.
+ */
+export const QUESTION_PREFIX = "[?] ";
+
+/** Whether a note is a question left by learn-code (starts with QUESTION_PREFIX, leading spaces ignored). */
+export function isQuestionNote(text: string): boolean {
+	return text.trimStart().startsWith(QUESTION_PREFIX.trim());
+}
 
 export interface TableUsage {
 	/** Display name, e.g. "erp.art"; tables with the same name in several databases are joined with " / ". */
 	readonly table: string;
 	/** The table name as the schema writes it, e.g. "art". */
 	readonly name: string;
-	/** Code files that use it most, at most 5. */
+	/**
+	 * Code files in the order to follow them, at most 5: the mapping file
+	 * first, then the code that uses it most; migrations, tests, seeds and
+	 * variants last.
+	 */
 	readonly files: readonly string[];
+	/** The file that maps the table (an ORM declaration), when one does; it is files[0]. Absent otherwise. */
+	readonly anchor?: string;
 	/** Occurrences in every scanned code file. */
 	readonly hits: number;
 	/** Documentation files that define it, at most 3. */
@@ -182,6 +222,22 @@ export interface SchemaUsage {
 	readonly remaining: number;
 	/** A limit stopped the scan: more code may use these tables. */
 	readonly truncated: boolean;
+	/** How much the agent would be pointed to read. Always set by findSchemaUsage. */
+	readonly estimate?: ScanEstimate;
+}
+
+/** What the listed tables point the agent to, for a cost estimate before it starts. */
+export interface ScanEstimate {
+	/** Tables listed (`matches`). */
+	readonly tables: number;
+	/** Distinct code and documentation files named by the listed tables. */
+	readonly files: number;
+	/** Their size in bytes, all together. */
+	readonly bytes: number;
+	/** The biggest of them, in bytes: huge files mean a legacy project, costly to read. */
+	readonly largestFile: number;
+	/** Listed tables whose first file maps them (an ORM declaration): few means little to anchor on. */
+	readonly anchored: number;
 }
 
 export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, options: ScanOptions = {}): Promise<SchemaUsage> {
@@ -193,9 +249,14 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	const names = tableNames(snapshot, options.knowledge ?? EMPTY_KNOWLEDGE, limits.maxTables);
 	const listed = await listSources(files, limits.maxFiles, () => now() > deadline);
 
-	// lowercased table name → file → hits, in code and in documentation
-	const found = new Map<string, Map<string, number>>();
-	const defined = new Map<string, Map<string, number>>();
+	// lowercased table name → file → hits (and whether it maps the table), in code and in documentation
+	const found = new Map<string, Map<string, FileHits>>();
+	const defined = new Map<string, Map<string, FileHits>>();
+	const sizes = new Map<string, number>();
+	// Possible customer variants and their base files: their lines are compared once read.
+	const candidates = variantCandidates(listed.code);
+	const compared = new Set([...candidates.keys(), ...[...candidates.values()].map((candidate) => candidate.base)]);
+	const prints = new Map<string, Set<number>>();
 	let filesScanned = 0;
 	let docsScanned = 0;
 	let filesMatched = 0;
@@ -219,14 +280,18 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 			}
 			if (doc) docsScanned += 1;
 			else filesScanned += 1;
+			sizes.set(path, size);
+			if (compared.has(path)) prints.set(path, fingerprint(text));
 			let matched = false;
-			for (const token of doc ? tableDefinitions(text) : tableReferences(text)) {
-				const key = token.toLowerCase();
+			const references = doc ? tableDefinitions(text).map((name) => ({ name, mapping: false })) : tableReferences(text, path);
+			for (const reference of references) {
+				const key = reference.name.toLowerCase();
 				if (!names.has(key)) continue;
 				const into = doc ? defined : found;
-				const perFile = into.get(key) ?? new Map<string, number>();
+				const perFile = into.get(key) ?? new Map<string, FileHits>();
 				into.set(key, perFile);
-				perFile.set(path, (perFile.get(path) ?? 0) + 1);
+				const previous = perFile.get(path);
+				perFile.set(path, { hits: (previous?.hits ?? 0) + 1, mapping: (previous?.mapping ?? false) || reference.mapping });
 				matched = true;
 			}
 			if (matched) filesMatched += 1;
@@ -250,16 +315,28 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 	const code = await readPass(listed.code, { files: limits.maxFiles - docs.considered, bytes: limits.maxBytes - docs.bytes, deadline }, false);
 	const truncated = listed.truncated || docs.stopped || code.stopped;
 
-	const mostFirst = (perFile: Map<string, number> | undefined) =>
-		[...(perFile ?? [])].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
+	const variants = new Set(
+		[...candidates]
+			.filter(([path, { base, digits }]) => digits || similar(prints.get(path), prints.get(base)))
+			.map(([path]) => path),
+	);
+	const last = (path: string) => goesLast(path) || variants.has(path);
+	const mostFirst = (perFile: Map<string, FileHits> | undefined) =>
+		[...(perFile ?? [])].sort((a, b) => b[1].hits - a[1].hits || compareText(a[0], b[0]));
+	/** Application code before what goes last; within each, the mapping file first, then the most uses. */
+	const followOrder = (perFile: Map<string, FileHits> | undefined) =>
+		mostFirst(perFile).sort((a, b) => Number(last(a[0])) - Number(last(b[0])) || Number(b[1].mapping) - Number(a[1].mapping));
 	const matches = [...new Set([...found.keys(), ...defined.keys()])].map((key): TableUsage => {
-		const ranked = mostFirst(found.get(key));
+		const ranked = followOrder(found.get(key));
 		const table = names.get(key) as TableName;
+		const [first] = ranked;
+		const anchor = first !== undefined && first[1].mapping && !last(first[0]) ? first[0] : undefined;
 		return {
 			table: table.display,
 			name: table.name,
 			files: ranked.slice(0, MAX_FILES_PER_TABLE).map(([path]) => path),
-			hits: ranked.reduce((sum, [, hits]) => sum + hits, 0),
+			...(anchor === undefined ? {} : { anchor }),
+			hits: ranked.reduce((sum, [, file]) => sum + file.hits, 0),
 			docs: mostFirst(defined.get(key))
 				.slice(0, MAX_DOCS_PER_TABLE)
 				.map(([path]) => path),
@@ -275,22 +352,37 @@ export async function findSchemaUsage(projectRoot: string, snapshot: Snapshot, o
 			b.hits - a.hits ||
 			compareText(a.table, b.table),
 	);
+	const listedMatches = matches.slice(0, MAX_MATCHES);
+	const pointed = [...new Set(listedMatches.flatMap((match) => [...match.files, ...match.docs]))].map((path) => sizes.get(path) ?? 0);
 	return {
 		hasCode: filesScanned > 0,
 		filesScanned,
 		docsScanned,
 		filesMatched,
 		tablesMatched: matches.length,
-		matches: matches.slice(0, MAX_MATCHES),
+		matches: listedMatches,
 		remaining: matches.slice(MAX_MATCHES).filter((match) => match.described === "nothing").length,
 		truncated,
+		estimate: {
+			tables: listedMatches.length,
+			files: pointed.length,
+			bytes: pointed.reduce((sum, size) => sum + size, 0),
+			largestFile: pointed.reduce((max, size) => Math.max(max, size), 0),
+			anchored: listedMatches.filter((match) => match.anchor !== undefined).length,
+		},
 	};
+}
+
+/** Uses of a table in one file, and whether the file maps it. */
+interface FileHits {
+	readonly hits: number;
+	readonly mapping: boolean;
 }
 
 const EMPTY_KNOWLEDGE: Knowledge = { formatVersion: 1, annotations: [], relationships: [] };
 
-/** Tables nothing describes first, then commented ones, then those with a note. */
-const DESCRIBED_ORDER: Readonly<Record<Described, number>> = { nothing: 0, comment: 1, note: 2 };
+/** Tables nothing describes first, then commented ones, then those left as questions, then those with a note. */
+const DESCRIBED_ORDER: Readonly<Record<Described, number>> = { nothing: 0, comment: 1, question: 2, note: 3 };
 
 /**
  * How much a note on this table is worth, among tables described alike: a
@@ -350,13 +442,19 @@ const STATEMENT_CHARS = 2000;
  * - UPDATE followed by SET
  * - TABLE after CREATE, ALTER, DROP, TRUNCATE, RENAME or LOCK
  *
- * ORM and mapping declarations:
- * - `table = 'x'`, `$table = 'x'`, `protected $table = "x"`, `__tablename__ = "x"`
- *   (SQLAlchemy), `db_table = "x"` (Django), `tableName: "x"` / `tableName = "x"`,
- *   Doctrine XML `<entity … table="x">`
- * - `->table('x')`, `DB::table('x')`, `.table("x")`, `->from('x')`, `.from("x")`, `knex("x")`
+ * ORM and mapping declarations (these map the table: the file is its anchor):
+ * - `self.table = 'x'`, `protected $table = "x"`, `__tablename__ = "x"`
+ *   (SQLAlchemy), `db_table = "x"` (Django), `self.table_name = "x"` (Rails),
+ *   `tableName: "x"` / `tableName = "x"`, Doctrine XML `<entity … table="x">`
  * - `@Table(name = "x")`, `@Entity(name = "x")` (JPA), `[Table("x")]` (C#)
+ * - `pgTable("x"`, `mysqlTable("x"`, `sqliteTable("x"` (Drizzle)
+ * - `@Entity("x")`, `@Entity({ name: "x" })` (TypeORM)
+ * - `@@map("x")`, and in a .prisma file a `model x {` without @@map (Prisma)
  * - `table: x` on its own line (YAML mappings)
+ *
+ * Uses, not mappings: `->table('x')`, `DB::table('x')`, `.table("x")`,
+ * `->from('x')`, `.from("x")`, `knex("x")`, and any other variable named after
+ * a table (`$tableName = 'x'`, `cTabla := "x"`).
  */
 /**
  * A keyword match plus the context it needs. The keyword is searched first and
@@ -371,6 +469,25 @@ interface ReferenceRule {
 	readonly before?: { readonly verb: RegExp; readonly chars: number };
 	/** Must appear in the statement after the match, at most `after.chars` ahead. */
 	readonly after?: { readonly verb: RegExp; readonly chars: number };
+	/** Whether the match maps the table (an ORM declaration), not just uses it. */
+	readonly mapping?: boolean | ((match: RegExpExecArray, text: string) => boolean);
+}
+
+/** Variables and properties that map a table when assigned: Eloquent, Rails, SQLAlchemy, Django, Sequelize, Doctrine. */
+const MAPPING_VARIABLES = new Set(["table", "table_name", "tablename", "__tablename__", "db_table"]);
+
+/**
+ * Whether an assignment to a variable named after a table maps it. A PHP
+ * variable maps it only as a class property (`protected $table`); a bare
+ * `table` only as a property (`self.table`) or an XML attribute (`<entity table="x">`).
+ */
+function mapsTable(match: RegExpExecArray, text: string): boolean {
+	const variable = match.groups?.variable?.toLowerCase() ?? "";
+	if (!MAPPING_VARIABLES.has(variable)) return false;
+	const line = text.slice(Math.max(0, match.index - 200), match.index).split("\n").at(-1) ?? "";
+	if (match.groups?.dollar !== undefined) return /\b(?:protected|public|private|var)\s+(?:static\s+)?$/u.test(line);
+	if (variable !== "table") return true;
+	return /\.\s*$/u.test(line) || /<[\p{L}\p{N}_:.-]+\s[^<>]*$/u.test(line);
 }
 
 const REFERENCES: readonly ReferenceRule[] = [
@@ -391,15 +508,22 @@ const REFERENCES: readonly ReferenceRule[] = [
 	// __tablename__, tableName, cTabla, oQuery:cTabla. `==` comparisons do not count.
 	{
 		pattern: new RegExp(
-			`(?<![\\p{L}\\p{N}_])\\$?[\\p{L}\\p{N}_]*(?:tabla|table)[\\p{L}\\p{N}_]*\\s*(?::=|=(?!=)|:)\\s*${QUOTED_NAME}`,
+			`(?<![\\p{L}\\p{N}_])(?<dollar>\\$)?(?<variable>[\\p{L}\\p{N}_]*(?:tabla|table)[\\p{L}\\p{N}_]*)\\s*(?::=|=(?!=)|:)\\s*${QUOTED_NAME}`,
 			"dgiu",
 		),
+		mapping: mapsTable,
 	},
 	{ pattern: new RegExp(`(?:->|::|\\.)\\s*(?:table|from)\\s*\\(\\s*${QUOTED_NAME}`, "dgu") },
 	{ pattern: new RegExp(`\\bknex\\s*\\(\\s*${QUOTED_NAME}`, "dgu") },
-	{ pattern: new RegExp(`(?:@(?:Table|Entity)\\s*\\([^)]*?\\bname\\s*=\\s*|\\[Table\\s*\\(\\s*)${QUOTED_NAME}`, "dgu") },
-	{ pattern: new RegExp(`^[ \\t]*table:[ \\t]*(?<name>${ID})[ \\t]*\\r?$`, "dgmu") },
+	{ pattern: new RegExp(`(?:@(?:Table|Entity)\\s*\\([^)]*?\\bname\\s*=\\s*|\\[Table\\s*\\(\\s*)${QUOTED_NAME}`, "dgu"), mapping: true },
+	{ pattern: new RegExp(`\\b(?:pg|mysql|sqlite|singlestore)Table\\s*\\(\\s*${QUOTED_NAME}`, "dgu"), mapping: true },
+	{ pattern: new RegExp(`@Entity\\s*\\(\\s*(?:\\{[^)]*?\\bname\\s*:\\s*)?${QUOTED_NAME}`, "dgu"), mapping: true },
+	{ pattern: new RegExp(`@@map\\s*\\(\\s*(?:name\\s*:\\s*)?${QUOTED_NAME}`, "dgu"), mapping: true },
+	{ pattern: new RegExp(`^[ \\t]*table:[ \\t]*(?<name>${ID})[ \\t]*\\r?$`, "dgmu"), mapping: true },
 ];
+
+/** A Prisma model; without @@map in its body, its name is the table's. */
+const PRISMA_MODEL = new RegExp(`^[ \\t]*model[ \\t]+(?<name>${ID})[ \\t]*\\{`, "dgmu");
 
 /** The part of the statement before `index`: at most `chars` back, cut after the last ";". */
 function statementBefore(text: string, index: number, chars: number): string {
@@ -414,18 +538,36 @@ function statementAfter(text: string, index: number, chars: number): string {
 	return end === -1 ? window : window.slice(0, end);
 }
 
-/** Every table name the file uses in database context; one per place, even when two patterns see it. */
-function tableReferences(text: string): string[] {
-	const found = new Map<number, string>();
+interface Reference {
+	readonly name: string;
+	/** The file maps the table here (an ORM declaration). */
+	readonly mapping: boolean;
+}
+
+/** Every table name the file uses or maps in database context; one per place, even when two patterns see it. */
+function tableReferences(text: string, path: string): Reference[] {
+	const found = new Map<number, Reference>();
+	const add = (start: number, name: string, mapping: boolean) =>
+		found.set(start, { name, mapping: mapping || (found.get(start)?.mapping ?? false) });
 	for (const rule of REFERENCES) {
 		for (const match of text.matchAll(rule.pattern)) {
 			const start = match.indices?.groups?.name?.[0];
 			const name = match.groups?.name;
 			if (start === undefined || name === undefined) continue;
-			const { before, after } = rule;
+			const { before, after, mapping = false } = rule;
 			if (before !== undefined && !before.verb.test(statementBefore(text, match.index, before.chars))) continue;
 			if (after !== undefined && !after.verb.test(statementAfter(text, match.index + match[0].length, after.chars))) continue;
-			found.set(start, name);
+			add(start, name, typeof mapping === "boolean" ? mapping : mapping(match as RegExpExecArray, text));
+		}
+	}
+	if (path.toLowerCase().endsWith(".prisma")) {
+		for (const match of text.matchAll(PRISMA_MODEL)) {
+			const start = match.indices?.groups?.name?.[0];
+			const name = match.groups?.name;
+			if (start === undefined || name === undefined) continue;
+			const rest = text.slice(match.index + match[0].length);
+			const end = rest.search(/^[ \t]*\}/mu);
+			if (!/@@map\s*\(/u.test(end === -1 ? rest : rest.slice(0, end))) add(start, name, true);
 		}
 	}
 	return [...found.values()];
@@ -447,7 +589,8 @@ interface TableName {
  */
 function tableNames(snapshot: Snapshot, knowledge: Knowledge, maxTables: number): Map<string, TableName> {
 	const counts = incomingCounts(snapshot, knowledge);
-	const noted = new Set(knowledge.annotations.map((annotation) => annotation.target));
+	const noted = new Set(knowledge.annotations.filter((annotation) => !isQuestionNote(annotation.text)).map((annotation) => annotation.target));
+	const questioned = new Set(knowledge.annotations.filter((annotation) => isQuestionNote(annotation.text)).map((annotation) => annotation.target));
 	const all: TableName[] = [];
 	for (const database of snapshot.databases) {
 		for (const schema of database.schemas) {
@@ -459,7 +602,13 @@ function tableNames(snapshot: Snapshot, knowledge: Knowledge, maxTables: number)
 					canonical,
 					name: table.name,
 					display: displayName(ref),
-					described: noted.has(canonical) ? "note" : describes(table.comment, table.name) ? "comment" : "nothing",
+					described: noted.has(canonical)
+						? "note"
+						: questioned.has(canonical)
+							? "question"
+							: describes(table.comment, table.name)
+								? "comment"
+								: "nothing",
 					cryptic: isCrypticName(table.name),
 					referenced: counts.get(canonical) ?? 0,
 				});
@@ -577,6 +726,118 @@ async function listSources(
 	return { docs, code, truncated };
 }
 
+// What goes last among a table's files: it names the table without explaining it.
+
+/** Folders of migrations, tests, seeds and fixtures. */
+const LAST_FOLDERS = /^(?:migrations?|migrate|alembic|tests?|__tests__|specs?|seeds?|seeders?|fixtures?)$/iu;
+/** File names of tests (orders.test.ts, orders_test.go, test_orders.py, OrderTest.php), seeds and fixtures. */
+const LAST_FILES = [
+	/\.(?:test|spec)\.[^.]+$/iu,
+	/_test\.[^.]+$/iu,
+	/^test_[^/]*\.py$/iu,
+	/[\p{Ll}\p{N}]Tests?\.(?:java|kt|cs|php|scala)$/u,
+	/^seed/iu,
+	/seeder/iu,
+	/fixture/iu,
+];
+/** Numbered SQL migrations (0001_init.sql, Drizzle, Flyway V1__init.sql) and SQL schema dumps. */
+const SQL_MIGRATION = /^(?:\d{3,}[_-]|V\d+(?:[._]\d+)*__)/u;
+const SQL_DUMP = /schema|dump|structure|ddl|backup/iu;
+/** Words that mark a copy set aside, in a file or folder name. */
+const SET_ASIDE = new Set(["old", "bak", "backup", "copy", "copia"]);
+
+/** Whether a file names tables without explaining them: migrations, dumps, tests, seeds, fixtures, copies set aside. */
+function goesLast(path: string): boolean {
+	const segments = path.split("/");
+	const file = segments.at(-1) ?? "";
+	const folders = segments.slice(0, -1);
+	const dot = file.lastIndexOf(".");
+	const stem = dot > 0 ? file.slice(0, dot) : file;
+	if (folders.some((folder) => LAST_FOLDERS.test(folder))) return true;
+	if (LAST_FILES.some((pattern) => pattern.test(file))) return true;
+	if (file.slice(dot + 1).toLowerCase() === "sql" && (SQL_MIGRATION.test(file) || SQL_DUMP.test(stem))) return true;
+	return [...folders, stem].some(setAside);
+}
+
+/** "orders_old", "ordersBak", "orders copy", "no se compila", "nocompila". */
+function setAside(name: string): boolean {
+	const words = name
+		.replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u);
+	if (words.some((word) => SET_ASIDE.has(word))) return true;
+	const letters = name.toLowerCase().replace(/[^\p{L}]+/gu, "");
+	return letters.includes("nocompila") || letters.includes("nosecompila");
+}
+
+/**
+ * Files that may be customer variants of another: same folder and extension,
+ * named like it plus a suffix (invoice_00123.prg, invoice-acme.prg,
+ * invoice2.prg next to invoice.prg). A digit suffix is a variant; a word
+ * suffix only when the file turns out to be a near-copy of its base, so
+ * order_service.ts next to order.ts stays application code.
+ */
+function variantCandidates(paths: readonly string[]): Map<string, { base: string; digits: boolean }> {
+	const parts = (path: string) => {
+		const slash = path.lastIndexOf("/");
+		const file = path.slice(slash + 1);
+		const dot = file.lastIndexOf(".");
+		if (dot <= 0) return null;
+		return { group: `${path.slice(0, slash + 1)}\0${file.slice(dot + 1).toLowerCase()}`, stem: file.slice(0, dot).toLowerCase() };
+	};
+	const groups = new Map<string, Map<string, string>>();
+	for (const path of paths) {
+		const part = parts(path);
+		if (part === null) continue;
+		const stems = groups.get(part.group) ?? new Map<string, string>();
+		groups.set(part.group, stems);
+		stems.set(part.stem, path);
+	}
+	const candidates = new Map<string, { base: string; digits: boolean }>();
+	for (const path of paths) {
+		const part = parts(path);
+		if (part === null) continue;
+		const stems = groups.get(part.group) as Map<string, string>;
+		const { stem } = part;
+		// The longest existing base: after a separator, or right before trailing digits.
+		let found: { base: string; digits: boolean } | undefined;
+		for (let at = stem.length - 1; at > 0 && found === undefined; at--) {
+			if (!"_-. ".includes(stem[at] as string)) continue;
+			const base = stems.get(stem.slice(0, at));
+			const tag = stem.slice(at + 1);
+			if (base !== undefined && tag !== "") found = { base, digits: /^\d+$/u.test(tag) };
+		}
+		const numbered = /^(.*[^\d_\-. ])\d+$/u.exec(stem);
+		const numberedBase = numbered === null ? undefined : stems.get(numbered[1] as string);
+		if (found === undefined && numberedBase !== undefined) found = { base: numberedBase, digits: true };
+		if (found !== undefined && found.base !== path) candidates.set(path, found);
+	}
+	return candidates;
+}
+
+/** The distinct lines of a file worth comparing (4 characters or more, trimmed), hashed. */
+function fingerprint(text: string): Set<number> {
+	const lines = new Set<number>();
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.length < 4) continue;
+		let hash = 0x811c9dc5;
+		for (let i = 0; i < trimmed.length; i++) hash = Math.imul(hash ^ trimmed.charCodeAt(i), 0x01000193);
+		lines.add(hash >>> 0);
+	}
+	return lines;
+}
+
+/** Near-copies: at least half of the lines of the bigger file are in the other. */
+function similar(a: Set<number> | undefined, b: Set<number> | undefined): boolean {
+	if (a === undefined || b === undefined) return false;
+	const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+	if (big.size === 0) return false;
+	let shared = 0;
+	for (const line of small) if (big.has(line)) shared += 1;
+	return shared * 2 >= big.size;
+}
+
 function isSource(path: string): boolean {
 	return hasExtension(path, SOURCE_EXTENSIONS);
 }
@@ -620,3 +881,4 @@ function realFiles(root: string): CodeFiles {
 function compareText(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
+
