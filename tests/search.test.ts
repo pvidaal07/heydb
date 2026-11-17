@@ -911,3 +911,62 @@ describe("searchSchema: related tables", () => {
 		assert.deepEqual([first?.copies, first?.related?.named], [["exh2019"], ["exhl"]]);
 	});
 });
+
+describe("flows", () => {
+	const shop = snapshot([
+		ordersTable({ comment: "Pedidos de la tienda" }),
+		customersTable(),
+		ordersTable({ name: "invoices", comment: "Facturas emitidas", columns: [column("id", 1), column("total", 2)], foreignKeys: [] }),
+	]);
+	const twoDatabases: Snapshot = {
+		...shop,
+		databases: [...shop.databases, { name: "crm", schemas: [{ name: "crm", routines: [], tables: [customersTable()] }] }],
+	};
+	const withFlow = {
+		...knowledge(),
+		flows: [
+			{
+				id: "f1",
+				name: "emitir factura",
+				synonyms: ["sacar factura"],
+				entry: "src/billing.ts:issue",
+				writes: [{ table: "shop.shop.invoices", columns: ["total"] }],
+				reads: ["shop.shop.orders", "shop.shop.invoices"],
+				sources: [],
+				author: "ana",
+				createdAt: "2026-11-06T10:00:00.000Z",
+				updatedAt: "2026-11-06T10:00:00.000Z",
+				revision: 1,
+			},
+		],
+	};
+
+	test("a flow is one result with the tables it writes, those it only reads, and its entry", () => {
+		const [first] = searchSchema(shop, withFlow, "sacar factura").results;
+		assert.equal(first?.object, "flow");
+		assert.equal(first?.target, "emitir factura");
+		assert.deepEqual(first?.flow, { writes: ["shop.shop.invoices"], reads: ["shop.shop.orders"], entry: "src/billing.ts:issue" });
+	});
+
+	test("a table matching as well as the flow's name comes first; a table the query names comes before its flows", () => {
+		assert.deepEqual(
+			searchSchema(shop, withFlow, "facturas").results.map((result) => `${result.object} ${result.target}`),
+			["table shop.shop.invoices", "flow emitir factura"],
+		);
+		assert.deepEqual(
+			searchSchema(shop, withFlow, "orders").results.slice(0, 2).map((result) => `${result.object} ${result.target}`),
+			["table shop.shop.orders", "flow emitir factura"],
+		);
+	});
+
+	test("a search kept to a database leaves out the flows that touch none of its tables", () => {
+		assert.equal(searchSchema(twoDatabases, withFlow, "emitir factura", { database: "crm" }).results.length, 0);
+		assert.equal(searchSchema(twoDatabases, withFlow, "emitir factura", { database: "shop" }).results[0]?.object, "flow");
+	});
+
+	test("without flows, results are what they were", () => {
+		const before = searchSchema(shop, knowledge(), "facturas pedidos");
+		const after = searchSchema(shop, { ...knowledge(), flows: [] }, "facturas pedidos");
+		assert.deepEqual(after, before);
+	});
+});

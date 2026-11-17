@@ -1,5 +1,5 @@
 import type { ExternalRelationship, TableKnowledge } from "../knowledge/query.ts";
-import type { Annotation, Knowledge, Relationship, RelationshipSide } from "../knowledge/types.ts";
+import type { Annotation, Flow, FlowWrite, Knowledge, Relationship, RelationshipSide } from "../knowledge/types.ts";
 import type { Change } from "../model/diff.ts";
 import { displayName, displayNameOf, formatName, parseName } from "../model/names.ts";
 import type { IncomingReferences } from "../model/references.ts";
@@ -222,6 +222,8 @@ export interface TableOptions {
 	readonly external?: readonly ExternalRelationship[];
 	/** Why some of those files could not be read. */
 	readonly unreadable?: readonly string[];
+	/** Names of the flows that write or read this table. */
+	readonly flows?: readonly string[];
 }
 
 /** Enough for a normal table whole; a 540-column legacy table shows its most telling 60. */
@@ -264,6 +266,9 @@ export function renderTable(
 		...knowledge.table.map((note) => noteLine("table", note)),
 	];
 	if (notes.length > 0) blocks.push(["## Notes", ...notes]);
+	// Names only, on one line: the steps of each come from heydb_flow.
+	const flows = options.flows ?? [];
+	if (flows.length > 0) blocks.push([`Flows: ${flows.join(", ")} (steps: heydb_flow)`]);
 
 	const here = (side: RelationshipSide) => side.connection === undefined && side.table === canonicalName;
 	const outgoing = knowledge.relationships.filter((relationship) => here(relationship.from));
@@ -428,6 +433,7 @@ const SEARCH_COLUMNS = 3;
 // meaning inferred from other tables, and a name that only looks like the word.
 function searchLine(result: SearchResult, named: Set<string>): string {
 	if (result.object === "project") return `- project note — ${shorten(result.about, ABOUT_LENGTH)} [id ${result.noteId}]`;
+	if (result.flow !== undefined) return `- ${flowSummary(result.target, result.flow)}`;
 	const { relationship } = result;
 	const target = relationship === undefined ? displayText(result.target) : `${sideText(relationship.from)} → ${sideText(relationship.to)}`;
 	let line = `- ${result.object} ${target}${copies(result.alsoIn ?? [], named)}${structuralCopies(result.copies ?? [])}${abbreviation(result)}`;
@@ -441,6 +447,50 @@ function searchLine(result: SearchResult, named: Set<string>): string {
 		line += ` · columns: ${shown.join(", ")}${rest > 0 ? ` (+${rest})` : ""}`;
 	}
 	return result.related === undefined ? line : `${line}\n${relatedLine(result.related)}`;
+}
+
+/** Tables named per list in a flow's search line; the rest are counted. */
+const FLOW_TABLES_SHOWN = 5;
+
+/** "flow: emitir factura — writes invoices, invoice_lines; reads customers (entry src/billing.ts:issue)". */
+function flowSummary(name: string, flow: NonNullable<SearchResult["flow"]>): string {
+	const names = (tables: readonly string[]) => {
+		const shown = tables.slice(0, FLOW_TABLES_SHOWN).map(displayText).join(", ");
+		return tables.length > FLOW_TABLES_SHOWN ? `${shown} (+${tables.length - FLOW_TABLES_SHOWN})` : shown;
+	};
+	const parts = [
+		...(flow.writes.length > 0 ? [`writes ${names(flow.writes)}`] : []),
+		...(flow.reads.length > 0 ? [`reads ${names(flow.reads)}`] : []),
+	];
+	return `flow: ${name} — ${parts.join("; ")} (entry ${flow.entry})`;
+}
+
+/** Most characters the body of a flow (renderFlowBody) may take: a flow is a contract, not a story. */
+export const MAX_FLOW_LENGTH = 600;
+
+/**
+ * One flow, whole and compact: what heydb_flow returns. The body is what the
+ * size limit measures; the last line, with id, author, date and revision, is not.
+ */
+export function renderFlow(flow: Flow): string {
+	return `${renderFlowBody(flow)}\n[id ${flow.id} · ${flow.author} · ${day(flow.updatedAt)} · revision ${flow.revision}]`;
+}
+
+export function renderFlowBody(flow: Omit<Flow, "id" | "author" | "createdAt" | "updatedAt" | "revision">): string {
+	const lines = [`flow: ${flow.name}${flow.synonyms.length > 0 ? ` (also: ${flow.synonyms.join(", ")})` : ""}`, `entry: ${flow.entry}`];
+	lines.push(...flowTablesLines(flow));
+	for (const stage of flow.stages ?? []) lines.push(`stage ${stage.name}: ${flowTablesLines(stage).join("; ")}`);
+	if (flow.open !== undefined) lines.push(`open: ${flow.open}`);
+	if (flow.sources.length > 0) lines.push(`sources: ${flow.sources.join(", ")}`);
+	return lines.join("\n");
+}
+
+function flowTablesLines(part: { readonly writes: readonly FlowWrite[]; readonly reads: readonly string[] }): string[] {
+	const write = (item: FlowWrite) => `${displayText(item.table)}${item.columns.length > 0 ? list(item.columns) : ""}`;
+	return [
+		...(part.writes.length > 0 ? [`writes: ${part.writes.map(write).join(", ")}`] : []),
+		...(part.reads.length > 0 ? [`reads: ${part.reads.map(displayText).join(", ")}`] : []),
+	];
 }
 
 // On its own line, so a process can be followed from one table without

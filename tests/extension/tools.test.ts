@@ -20,8 +20,8 @@ import { loadHeydb, runTool, tempDirs } from "./fake-pi.ts";
 
 const tempDir = tempDirs("heydb-tools-");
 
-/** Characters of description, snippet, guidelines and JSON parameters of every tool: ≈1.1k tokens. */
-const FIXED_TOOL_BUDGET = 4_400;
+/** Characters of description, snippet, guidelines and JSON parameters of every tool: ≈1.4k tokens (4,396 before heydb_flow). */
+const FIXED_TOOL_BUDGET = 5_503;
 
 const noGit = spawnSync("git", ["--version"]).error !== undefined && "git is not installed";
 
@@ -31,6 +31,7 @@ const TOOLS = [
 	"heydb_search",
 	"heydb_annotate",
 	"heydb_relate",
+	"heydb_flow",
 	"heydb_edit_note",
 	"heydb_forget",
 ];
@@ -103,11 +104,21 @@ describe("tool registration", () => {
 		assert.deepEqual(overview?.promptGuidelines, ["Use heydb_overview only to map an unknown schema, never for a question that names a table or concept."]);
 	});
 
-	test("heydb_annotate says when to save, what, where it comes from, and to extend a similar note", () => {
+	test("heydb_annotate asks for one meaning line per table and sends processes to heydb_flow", () => {
 		assert.deepEqual(loadHeydb().tools.get("heydb_annotate")?.promptGuidelines, [
-			"After reading code or docs for what heydb lacked, or when the user confirms something, save it with heydb_annotate in the words people search with: a process on its main table (entry file:function, tables read and written, their columns) or a meaning; never a guess.",
+			"After reading code or docs for what heydb lacked, or when the user confirms it, save a table's meaning with heydb_annotate: one line of at most 120 characters (business words, synonyms, source), never columns, types or values heydb shows, never a guess; processes go to heydb_flow.",
 			'End a heydb_annotate note with "(code: path)" or "(told by the user)"; check notes with heydb_table first and extend a similar one with heydb_edit_note instead of adding another.',
 		]);
+	});
+
+	test("heydb_flow says to save a process followed in code, with exact tables, as one flow per process", () => {
+		const flow = loadHeydb().tools.get("heydb_flow");
+		assert.equal(flow?.description, "Save or get by name a process's database contract: entry, tables written and read.");
+		assert.equal(flow?.promptSnippet, "Save or get a process's tables");
+		assert.deepEqual(flow?.promptGuidelines, [
+			"After following a process in code, save it with heydb_flow: exact tables, written columns, direct reads, stages, what you could not follow in open; the same name updates it.",
+		]);
+		assert.match(loadHeydb().tools.get("heydb_search")?.description ?? "", /^Find tables and flows /);
 	});
 
 	test("heydb_relate asks for the join condition and how you know it", () => {
@@ -117,7 +128,7 @@ describe("tool registration", () => {
 	});
 
 	test("the tool text sent every turn stays within its budget", () => {
-		// What Pi puts in the prompt for every tool, used or not: about 1.1k tokens at most.
+		// What Pi puts in the prompt for every tool, used or not: about 1.4k tokens at most.
 		assert.ok(fixedToolChars(loadHeydb().tools as never) <= FIXED_TOOL_BUDGET, `fixed tool text is ${fixedToolChars(loadHeydb().tools as never)} characters`);
 	});
 

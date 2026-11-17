@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { formatName, parseName } from "../model/names.ts";
-import { type Annotation, type Knowledge, PROJECT_TARGET, type Relationship, type RelationshipSide } from "./types.ts";
+import { type Annotation, type Flow, type Knowledge, PROJECT_TARGET, type Relationship, type RelationshipSide } from "./types.ts";
 
 // Pure operations on Knowledge: each returns a new value and never mutates its
 // input, so a failed validation can never leave half-applied changes behind,
@@ -140,6 +140,7 @@ export function removeRelationship(
  * reads like the schema. Plain code-unit comparison: the same on every machine.
  */
 export function sortKnowledge(knowledge: Knowledge): Knowledge {
+	const flows = [...(knowledge.flows ?? [])].sort((a, b) => compareKeys([a.name, a.id], [b.name, b.id]));
 	return {
 		formatVersion: 1,
 		annotations: [...knowledge.annotations].sort((a, b) =>
@@ -148,15 +149,18 @@ export function sortKnowledge(knowledge: Knowledge): Knowledge {
 		relationships: [...knowledge.relationships].sort((a, b) =>
 			compareKeys([a.from.table, a.to.table, a.id], [b.from.table, b.to.table, b.id]),
 		),
+		// Flows by name: absent when there are none, so files without flows stay as they were.
+		...(flows.length > 0 && { flows }),
 	};
 }
 
-function withEntries(
+export function withEntries(
 	knowledge: Knowledge,
 	annotations: readonly Annotation[] = knowledge.annotations,
 	relationships: readonly Relationship[] = knowledge.relationships,
+	flows: readonly Flow[] = knowledge.flows ?? [],
 ): Knowledge {
-	return sortKnowledge({ formatVersion: 1, annotations, relationships });
+	return sortKnowledge({ formatVersion: 1, annotations, relationships, flows });
 }
 
 function findById<T extends { readonly id: string }>(items: readonly T[], id: string, kind: string): T {

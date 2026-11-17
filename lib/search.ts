@@ -1,3 +1,4 @@
+import { flowWritesAndReads } from "./knowledge/flows.ts";
 import { type Annotation, type Knowledge, PROJECT_TARGET, type RelationshipSide } from "./knowledge/types.ts";
 import { displayName, formatName, parseName } from "./model/names.ts";
 import { type CommentCount, incomingReferences, namePatternTargets } from "./model/references.ts";
@@ -122,8 +123,16 @@ import type { Database, Snapshot, Table } from "./model/snapshot.ts";
 // relationships within this connection, never name-pattern guesses: on a
 // legacy schema those are costly and noisy. Referencing keys are found in
 // one pass over the result's database, once per search.
+//
+// Flows (the database contract of a process, .heydb/knowledge) are documents
+// too, found by their name and synonyms (weight 3, like a table comment, so a
+// flow matching every query word comes before a table matching some, and a
+// table matching as well comes first) and by every table they write or read
+// (1, its name split like a table name). A flow found only through a table is never shown above that
+// table: "orders" lists orders, then the flows that touch it. With a database,
+// only flows touching one of its tables are searched.
 
-export type SearchObject = "database" | "table" | "view" | "relationship" | "project";
+export type SearchObject = "database" | "table" | "view" | "relationship" | "project" | "flow";
 
 export interface ColumnMatch {
 	readonly name: string;
@@ -168,6 +177,8 @@ export interface SearchResult {
 	readonly noteId?: string;
 	/** For the first RELATED_RESULTS tables and views, their neighbourhood; absent when it is empty. */
 	readonly related?: RelatedTables;
+	/** For a flow result (target: its name), the tables it writes and only reads (canonical, every stage) and its entry. */
+	readonly flow?: { readonly writes: readonly string[]; readonly reads: readonly string[]; readonly entry: string };
 }
 
 /**
@@ -219,7 +230,7 @@ const RELATED_RESULTS = 3;
 /** Related tables named per list; the rest are counted. */
 const RELATED_SHOWN = 6;
 
-type Field = "name" | "stated" | "note" | "inferred" | "columnText" | "columnName" | "definition" | "relationship";
+type Field = "name" | "stated" | "note" | "inferred" | "columnText" | "columnName" | "definition" | "relationship" | "flow" | "flowTable";
 
 /** Weight of a match in each field, and how much its length tempers it (BM25 b). */
 const FIELDS: Readonly<Record<Field, { readonly weight: number; readonly b: number }>> = {
@@ -231,6 +242,8 @@ const FIELDS: Readonly<Record<Field, { readonly weight: number; readonly b: numb
 	columnName: { weight: 0.6, b: 0.75 },
 	definition: { weight: 0.4, b: 0.75 },
 	relationship: { weight: 1.5, b: 0 },
+	flow: { weight: 3, b: 0 },
+	flowTable: { weight: 1, b: 0 },
 };
 const FIELD_NAMES = Object.keys(FIELDS) as Field[];
 
@@ -259,7 +272,7 @@ const STOPWORDS: ReadonlySet<string> = new Set([
 	"what", "how", "table", "tables", "field", "fields", "column", "columns", "store", "stores", "stored", "save", "saved", "kept",
 ]);
 
-const OBJECT_ORDER: readonly SearchObject[] = ["database", "table", "view", "relationship", "project"];
+const OBJECT_ORDER: readonly SearchObject[] = ["database", "table", "view", "flow", "relationship", "project"];
 
 /** Lowercase and without accents: "Facturación" becomes "facturacion". */
 export function normalizeText(text: string): string {
@@ -416,6 +429,36 @@ export function searchSchema(snapshot: Snapshot, knowledge: Knowledge, query: st
 			doc.noteId = note.id;
 			docs.push(doc);
 		}
+	}
+
+	for (const flow of knowledge.flows ?? []) {
+		const { writes, reads } = flowWritesAndReads(flow);
+		const tables = [...writes, ...reads];
+		if (wanted !== null && !tables.some((table) => wanted.has(schemaKeyOf(table)))) continue;
+		const doc = newDoc(flow.name, "flow", docs.length);
+		// Per query word, the best of the name and synonyms: five synonyms saying "factura" are one match, not five.
+		const named = new Array<number>(q.words.length).fill(0);
+		let label = "";
+		for (const name of [flow.name, ...flow.synonyms]) {
+			const matched = match.text(name);
+			doc.lengths.flow = Math.max(doc.lengths.flow, matched.length);
+			if (matched.tf === null) continue;
+			if (matched.phrase) doc.phrase = Math.max(doc.phrase, PHRASE_BONUS.stated);
+			if (covered(matched.tf) > covered(named)) label = name;
+			matched.tf.forEach((value, index) => {
+				named[index] = Math.max(named[index] as number, value);
+			});
+		}
+		if (label !== "") addEvidence(doc, { field: "flow", label: `flow: ${label}`, snippet: label, tf: named, length: 0 });
+		for (const table of tables) {
+			const matched = match.name(parseName(table).table as string);
+			doc.lengths.flowTable += matched.length;
+			if (matched.tf !== null) addEvidence(doc, { field: "flowTable", label: `touches ${table}`, snippet: "", tf: matched.tf, length: 0 });
+		}
+		doc.flow = { writes, reads, entry: flow.entry };
+		doc.flowTables = tables;
+		doc.about = flow.name;
+		docs.push(doc);
 	}
 
 	const ranked = rank(docs, q);
@@ -617,6 +660,9 @@ interface Doc {
 	own: boolean;
 	/** Per query word, true when a team note on the table matched it. */
 	readonly noted: boolean[];
+	flow?: SearchResult["flow"];
+	/** A flow's tables, canonical: one found only through them ranks below them. */
+	flowTables?: readonly string[];
 }
 
 interface Ranked {
@@ -808,6 +854,18 @@ function rank(docs: readonly Doc[], q: Query): Ranked[] {
 		scored.push({ doc, score, base, exactName: doc.exactName, result: finish(doc, idf, (field) => norm(doc, field)) });
 	}
 
+	// A flow that matched only through its tables comes right after the best of them, never before it.
+	const scoreOf = new Map(scored.filter((item) => item.doc.object === "table" || item.doc.object === "view").map((item) => [item.doc.target, item]));
+	for (const item of scored) {
+		if (item.doc.object !== "flow" || item.doc.tf.flow !== undefined) continue;
+		const tables = (item.doc.flowTables ?? []).flatMap((table) => scoreOf.get(table) ?? []);
+		if (tables.length === 0) continue;
+		const best = Math.max(...tables.map((table) => table.score));
+		const bestBase = Math.max(...tables.map((table) => table.base));
+		item.score = Math.min(item.score, best - Math.max(1, best) * 1e-9);
+		item.base = Math.min(item.base, bestBase);
+	}
+
 	// Copies in the same database that matched only what their original has go under its line.
 	const byTarget = new Map(scored.map((item) => [item.doc.target, item]));
 	const folded = new Map<Scored, Doc[]>();
@@ -894,6 +952,7 @@ function finish(doc: Doc, idf: readonly number[], norm: (field: Field) => number
 		moreColumns: Math.max(0, columns.length - MAX_COLUMNS),
 		...(doc.relationship !== undefined && { relationship: doc.relationship }),
 		...(doc.noteId !== undefined && { noteId: doc.noteId }),
+		...(doc.flow !== undefined && { flow: doc.flow }),
 	};
 }
 

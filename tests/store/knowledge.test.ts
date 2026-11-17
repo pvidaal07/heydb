@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
+import { putFlow } from "../../lib/knowledge/flows.ts";
 import { addAnnotation, emptyKnowledge } from "../../lib/knowledge/operations.ts";
 import {
 	knowledgeConnections,
@@ -71,6 +72,20 @@ describe("saveKnowledge / loadKnowledge", () => {
 		saveKnowledge(a, "local", sample);
 		saveKnowledge(b, "local", knowledge([...sample.annotations].reverse(), [...sample.relationships].reverse()));
 		assert.equal(readFileSync(knowledgePath(a, "local"), "utf8"), readFileSync(knowledgePath(b, "local"), "utf8"));
+	});
+
+	test("stores flows sorted by name, byte-identical whatever order they were saved in, and round-trips them", () => {
+		const a = projectRoot();
+		const b = projectRoot();
+		const flow = (name: string) => ({ name, entry: "src/app.ts:run", reads: ["shop.shop.orders"], author: "ana" });
+		const clock = fixedClock();
+		const first = putFlow(putFlow(sample, flow("pagar"), clock).knowledge, flow("cobrar"), clock).knowledge;
+		const ids = new Map((first.flows ?? []).map((item) => [item.name, item]));
+		saveKnowledge(a, "local", first);
+		saveKnowledge(b, "local", { ...sample, flows: [ids.get("pagar"), ids.get("cobrar")].filter((item) => item !== undefined) });
+		assert.equal(readFileSync(knowledgePath(a, "local"), "utf8"), readFileSync(knowledgePath(b, "local"), "utf8"));
+		assert.deepEqual(loadKnowledge(a, "local").flows?.map((item) => item.name), ["cobrar", "pagar"]);
+		assert.deepEqual(loadKnowledge(a, "local"), first);
 	});
 
 	test("writes readable JSON: sorted keys, two-space indent, one line per field", () => {

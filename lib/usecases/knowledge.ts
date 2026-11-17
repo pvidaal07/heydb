@@ -195,7 +195,8 @@ export function orphanedKnowledge(projectRoot: string, connection: string): Orph
 	return findOrphans(loadKnowledge(projectRoot, connection), snapshot, others);
 }
 
-function requireSnapshot(projectRoot: string, connection: string): Snapshot {
+/** The stored snapshot; an error saying to sync when there is none. */
+export function requireSnapshot(projectRoot: string, connection: string): Snapshot {
 	const snapshot = loadSnapshot(projectRoot, connection);
 	if (snapshot === null) throw new Error(`connection "${connection}" was never synced: run sync first`);
 	return snapshot;

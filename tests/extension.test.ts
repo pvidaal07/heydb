@@ -14,7 +14,7 @@ test("the default export registers the heydb commands, tools and prompt context"
 		[...pi.commands.keys()],
 		["heydb:about", "heydb:init", "heydb:connect", "heydb:sync", "heydb:status", "heydb:password", "heydb:connections", "heydb:learn-code"],
 	);
-	assert.equal(pi.tools.size, 7);
+	assert.equal(pi.tools.size, 8);
 	assert.deepEqual([...pi.handlers.keys()], ["before_agent_start"]);
 });
 

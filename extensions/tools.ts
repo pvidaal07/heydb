@@ -1,12 +1,14 @@
 import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { knowledgeForTable } from "../lib/knowledge/query.ts";
+import { AGENT_AUTHOR_SUFFIX } from "../lib/knowledge/flows.ts";
+import { flowsForTable, knowledgeForTable } from "../lib/knowledge/query.ts";
 import type { Annotation, RelationshipSide } from "../lib/knowledge/types.ts";
 import { displayNameOf } from "../lib/model/names.ts";
 import { incomingReferences } from "../lib/model/references.ts";
-import { renderOverview, renderSearch, renderTable } from "../lib/render/markdown.ts";
+import { renderFlow, renderOverview, renderSearch, renderTable } from "../lib/render/markdown.ts";
 import { searchSchema } from "../lib/search.ts";
 import { PROJECT_TARGET } from "../lib/knowledge/types.ts";
+import { FlowConfirmationError, getFlow, parseWrite, saveFlow } from "../lib/usecases/flows.ts";
 import { annotate, annotateProject, editNote, projectNotes, relate, relationshipsFromOtherConnections } from "../lib/usecases/knowledge.ts";
 import { ProjectError, forgetById, openConnection, openProjectRoot, openSnapshot, resolveTarget } from "../lib/usecases/project.ts";
 import { resolveTable } from "../lib/usecases/resolve.ts";
@@ -34,7 +36,7 @@ type Result = AgentToolResult<ToolDetails>;
 const CONNECTION = { type: "string" } as const;
 
 /** The suffix that tells readers a note was written by an agent, not typed by a person. */
-export const AGENT_AUTHOR_SUFFIX = " (via agent)";
+export { AGENT_AUTHOR_SUFFIX };
 
 export function registerHeydbTools(pi: ExtensionAPI, deps: HeydbDeps): void {
 	pi.registerTool(createOverviewTool());
@@ -42,6 +44,7 @@ export function registerHeydbTools(pi: ExtensionAPI, deps: HeydbDeps): void {
 	pi.registerTool(createSearchTool());
 	pi.registerTool(createAnnotateTool(deps));
 	pi.registerTool(createRelateTool(deps));
+	pi.registerTool(createFlowTool(deps));
 	pi.registerTool(createEditNoteTool(deps));
 	pi.registerTool(createForgetTool());
 }
@@ -116,6 +119,7 @@ export function createTableTool(): ToolDefinition<typeof TABLE_PARAMETERS, ToolD
 					connection: opened.name,
 					external: other.relationships,
 					unreadable: other.unreadable,
+					flows: flowsForTable(opened.knowledge, resolved.name).map((flow) => flow.name),
 				};
 				return ok(renderTable(resolved.table, resolved.name, knowledge, incoming, options), opened.name);
 			});
@@ -142,7 +146,7 @@ export function createSearchTool(): ToolDefinition<typeof SEARCH_PARAMETERS, Too
 		name: "heydb_search",
 		label: "heydb search",
 		description:
-			"Find tables by name, comment, notes, columns and meaning inferred from the columns that reference them.",
+			"Find tables and flows by name, comment, notes, columns and meaning inferred from the columns that reference them.",
 		promptSnippet: "Search the schema and its notes by keyword",
 		promptGuidelines: [
 			"Use heydb_search first to find which tables or columns hold a concept, before writing SQL.",
@@ -189,7 +193,7 @@ export function createAnnotateTool(deps: HeydbDeps): ToolDefinition<typeof ANNOT
 		description: "Save a note on the project, a database, table or column in .heydb/knowledge; shared if the project commits .heydb/.",
 		promptSnippet: "Record what a database, table or column means",
 		promptGuidelines: [
-			"After reading code or docs for what heydb lacked, or when the user confirms something, save it with heydb_annotate in the words people search with: a process on its main table (entry file:function, tables read and written, their columns) or a meaning; never a guess.",
+			"After reading code or docs for what heydb lacked, or when the user confirms it, save a table's meaning with heydb_annotate: one line of at most 120 characters (business words, synonyms, source), never columns, types or values heydb shows, never a guess; processes go to heydb_flow.",
 			'End a heydb_annotate note with "(code: path)" or "(told by the user)"; check notes with heydb_table first and extend a similar one with heydb_edit_note instead of adding another.',
 		],
 		parameters: ANNOTATE_PARAMETERS,
@@ -255,6 +259,75 @@ export function createRelateTool(deps: HeydbDeps): ToolDefinition<typeof RELATE_
 				const author = await agentAuthor(deps, ctx.cwd);
 				const link = relate(opened.root, opened.name, { from, to, note: params.note ?? "", author }, deps.knowledge);
 				const saved = `Saved relationship ${link.id}: ${side(link.from)} → ${side(link.to)} (author: ${link.author}).`;
+				return ok(saved + (await sharingWarning(opened.root, opened.name)), opened.name);
+			});
+		},
+	};
+}
+
+const LIST = { type: "array", items: { type: "string" } } as const;
+const WRITES = { ...LIST, description: '"table(column, …)"' } as const;
+
+const FLOW_PARAMETERS = {
+	type: "object",
+	properties: {
+		name: { type: "string", description: "Business words; alone, gets the flow." },
+		synonyms: LIST,
+		entry: { type: "string", description: "file:function" },
+		writes: WRITES,
+		reads: LIST,
+		stages: { type: "array", items: { type: "object", properties: { name: { type: "string" }, writes: WRITES, reads: LIST } } },
+		open: { type: "string" },
+		sources: LIST,
+		user_confirmed: { type: "boolean" },
+		connection: CONNECTION,
+	},
+	required: ["name"],
+	additionalProperties: false,
+} as const;
+
+export function createFlowTool(deps: HeydbDeps): ToolDefinition<typeof FLOW_PARAMETERS, ToolDetails> {
+	return {
+		name: "heydb_flow",
+		label: "heydb flow",
+		description: "Save or get by name a process's database contract: entry, tables written and read.",
+		promptSnippet: "Save or get a process's tables",
+		promptGuidelines: [
+			"After following a process in code, save it with heydb_flow: exact tables, written columns, direct reads, stages, what you could not follow in open; the same name updates it.",
+		],
+		parameters: FLOW_PARAMETERS,
+		executionMode: "sequential",
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			return guarded(async () => {
+				const { name, entry, user_confirmed: userConfirmed, connection, writes, stages, ...rest } = params;
+				const saving = [entry, writes, stages, ...Object.values(rest)].some((value) => value !== undefined);
+				if (!saving) {
+					const opened = openConnection(ctx.cwd, connection);
+					return ok(renderFlow(getFlow(opened.root, opened.name, name)), opened.name);
+				}
+				const opened = openSnapshot(ctx.cwd, connection);
+				if (entry === undefined) throw new Error("entry is required to save a flow (file:function); with only name, heydb_flow returns the saved flow");
+				const author = await agentAuthor(deps, ctx.cwd);
+				const request = {
+					...rest,
+					name,
+					entry,
+					author,
+					...(writes !== undefined && { writes: writes.map(parseWrite) }),
+					...(stages !== undefined && {
+						stages: stages.map(({ name: stageName, writes: stageWrites, reads }) => ({
+							name: stageName ?? "",
+							...(stageWrites !== undefined && { writes: stageWrites.map(parseWrite) }),
+							...(reads !== undefined && { reads }),
+						})),
+					}),
+					...(userConfirmed !== undefined && { userConfirmed }),
+				};
+				const { flow, replaced } = saveFlow(opened.root, opened.name, request, deps.knowledge);
+				const saved =
+					replaced === null
+						? `Saved flow "${flow.name}" ${flow.id} (author: ${flow.author}).`
+						: `Updated flow "${flow.name}" ${flow.id} to revision ${flow.revision} (author: ${flow.author}). It replaced:\n${renderFlow(replaced)}`;
 				return ok(saved + (await sharingWarning(opened.root, opened.name)), opened.name);
 			});
 		},
@@ -380,6 +453,10 @@ async function guarded(work: () => Result | Promise<Result>): Promise<Result> {
 
 // The agent cannot run slash commands; it has to ask the user to.
 function forAgent(error: unknown): string {
+	if (error instanceof FlowConfirmationError) {
+		const { flow } = error;
+		return `Flow "${flow.name}" was written by ${flow.author}, a person. Show it to the user and ask before replacing it; if they agree, save again with user_confirmed: true.\n${renderFlow(flow)}`;
+	}
 	if (error instanceof ProjectError) {
 		switch (error.code) {
 			case "not_initialized":
