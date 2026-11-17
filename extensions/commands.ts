@@ -648,7 +648,7 @@ const LANGUAGE_RULE =
 	"keep table and column names as they are.";
 
 /**
- * How to learn one process (S9): the same rules for /heydb:learn-flow and for
+ * How to learn one process: the same rules for /heydb:learn-flow and for
  * the processes the user names after /heydb:learn-code. The turn limit is soft:
  * what was followed is saved, the rest goes to `open`.
  */

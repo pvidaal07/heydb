@@ -566,7 +566,7 @@ describe("findSchemaUsage", () => {
 		assert.deepEqual(usage.matches.map((match) => [match.name, match.described]), [["cst", "nothing"], ["tda", "comment"]]);
 	});
 
-	// L5: the Drizzle schema explained most tables but was never listed; half of what the agent read were migrations.
+	// Field case: the Drizzle schema explained most tables but was never listed; half of what the agent read were migrations.
 	describe("anchoring and file order", () => {
 		const shop = snapshot([table("orders"), table("invoices"), table("customers")]);
 		/** The repository names orders three times, more than the mapping file does. */
@@ -656,7 +656,7 @@ describe("findSchemaUsage", () => {
 			assert.deepEqual(usage.matches.find((match) => match.name === "orders")?.files, ["src/order_service.ts", "src/bold.ts", "src/latest.ts", "src/a.ts"]);
 		});
 
-		// L12: on a legacy project the scan listed customer variants of a program instead of the program.
+		// Field case: on a legacy project the scan listed customer variants of a program instead of the program.
 		test("a program with many customer variants: the base file comes first, near-copies with a tag or digits go last", async () => {
 			const body = (extra: string) =>
 				["FUNCTION Invoice()", "  LOCAL cSql", "  cSql := 'SELECT * FROM invoices'", "  oQry := Run(cSql)", "  Total(oQry)", "RETURN NIL", extra].join("\n");
