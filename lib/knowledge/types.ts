@@ -21,6 +21,53 @@ export interface Knowledge {
 	readonly formatVersion: 1;
 	readonly annotations: readonly Annotation[];
 	readonly relationships: readonly Relationship[];
+	/**
+	 * Absent when there are none, in memory and in the file, so a file without
+	 * flows stays exactly as it was before flows existed. Never in the project file.
+	 */
+	readonly flows?: readonly Flow[];
+}
+
+/**
+ * The database contract of one process ("issue an invoice"): where it starts
+ * in the code and which tables and columns it writes and reads. Fields, not
+ * free text, so every table can be checked against the snapshot and the flow
+ * found from any table it touches. Written in the team's language.
+ */
+export interface Flow {
+	readonly id: string;
+	/** The business words people use for it; unique, ignoring case and accents, with the synonyms of every flow. */
+	readonly name: string;
+	readonly synonyms: readonly string[];
+	/** Where it starts: "file:function". */
+	readonly entry: string;
+	readonly writes: readonly FlowWrite[];
+	/** Canonical table names read directly, not through helper routines. */
+	readonly reads: readonly string[];
+	/** Absent when the flow has a single stage. */
+	readonly stages?: readonly FlowStage[];
+	/** What could not be followed (a database function without code); absent when nothing. */
+	readonly open?: string;
+	/** The files it was read from. */
+	readonly sources: readonly string[];
+	readonly author: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	/** 1 when created; each save that replaces it adds 1. History is git. */
+	readonly revision: number;
+}
+
+export interface FlowWrite {
+	/** Canonical table name: database.schema.table. */
+	readonly table: string;
+	/** Columns written; empty when not known or the whole row (a delete). */
+	readonly columns: readonly string[];
+}
+
+export interface FlowStage {
+	readonly name: string;
+	readonly writes: readonly FlowWrite[];
+	readonly reads: readonly string[];
 }
 
 export interface Annotation {

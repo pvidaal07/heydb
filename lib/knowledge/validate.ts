@@ -1,6 +1,15 @@
 import { formatName, parseName } from "../model/names.ts";
 import { canonicalTable } from "./operations.ts";
-import { type Annotation, type Knowledge, PROJECT_TARGET, type Relationship, type RelationshipSide } from "./types.ts";
+import {
+	type Annotation,
+	type Flow,
+	type FlowStage,
+	type FlowWrite,
+	type Knowledge,
+	PROJECT_TARGET,
+	type Relationship,
+	type RelationshipSide,
+} from "./types.ts";
 
 // Knowledge files are committed and edited by people, merges and older
 // heydb versions, so every field is checked once, at the boundary, like
@@ -26,6 +35,7 @@ export function validateProjectKnowledge(data: unknown): Knowledge {
 		return target;
 	});
 	if (knowledge.relationships.length > 0) throw new Error("relationships must be empty: the project file holds only project notes");
+	if (knowledge.flows !== undefined) throw new Error("flows must be absent: the project file holds only project notes");
 	return knowledge;
 }
 
@@ -38,7 +48,65 @@ function validate(data: unknown, readTarget: TargetReader): Knowledge {
 	const relationships = list(root, "relationships", validateRelationship);
 	unique(annotations, "annotations");
 	unique(relationships, "relationships");
-	return { formatVersion: 1, annotations, relationships };
+	// Optional: files written before flows existed have none, and an empty list is left out.
+	const flows = root.flows === undefined ? [] : list(root, "flows", validateFlow);
+	unique(flows, "flows");
+	return { formatVersion: 1, annotations, relationships, ...(flows.length > 0 && { flows }) };
+}
+
+function validateFlow(record: Record<string, unknown>, path: string): Flow {
+	const revision = read(record, "revision", path);
+	if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) {
+		throw new Error(`${path}.revision must be an integer of at least 1`);
+	}
+	const stages = record.stages === undefined ? [] : list(record, "stages", (stage, stagePath): FlowStage => ({
+		name: string(stage, "name", `${path}.${stagePath}`),
+		writes: flowWrites(stage, `${path}.${stagePath}`),
+		reads: flowReads(stage, `${path}.${stagePath}`),
+	}), path);
+	const open = record.open;
+	if (open !== undefined && typeof open !== "string") throw new Error(`${path}.open must be a string`);
+	return {
+		id: id(record, path),
+		name: string(record, "name", path),
+		synonyms: strings(record, "synonyms", path),
+		entry: string(record, "entry", path),
+		writes: flowWrites(record, path),
+		reads: flowReads(record, path),
+		...(stages.length > 0 && { stages }),
+		...(open !== undefined && open !== "" && { open }),
+		sources: strings(record, "sources", path),
+		author: string(record, "author", path),
+		createdAt: string(record, "createdAt", path),
+		updatedAt: string(record, "updatedAt", path),
+		revision,
+	};
+}
+
+function flowWrites(record: Record<string, unknown>, path: string): FlowWrite[] {
+	return list(record, "writes", (item, itemPath) => ({
+		table: flowTable(string(item, "table", `${path}.${itemPath}`), `${path}.${itemPath}.table`),
+		columns: strings(item, "columns", `${path}.${itemPath}`),
+	}), path);
+}
+
+function flowReads(record: Record<string, unknown>, path: string): string[] {
+	return strings(record, "reads", path).map((name, index) => flowTable(name, `${path}.reads[${index}]`));
+}
+
+function flowTable(name: string, path: string): string {
+	const table = canonical(name, path, canonicalTable);
+	if (table === null) throw new Error(`${path} must be a table name (database.schema.table): got "${name}"`);
+	return table;
+}
+
+function strings(record: Record<string, unknown>, key: string, path: string): string[] {
+	const value = read(record, key, path);
+	if (!Array.isArray(value)) throw new Error(`${join(path, key)} must be a list`);
+	return value.map((item, index) => {
+		if (typeof item !== "string") throw new Error(`${join(path, key)}[${index}] must be a string`);
+		return item;
+	});
 }
 
 function validateAnnotation(record: Record<string, unknown>, path: string, readTarget: TargetReader): Annotation {
@@ -121,12 +189,18 @@ function unique(items: readonly { readonly id: string }[], path: string): void {
 	});
 }
 
-function list<T>(record: Record<string, unknown>, key: string, readItem: (item: Record<string, unknown>, path: string) => T): T[] {
-	const value = read(record, key, "");
-	if (!Array.isArray(value)) throw new Error(`${key} must be a list`);
+/** Item paths are relative to `parentPath` ("writes[0]"), so readers can nest them under it. */
+function list<T>(
+	record: Record<string, unknown>,
+	key: string,
+	readItem: (item: Record<string, unknown>, path: string) => T,
+	parentPath = "",
+): T[] {
+	const value = read(record, key, parentPath);
+	if (!Array.isArray(value)) throw new Error(`${join(parentPath, key)} must be a list`);
 	return value.map((item, index) => {
 		const path = `${key}[${index}]`;
-		return readItem(object(item, path), path);
+		return readItem(object(item, join(parentPath, path)), path);
 	});
 }
 

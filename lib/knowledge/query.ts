@@ -1,7 +1,8 @@
 import { formatName, parseName } from "../model/names.ts";
 import type { Snapshot } from "../model/snapshot.ts";
+import { flowTables } from "./flows.ts";
 import { canonicalTable } from "./operations.ts";
-import type { Annotation, Knowledge, Relationship, RelationshipSide } from "./types.ts";
+import type { Annotation, Flow, Knowledge, Relationship, RelationshipSide } from "./types.ts";
 
 // Pure reads over Knowledge. Nothing here changes or deletes an entry.
 
@@ -64,6 +65,11 @@ export function knowledgeForTable(knowledge: Knowledge, tableName: string): Tabl
 export function relationshipsInto(knowledge: Knowledge, connection: string, table: string): Relationship[] {
 	const into = (side: RelationshipSide) => side.connection === connection && side.table === table;
 	return knowledge.relationships.filter((item) => into(item.from) || into(item.to));
+}
+
+/** The flows that write or read `table` (canonical) at any stage, by name. */
+export function flowsForTable(knowledge: Knowledge, table: string): Flow[] {
+	return (knowledge.flows ?? []).filter((flow) => flowTables(flow).includes(table));
 }
 
 function isHere(side: RelationshipSide, table: string): boolean {

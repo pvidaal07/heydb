@@ -125,3 +125,55 @@ describe("validateProjectKnowledge", () => {
 		});
 	});
 });
+
+describe("validateKnowledge with flows", () => {
+	function flow(): any {
+		return {
+			id: "f1",
+			name: "emitir factura",
+			synonyms: ["facturar"],
+			entry: "src/billing.ts:issue",
+			writes: [{ table: "shop.shop.invoices", columns: ["total"] }],
+			reads: ["shop.shop.orders"],
+			stages: [{ name: "líneas", writes: [{ table: "shop.shop.invoice_lines", columns: [] }], reads: [] }],
+			open: "numbering in a database function",
+			sources: ["src/billing.ts"],
+			author: "ana (via agent)",
+			createdAt: "2026-11-06T10:00:00.000Z",
+			updatedAt: "2026-11-06T10:00:00.000Z",
+			revision: 2,
+		};
+	}
+
+	test("a file without flows, or with an empty list, has no flows", () => {
+		assert.equal(validateKnowledge(valid()).flows, undefined);
+		assert.equal(validateKnowledge({ ...valid(), flows: [] }).flows, undefined);
+	});
+
+	test("accepts flows and writes their tables in canonical form", () => {
+		const data = { ...valid(), flows: [flow()] };
+		data.flows[0].reads = ['"shop".shop.orders'];
+		assert.deepEqual(validateKnowledge(data).flows, [flow()]);
+	});
+
+	const broken: [string, (data: any) => void, string][] = [
+		["not a list", (data) => (data.flows = {}), "flows must be a list"],
+		["missing name", (data) => delete data.flows[0].name, "flows[0].name is missing"],
+		["bad revision", (data) => (data.flows[0].revision = 0), "flows[0].revision must be an integer of at least 1"],
+		["bad table", (data) => (data.flows[0].reads = ["shop.shop"]), 'flows[0].reads[0] must be a table name (database.schema.table): got "shop.shop"'],
+		["bad stage", (data) => (data.flows[0].stages[0].writes[0].columns = [1]), "flows[0].stages[0].writes[0].columns[0] must be a string"],
+		["duplicated id", (data) => data.flows.push(flow()), 'flows[1].id "f1" is already used by flows[0]'],
+	];
+	for (const [name, damage, message] of broken) {
+		test(`rejects a flow: ${name}`, () => {
+			const data = { ...valid(), flows: [flow()] };
+			damage(data);
+			assert.throws(() => validateKnowledge(data), { message });
+		});
+	}
+
+	test("the project file holds no flows", () => {
+		const data = { ...valid(), annotations: [], relationships: [], flows: [flow()] };
+		assert.throws(() => validateProjectKnowledge(data), { message: "flows must be absent: the project file holds only project notes" });
+	});
+});
