@@ -60,6 +60,7 @@ test("registers the human commands", () => {
 			"heydb:password",
 			"heydb:connections",
 			"heydb:learn-code",
+			"heydb:learn-flow",
 		],
 	);
 	for (const command of pi.commands.values()) assert.ok(command.description, "every command has a description");
@@ -954,7 +955,8 @@ const CODE = {
 const LEARN_TITLE = "Learn from this project's code?";
 const LEARN_BODY =
 	"Found 2 files that use 2 tables (e.g. customers, orders). " +
-	"heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.";
+	"heydb can ask the agent to read them, save one meaning line per table and then ask you which processes to learn. " +
+	"Estimate: 2 files, 1 KB to read. It will use tokens.";
 const LANGUAGE_RULE =
 	"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
 	"keep table and column names as they are.";
@@ -962,18 +964,30 @@ const LEARN_FILES =
 	"Tables, the ones that most need a note first, with the code that uses them and the docs that define them:\n" +
 	"- shop.customers (2 uses): src/Models/Customer.php, src/Repo/orders.sql\n" +
 	"- shop.orders (1 use): src/Repo/orders.sql\n\n";
+const FLOW_RULES =
+	"- Search heydb first: heydb_search with the process words, and heydb_flow if a flow for it already exists.\n" +
+	"- Find the entry point (file:function) and follow only that process; writes may go through the project's own database classes or SQL built in strings.\n" +
+	"- Cover every stage (for example, first from delivery notes, then issuing).\n" +
+	"- Save one flow with heydb_flow: name, synonyms, entry, writes (table and columns), direct reads, stages, open and sources, with exact table names.\n" +
+	"- Save a meaning line (heydb_annotate, at most about 120 characters) for at most 5 tables the process touches that have none.\n" +
+	"- Soft limit: about 20 turns per process. When you reach it, save what you have with the missing part in open and tell the user.";
 const LEARN_RULES =
 	"Rules:\n" +
 	`${LANGUAGE_RULE}\n` +
 	"- Go down the list. For each table read heydb_table and its files (models, repositories, queries, docs); skip what its comment and notes already say.\n" +
-	"- Save one heydb_annotate note per table: what it holds in business words, with the other words people use for it " +
+	"- Save one heydb_annotate meaning line per table, at most about 120 characters: what it holds in business words, with the other words people use for it " +
 	"(synonyms, both languages when the team mixes them), like \"Customer master (clientes, customers): one row per customer\". " +
-	"heydb_search finds tables by those words.\n" +
-	"- Add valid values, enums and magic numbers with their meaning, units or soft-delete flags only when the code states them. " +
-	"Record joins the code makes without a foreign key with heydb_relate.\n" +
+	"heydb_search finds tables by those words. Never columns, types or values heydb already shows.\n" +
+	"- Record joins the code makes without a foreign key with heydb_relate.\n" +
 	'- End every note with its source, like "(code: src/Models/Customer.php)".\n' +
 	"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.\n" +
-	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n" +
+	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user: save it as a note that starts with \"[?] \" and asks it, so the next run does not list that table first.\n" +
+	"- After the meaning lines, ask the user which processes to learn (like issuing an invoice or posting a payment), " +
+	"suggesting the listed tables that move money or state. If they name none or do not answer, stop after the meaning lines. " +
+	"Learn each process they name this way:\n" +
+	FLOW_RULES.replace(/^- /gm, "  - ") +
+	"\n" +
+	'- You may also offer "or let me find them myself": then learn at most 8 processes that change money or state, never plain CRUD.\n' +
 	"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.\n" +
 	"- Then tell the user, in one line, that the code has been fully covered: every table it uses or defines is in this list or already described.";
 const LEARN_MESSAGE =
@@ -1021,8 +1035,10 @@ describe("learning from code", () => {
 			truncated: false,
 		};
 		const message = learnMessage("erp", usage);
-		assert.ok(!message.includes("about 20"), message);
-		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n"), message);
+		assert.ok(!message.includes("about 20 notes"), message);
+		// Nothing maps a table here: no offer to find the processes alone.
+		assert.ok(!message.includes("or let me find them myself"), message);
+		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user: save it as a note that starts with \"[?] \" and asks it, so the next run does not list that table first.\n"), message);
 		assert.ok(
 			message.endsWith(
 				"\n- Then tell the user, in one line, that 12 more tables in the code still need a note and that running /heydb:learn-code erp again covers the next ones.",
@@ -1164,7 +1180,9 @@ describe("learning from code", () => {
 			{
 				kind: "confirm",
 				title: LEARN_TITLE,
-				hint: "Found 3 files that use 2 tables (e.g. orders, customers). heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.",
+				hint:
+					"Found 3 files that use 2 tables (e.g. orders, customers). heydb can ask the agent to read them, save one meaning line per table " +
+					"and then ask you which processes to learn. Estimate: 3 files, 1 KB to read. It will use tokens.",
 			},
 		]);
 		const content = String(pi.messages[0]?.message.content);
@@ -1217,7 +1235,8 @@ describe("learning from code", () => {
 						title: LEARN_TITLE,
 						hint:
 							`Found 2 files in ${folder} that use 2 tables (e.g. customers, orders). ` +
-							"heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.",
+							"heydb can ask the agent to read them, save one meaning line per table and then ask you which processes to learn. " +
+							"Estimate: 2 files, 1 KB to read. It will use tokens.",
 					},
 				],
 				args,
@@ -1271,6 +1290,113 @@ describe("learning from code", () => {
 			assert.equal(ctx.notifications[0]?.level, "error", args);
 			assert.match(ctx.notifications[0]?.message ?? "", new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), args);
 		}
+		assert.deepEqual(pi.messages, []);
+	});
+});
+
+describe("/heydb:learn-flow", () => {
+	const FLOW_TITLE = 'Learn the process "emitir factura"?';
+	const FLOW_BODY =
+		"The agent will search heydb, find where the process starts in the code and save it as a flow. " +
+		"Measured on a large legacy project: about 13 turns and USD 0.23 per process; it stops at about 20 turns and saves what it found. " +
+		"It will use tokens.";
+	const FLOW_MESSAGE =
+		'heydb: the user asked you to learn the process "emitir factura" of the database of connection "local" from this project\'s code.\n\n' +
+		"Rules:\n" +
+		`${LANGUAGE_RULE}\n` +
+		`${FLOW_RULES}\n` +
+		"- Never invent or guess: what the code does not make explicit goes to open or is a question for the user.\n" +
+		"- Finish with a short summary for the user: the flow you saved and what stays open.";
+
+	test("shows the estimate, asks first and, if accepted, starts one agent turn with the process rules", async () => {
+		const pi = loadHeydb({
+			introspect: async () => {
+				throw new Error("must not connect");
+			},
+		});
+		const root = project();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura" local', ctx);
+		assert.deepEqual(ctx.dialogs, [{ kind: "confirm", title: FLOW_TITLE, hint: FLOW_BODY }]);
+		assert.deepEqual(ctx.notifications, [{ message: 'Asked the agent to learn the process "emitir factura".', level: "info" }]);
+		assert.deepEqual(pi.messages, [
+			{
+				message: { customType: "heydb", content: FLOW_MESSAGE, display: true },
+				options: { triggerTurn: true, deliverAs: "followUp" },
+			},
+		]);
+	});
+
+	test("without quotes every word is the process, with the default connection", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", live);
+		await runCommand(pi, "heydb:learn-flow", " emitir   factura ", fakeContext(root, { answers: ["yes"] }));
+		assert.equal(pi.messages[0]?.message.content, FLOW_MESSAGE);
+	});
+
+	test("declined, sends nothing and says how to do it later", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["no"] });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura"', ctx);
+		assert.deepEqual(pi.messages, []);
+		assert.deepEqual(ctx.notifications, [
+			{ message: 'Nothing was sent. Run /heydb:learn-flow "emitir factura" local whenever you want the agent to learn it.', level: "info" },
+		]);
+	});
+
+	test("while the agent is working, the request waits for it to finish", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", live);
+		const ctx = fakeContext(root, { answers: ["yes"], idle: false });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura"', ctx);
+		assert.deepEqual(pi.messages[0]?.options, { triggerTurn: true, deliverAs: "followUp" });
+		assert.deepEqual(ctx.notifications, [
+			{ message: 'The agent is busy: it will learn the process "emitir factura" when it finishes its current work.', level: "info" },
+		]);
+	});
+
+	test("rejects other quoting or extra words instead of dropping the connection", async () => {
+		for (const args of ["'emitir factura' local", '"emitir factura" local extra', '"emitir factura', 'emitir "factura"']) {
+			const pi = loadHeydb();
+			const root = project();
+			saveSnapshot(root, "local", live);
+			const ctx = fakeContext(root, { answers: ["yes"] });
+			await runCommand(pi, "heydb:learn-flow", args, ctx);
+			assert.deepEqual(ctx.dialogs, [], args);
+			assert.deepEqual(ctx.notifications, [{ message: 'Usage: /heydb:learn-flow "<process words>" [connection]', level: "error" }], args);
+			assert.deepEqual(pi.messages, [], args);
+		}
+	});
+
+	test("says when the process is missing, there is no UI, no snapshot or an unknown connection", async () => {
+		const pi = loadHeydb();
+		const root = project();
+		saveSnapshot(root, "local", live);
+
+		const empty = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-flow", ' "" ', empty);
+		assert.deepEqual(empty.notifications, [{ message: 'Usage: /heydb:learn-flow "<process words>" [connection]', level: "error" }]);
+
+		const headless = fakeContext(root, { hasUI: false, answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura"', headless);
+		assert.deepEqual(headless.notifications, [
+			{ message: "/heydb:learn-flow needs an interactive session to ask before the agent spends tokens.", level: "error" },
+		]);
+
+		const unsynced = fakeContext(project(), { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura"', unsynced);
+		assert.equal(unsynced.notifications.length, 1);
+		assert.equal(unsynced.notifications[0]?.level, "error");
+
+		const unknown = fakeContext(root, { answers: ["yes"] });
+		await runCommand(pi, "heydb:learn-flow", '"emitir factura" prod', unknown);
+		assert.equal(unknown.notifications[0]?.level, "error");
+		assert.match(unknown.notifications[0]?.message ?? "", /prod/);
 		assert.deepEqual(pi.messages, []);
 	});
 });

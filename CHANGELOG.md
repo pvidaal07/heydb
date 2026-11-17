@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Flows: the database contract of one process (name, synonyms, entry `file:function`, tables and columns written, tables read directly, stages, what could not be followed, sources), saved and read with the new `heydb_flow` tool. Table names are checked against the snapshot; a flow with the same name or synonym is updated instead of duplicated, and one written by a person changes only when the user confirms. `heydb_search` finds a flow by its name, synonyms and every table it touches and shows it as one line; `heydb_table` lists the flows that touch the table. The fixed tool text sent every turn grows from 4,396 to 5,503 characters for `heydb_flow`. Older heydb versions drop flows when they rewrite the knowledge file.
+- `/heydb:learn-flow "<process words>" [connection]`: the agent follows one process in the code and saves it as a flow, after an estimate (about 13 turns and USD 0.23 per process, measured on a large legacy project); after about 20 turns it saves what it has and says what is missing.
+- `/heydb:learn-code` asks for one meaning line per table (at most about 120 characters, never what heydb already shows), then asks which processes to learn and learns each one named as a flow; on a project with ORM mappings it may offer to find at most 8 itself. Its confirmation shows how much would be read. Tables the code does not explain get a `[?] ` question note and are not listed first again.
+- The code scan anchors each table on the file that maps it (`pgTable("x")`, `@Entity("x")`, `@Entity({ name: "x" })`, Prisma `@@map`, `__tablename__`) and lists migrations, schema dumps, tests, seeds, copies set aside and customer variants of a program last.
+- Known gaps: `heydb_forget` cannot delete a flow yet, and flows are not checked for staleness.
+
 ## [2.0.0-beta.4]
 
 - `/heydb:sync` no longer hangs on a MySQL or MariaDB server shared by many databases: foreign keys and privileges are read without joining two `INFORMATION_SCHEMA` views, which made MariaDB open every table on the server (20,000 tables opened to read 3 databases). Snapshots are the same as before.
