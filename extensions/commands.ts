@@ -137,6 +137,15 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 				handler: (args, ctx) => learnCode(sendMessage, args, ctx),
 			},
 		],
+		[
+			"heydb:learn-flow",
+			{
+				description:
+					'Ask the agent to follow one process in the code and save it as a flow: /heydb:learn-flow "<process words>" [connection]',
+				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
+				handler: (args, ctx) => learnFlow(sendMessage, args, ctx),
+			},
+		],
 	];
 }
 
@@ -567,7 +576,8 @@ async function offerCode(
 	const confirmed = await ctx.ui.confirm(
 		"Learn from this project's code?",
 		`Found ${usage.truncated ? "at least " : ""}${count(usage.filesMatched, "file")}${where} that use ${count(usage.tablesMatched, "table")} ` +
-			`(e.g. ${examples.join(", ")}). heydb can ask the agent to read them and save notes about what the code shows. It will use tokens.`,
+			`(e.g. ${examples.join(", ")}). heydb can ask the agent to read them, save one meaning line per table and then ask you which processes to learn. ` +
+			`${estimateLine(usage)}It will use tokens.`,
 	);
 	if (!confirmed) {
 		const again = folder === undefined ? connection : `${connection} ${folder.typed}`;
@@ -609,19 +619,105 @@ export function learnMessage(connection: string, usage: SchemaUsage, folder?: Co
 		...usage.matches.map(tableLine),
 		"",
 		"Rules:",
-		"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
-			"keep table and column names as they are.",
+		LANGUAGE_RULE,
 		"- Go down the list. For each table read heydb_table and its files (models, repositories, queries, docs); skip what its comment and notes already say.",
-		"- Save one heydb_annotate note per table: what it holds in business words, with the other words people use for it " +
+		"- Save one heydb_annotate meaning line per table, at most about 120 characters: what it holds in business words, with the other words people use for it " +
 			'(synonyms, both languages when the team mixes them), like "Customer master (clientes, customers): one row per customer". ' +
-			"heydb_search finds tables by those words.",
-		"- Add valid values, enums and magic numbers with their meaning, units or soft-delete flags only when the code states them. " +
-			"Record joins the code makes without a foreign key with heydb_relate.",
+			"heydb_search finds tables by those words. Never columns, types or values heydb already shows.",
+		"- Record joins the code makes without a foreign key with heydb_relate.",
 		`- End every note with its source, like "(code: ${example})"${doc === undefined ? "" : ` or "(docs: ${doc})"`}.`,
 		"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.",
 		"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.",
+		"- After the meaning lines, ask the user which processes to learn (like issuing an invoice or posting a payment), " +
+			"suggesting the listed tables that move money or state. If they name none or do not answer, stop after the meaning lines. " +
+			"Learn each process they name this way:",
+		...FLOW_RULES.map((rule) => `  ${rule}`),
+		// Only mapped tables give an agent a thread to follow on its own; a legacy project needs the user's words.
+		...((usage.estimate?.anchored ?? 0) > 0
+			? ['- You may also offer "or let me find them myself": then learn at most 8 processes that change money or state, never plain CRUD.']
+			: []),
 		"- Finish with a short summary for the user: what you saved, and what remains unclear, as questions.",
 		nextRound(connection, usage.remaining, folder),
+	].join("\n");
+}
+
+/** First rule of every learning message: the rules are in English, the person may well write Spanish. */
+const LANGUAGE_RULE =
+	"- Answer the user and write the notes in the language the user uses in this conversation (Spanish if they write Spanish); " +
+	"keep table and column names as they are.";
+
+/**
+ * How to learn one process (S9): the same rules for /heydb:learn-flow and for
+ * the processes the user names after /heydb:learn-code. The turn limit is soft:
+ * what was followed is saved, the rest goes to `open`.
+ */
+const FLOW_RULES: readonly string[] = [
+	"- Search heydb first: heydb_search with the process words, and heydb_flow if a flow for it already exists.",
+	"- Find the entry point (file:function) and follow only that process; writes may go through the project's own database classes or SQL built in strings.",
+	"- Cover every stage (for example, first from delivery notes, then issuing).",
+	"- Save one flow with heydb_flow: name, synonyms, entry, writes (table and columns), direct reads, stages, open and sources, with exact table names.",
+	"- Save a meaning line (heydb_annotate, at most about 120 characters) for at most 5 tables the process touches that have none.",
+	"- Soft limit: about 20 turns per process. When you reach it, save what you have with the missing part in open and tell the user.",
+];
+
+/** `Estimate: 3 files, 120 KB to read. ` from the scan, or nothing when it has none. */
+function estimateLine(usage: SchemaUsage): string {
+	const estimate = usage.estimate;
+	if (estimate === undefined || estimate.files === 0) return "";
+	return `Estimate: ${count(estimate.files, "file")}, ${Math.max(1, Math.ceil(estimate.bytes / 1024)).toLocaleString("en-US")} KB to read. `;
+}
+
+/**
+ * /heydb:learn-flow "<process words>" [connection]: one process, chosen by the
+ * user. Quoted words are the process and a word after them the connection;
+ * without quotes every word is the process. It reads the stored snapshot only
+ * to check the connection is synced: the agent needs table names to validate.
+ */
+async function learnFlow(sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const quoted = /^\s*"([^"]*)"\s*(\S*)\s*$/.exec(args);
+	const process = (quoted === null ? argumentWords(args).join(" ") : (quoted[1] ?? "").trim().replace(/\s+/g, " "));
+	const name = quoted === null || quoted[2] === "" ? undefined : quoted[2];
+	if (process === "") return ctx.ui.notify('Usage: /heydb:learn-flow "<process words>" [connection]', "error");
+	try {
+		const opened = openSnapshot(ctx.cwd, name);
+		if (!ctx.hasUI) {
+			return ctx.ui.notify("/heydb:learn-flow needs an interactive session to ask before the agent spends tokens.", "error");
+		}
+		const confirmed = await ctx.ui.confirm(
+			`Learn the process "${process}"?`,
+			"The agent will search heydb, find where the process starts in the code and save it as a flow. " +
+				"Measured on a large legacy project: about 13 turns and USD 0.23 per process; it stops at about 20 turns and saves what it found. " +
+				"It will use tokens.",
+		);
+		if (!confirmed) {
+			return ctx.ui.notify(`Nothing was sent. Run /heydb:learn-flow "${process}" ${opened.name} whenever you want the agent to learn it.`, "info");
+		}
+		const idle = ctx.isIdle();
+		await sendMessage(
+			{ customType: "heydb", content: learnFlowMessage(opened.name, process), display: true },
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+		ctx.ui.notify(
+			idle
+				? `Asked the agent to learn the process "${process}".`
+				: `The agent is busy: it will learn the process "${process}" when it finishes its current work.`,
+			"info",
+		);
+	} catch (error) {
+		failed(ctx, error);
+	}
+}
+
+/** The agent's instructions for one process; the language rule first, as in learnMessage. */
+export function learnFlowMessage(connection: string, process: string): string {
+	return [
+		`heydb: the user asked you to learn the process "${process}" of the database of connection "${connection}" from this project's code.`,
+		"",
+		"Rules:",
+		LANGUAGE_RULE,
+		...FLOW_RULES,
+		"- Never invent or guess: what the code does not make explicit goes to open or is a question for the user.",
+		"- Finish with a short summary for the user: the flow you saved and what stays open.",
 	].join("\n");
 }
 
