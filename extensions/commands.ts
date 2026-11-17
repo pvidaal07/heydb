@@ -13,7 +13,7 @@ import { renderChanges, renderStatus } from "../lib/render/markdown.ts";
 import { toConnectionName } from "../lib/store/guards.ts";
 import { loadKnowledge } from "../lib/store/knowledge.ts";
 import { findProjectRoot } from "../lib/store/project.ts";
-import { type SchemaUsage, findSchemaUsage } from "../lib/usecases/code-scan.ts";
+import { QUESTION_PREFIX, type SchemaUsage, findSchemaUsage } from "../lib/usecases/code-scan.ts";
 import { initProject } from "../lib/usecases/init.ts";
 import {
 	type ConnectionSummary,
@@ -627,7 +627,8 @@ export function learnMessage(connection: string, usage: SchemaUsage, folder?: Co
 		"- Record joins the code makes without a foreign key with heydb_relate.",
 		`- End every note with its source, like "(code: ${example})"${doc === undefined ? "" : ` or "(docs: ${doc})"`}.`,
 		"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.",
-		"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.",
+		"- At most one note per table in the list: a table the code or docs do not explain is a question for the user: " +
+			`save it as a note that starts with "${QUESTION_PREFIX}" and asks it, so the next run does not list that table first.`,
 		"- After the meaning lines, ask the user which processes to learn (like issuing an invoice or posting a payment), " +
 			"suggesting the listed tables that move money or state. If they name none or do not answer, stop after the meaning lines. " +
 			"Learn each process they name this way:",

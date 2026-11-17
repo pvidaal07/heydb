@@ -981,7 +981,7 @@ const LEARN_RULES =
 	"- Record joins the code makes without a foreign key with heydb_relate.\n" +
 	'- End every note with its source, like "(code: src/Models/Customer.php)".\n' +
 	"- Never invent or guess: what the code or docs do not make explicit is not saved; ask the user about it.\n" +
-	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n" +
+	"- At most one note per table in the list: a table the code or docs do not explain is a question for the user: save it as a note that starts with \"[?] \" and asks it, so the next run does not list that table first.\n" +
 	"- After the meaning lines, ask the user which processes to learn (like issuing an invoice or posting a payment), " +
 	"suggesting the listed tables that move money or state. If they name none or do not answer, stop after the meaning lines. " +
 	"Learn each process they name this way:\n" +
@@ -1038,7 +1038,7 @@ describe("learning from code", () => {
 		assert.ok(!message.includes("about 20 notes"), message);
 		// Nothing maps a table here: no offer to find the processes alone.
 		assert.ok(!message.includes("or let me find them myself"), message);
-		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user, not a note.\n"), message);
+		assert.ok(message.includes("\n- At most one note per table in the list: a table the code or docs do not explain is a question for the user: save it as a note that starts with \"[?] \" and asks it, so the next run does not list that table first.\n"), message);
 		assert.ok(
 			message.endsWith(
 				"\n- Then tell the user, in one line, that 12 more tables in the code still need a note and that running /heydb:learn-code erp again covers the next ones.",
