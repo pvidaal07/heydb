@@ -132,7 +132,7 @@ export function createHeydbCommands(deps: HeydbDeps, sendMessage: SendMessage): 
 			"heydb:learn-code",
 			{
 				description:
-					"Offer the agent the code that uses the tables, to note what it shows: /heydb:learn-code [connection] [path] (path: another folder to read)",
+					"Offer the agent the code that uses the tables: one meaning line per table, then the processes you name: /heydb:learn-code [connection] [path] (path: another folder to read)",
 				getArgumentCompletions: (prefix) => completeConnection(deps, prefix),
 				handler: (args, ctx) => learnCode(sendMessage, args, ctx),
 			},
@@ -675,8 +675,11 @@ function estimateLine(usage: SchemaUsage): string {
  * to check the connection is synced: the agent needs table names to validate.
  */
 async function learnFlow(sendMessage: SendMessage, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	// Any quote must be the one pair around the process: other quoting or extra
+	// words would otherwise end up in the process name and drop the connection.
 	const quoted = /^\s*"([^"]*)"\s*(\S*)\s*$/.exec(args);
-	const process = (quoted === null ? argumentWords(args).join(" ") : (quoted[1] ?? "").trim().replace(/\s+/g, " "));
+	const unquoted = quoted === null && !/["']/.test(args);
+	const process = unquoted ? argumentWords(args).join(" ") : (quoted?.[1] ?? "").trim().replace(/\s+/g, " ");
 	const name = quoted === null || quoted[2] === "" ? undefined : quoted[2];
 	if (process === "") return ctx.ui.notify('Usage: /heydb:learn-flow "<process words>" [connection]', "error");
 	try {

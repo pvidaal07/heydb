@@ -1360,6 +1360,19 @@ describe("/heydb:learn-flow", () => {
 		]);
 	});
 
+	test("rejects other quoting or extra words instead of dropping the connection", async () => {
+		for (const args of ["'emitir factura' local", '"emitir factura" local extra', '"emitir factura', 'emitir "factura"']) {
+			const pi = loadHeydb();
+			const root = project();
+			saveSnapshot(root, "local", live);
+			const ctx = fakeContext(root, { answers: ["yes"] });
+			await runCommand(pi, "heydb:learn-flow", args, ctx);
+			assert.deepEqual(ctx.dialogs, [], args);
+			assert.deepEqual(ctx.notifications, [{ message: 'Usage: /heydb:learn-flow "<process words>" [connection]', level: "error" }], args);
+			assert.deepEqual(pi.messages, [], args);
+		}
+	});
+
 	test("says when the process is missing, there is no UI, no snapshot or an unknown connection", async () => {
 		const pi = loadHeydb();
 		const root = project();
